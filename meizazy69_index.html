@@ -2091,6 +2091,27 @@ async function getWalletRemainingTotal() {
   return { ok: true, total };
 }
 
+/* ---- 仕入れ確定(products登録)時の共通処理 ----
+   ウォレットからCNY合計をFIFO消化し、消化結果(JPY換算額)をproductsレコードに反映する。
+   ProductsPage(通常の仕入れ登録)・SalesPage(販売画面からの新規仕入対応)の両方から呼び出す共通ヘルパー。 */
+async function consumeAndFinalizeProductCost(productId, { purchaseCny, shippingCny, feeCny }) {
+  const results = { purchase_amount_jpy: 0, shipping_jpy: 0, fee_jpy: 0 };
+  const steps = [
+    { cny: purchaseCny, type: "商品仕入", key: "purchase_amount_jpy" },
+    { cny: shippingCny, type: "国際送料", key: "shipping_jpy" },
+    { cny: feeCny, type: "その他手数料", key: "fee_jpy" },
+  ];
+  for (const step of steps) {
+    if (!step.cny || step.cny <= 0) continue;
+    const res = await consumeWalletFIFO({ cnyAmount: step.cny, usageType: step.type, productId });
+    if (!res.ok) return { ok: false, message: res.message };
+    results[step.key] = res.consumptions.reduce((sum, c) => sum + (Number(c.consumed_jpy) || 0), 0);
+  }
+  const { error } = await supabase.from("products").update(results).eq("id", productId);
+  if (error) return { ok: false, message: "コストのJPY確定処理に失敗しました" };
+  return { ok: true };
+}
+
 /* ---- 仕入れロット 登録モーダル ---- */
 function BatchFormModal({ onClose, onSave }) {
   const [purchaseDate, setPurchaseDate] = useState(todayISO());
@@ -2708,25 +2729,8 @@ function ProductsPage() {
     return products.filter((p) => p.status === filterStatus);
   }, [products, filterStatus]);
 
-  /* 仕入れ確定(products登録)時に、ウォレットからCNY合計を消化し、
-     消化結果(JPY換算額)をproductsレコードに反映する */
-  const consumeAndFinalize = async (productId, { purchaseCny, shippingCny, feeCny }) => {
-    const results = { purchase_amount_jpy: 0, shipping_jpy: 0, fee_jpy: 0 };
-    const steps = [
-      { cny: purchaseCny, type: "商品仕入", key: "purchase_amount_jpy" },
-      { cny: shippingCny, type: "国際送料", key: "shipping_jpy" },
-      { cny: feeCny, type: "その他手数料", key: "fee_jpy" },
-    ];
-    for (const step of steps) {
-      if (!step.cny || step.cny <= 0) continue;
-      const res = await consumeWalletFIFO({ cnyAmount: step.cny, usageType: step.type, productId });
-      if (!res.ok) return { ok: false, message: res.message };
-      results[step.key] = res.consumptions.reduce((sum, c) => sum + (Number(c.consumed_jpy) || 0), 0);
-    }
-    const { error } = await supabase.from("products").update(results).eq("id", productId);
-    if (error) return { ok: false, message: "コストのJPY確定処理に失敗しました" };
-    return { ok: true };
-  };
+  /* 仕入れ確定(products登録)時のウォレット消化処理は共通ヘルパーに委譲 */
+  const consumeAndFinalize = consumeAndFinalizeProductCost;
 
   const handleSaveProduct = async (form) => {
     if (form.id) {
@@ -2923,6 +2927,765 @@ function ProductsPage() {
 }
 
 /* ============================================================
+   販売登録 + 領収書発行(sales / sale_items / receipts)
+
+   このセッションで実装する範囲:
+     ・既存の未販売商品(サンプル・在庫)を選択して販売登録
+     ・複数商品まとめて1回の取引として登録(sale_items)
+     ・消費税端数処理(1領収書につき1回、切り捨て)を反映した領収書自動作成
+     ・販売一覧・削除(削除時は商品を「未販売」へ自動復元)
+
+   次セッション以降で対応予定(積み残し):
+     ・販売画面からの「新規仕入対応」(その場でproducts新規登録+ウォレット消化)
+     ・領収書のPDF/印刷プレビュー画面
+     ・ホストクラブ詳細ページの「取引履歴」をこのsalesデータで実データ化
+     ・ダッシュボードの売上・利益連携
+   ============================================================ */
+
+const ISSUER_INFO_DEFAULT = "IMPORT PRIME合同会社\n（住所・登録番号などは実際の会社情報に差し替えてください）";
+
+/* ---- 消費税端数処理(インボイス制度準拠: 1領収書につき1回、切り捨て) ---- */
+function calcReceiptTotals(subtotalJpy) {
+  const subtotal = Math.round(Number(subtotalJpy) || 0);
+  const tax = Math.floor(subtotal * 0.1);
+  const total = subtotal + tax;
+  return { subtotal, tax, total };
+}
+
+/* ---- 商品の原価合計(仕入代+送料+手数料、JPY確定額) ---- */
+function productCostJpy(p) {
+  return (Number(p.purchase_amount_jpy) || 0) + (Number(p.shipping_jpy) || 0) + (Number(p.fee_jpy) || 0);
+}
+
+/* ---- 商品の表示ラベル(「商品名 - サイズ」形式、sale_items設計に準拠) ---- */
+function productLabel(p) {
+  let label = p.product_name || "(名称未設定)";
+  if (p.size) label += ` - ${p.size}`;
+  if (p.product_code) label += `(No.${p.product_code})`;
+  return label;
+}
+
+/* ---- 領収書番号の自動採番("2026-0001"形式、年度でリセット) ---- */
+async function generateReceiptNumber(dateStr) {
+  const year = (dateStr || todayISO()).slice(0, 4);
+  const { data, error } = await supabase
+    .from("receipts")
+    .select("receipt_number")
+    .ilike("receipt_number", `${year}-%`);
+  if (error || !data) return `${year}-0001`;
+  let maxNum = 0;
+  const re = new RegExp(`^${year}-(\\d+)$`);
+  data.forEach((r) => {
+    const m = re.exec(r.receipt_number || "");
+    if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
+  });
+  return `${year}-${String(maxNum + 1).padStart(4, "0")}`;
+}
+
+/* ---- 販売登録モーダル ----
+   ・ホストクラブ/ホスト選択 → 未販売商品を検索して複数点まとめて追加
+   ・単価はselling_price_jpyを初期値に編集可(値引き等に対応)
+   ・quantityは常に1(products1登録=1点のため、複数点は複数sale_item行で表現) */
+/* ============================================================
+   販売画面からの「新規仕入対応」フロー
+   ・訪問時に持って行ったサンプルが気に入られたが在庫がない場合など、
+     販売登録のその場で新しい商品(type: "stock")を仕入れ確定させ、
+     即座に販売明細へ追加するためのモーダル。
+   ・参考サンプル(既存のsample商品)を検索して選ぶと、
+     product_url / product_name / category / size_options / 参考販売価格を自動引き継ぎ。
+     サイズ・仕入原価(CNY)は必ずこの1点ごとに都度入力する。
+   ・登録と同時にウォレット(agent_charges)からFIFO消化(consumeAndFinalizeProductCost)。
+   ============================================================ */
+function NewPurchaseModal({ batches, onClose, onCreated }) {
+  const [referenceSearch, setReferenceSearch] = useState("");
+  const [references, setReferences] = useState(null); // null = 読み込み中
+  const [selectedRefId, setSelectedRefId] = useState(null);
+
+  const [productImageUrl, setProductImageUrl] = useState("");
+  const [productUrl, setProductUrl] = useState("");
+  const [productCode, setProductCode] = useState("");
+  const [productName, setProductName] = useState("");
+  const [category, setCategory] = useState("");
+  const [sizeOptionsText, setSizeOptionsText] = useState("");
+  const [size, setSize] = useState("");
+  const [sellingPriceJpy, setSellingPriceJpy] = useState("");
+  const [purchaseDate, setPurchaseDate] = useState(todayISO());
+  const [batchId, setBatchId] = useState("");
+  const [purchaseAmountCny, setPurchaseAmountCny] = useState("");
+  const [shippingCny, setShippingCny] = useState("");
+  const [feeCny, setFeeCny] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  // 参考サンプル候補(type: "sample")を取得。ステータスは問わない(あくまで名称・URL等の参照元のため)
+  useEffect(() => {
+    let cancelled = false;
+    supabase
+      .from("products")
+      .select("id,product_name,category,product_url,product_image_url,product_code,size_options,selling_price_jpy")
+      .eq("type", "sample")
+      .order("product_name")
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        setReferences(error ? [] : (data || []));
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // 新規商品(在庫)の商品番号を自動採番("P-0001"形式、手動編集可)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const code = await generateNextProductCode("stock");
+      if (!cancelled) setProductCode(code);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const referenceCandidates = useMemo(() => {
+    if (!references) return [];
+    const q = referenceSearch.trim().toLowerCase();
+    return references.filter((p) => {
+      if (!q) return true;
+      return (p.product_name || "").toLowerCase().includes(q) || (p.product_code || "").toLowerCase().includes(q);
+    }).slice(0, 20);
+  }, [references, referenceSearch]);
+
+  const sizeOptionsList = useMemo(() => {
+    return sizeOptionsText.split(/[\/,、]/).map((s) => s.trim()).filter(Boolean);
+  }, [sizeOptionsText]);
+
+  const handleSelectReference = (ref) => {
+    setSelectedRefId(ref.id);
+    setProductImageUrl(ref.product_image_url || "");
+    setProductUrl(ref.product_url || "");
+    setProductName(ref.product_name || "");
+    setCategory(ref.category || "");
+    setSizeOptionsText(ref.size_options || "");
+    setSellingPriceJpy(ref.selling_price_jpy != null ? String(ref.selling_price_jpy) : "");
+    setSize(""); // サイズはこの1点用に都度選び直す
+  };
+
+  const clearReference = () => {
+    setSelectedRefId(null);
+    setProductImageUrl("");
+    setProductUrl("");
+    setProductName("");
+    setCategory("");
+    setSizeOptionsText("");
+    setSellingPriceJpy("");
+    setSize("");
+  };
+
+  const handleBatchChange = (id) => {
+    setBatchId(id);
+    if (!id) return;
+    const b = batches.find((x) => x.id === id);
+    if (b) {
+      setShippingCny(String(Number(b.per_item_shipping_cny).toFixed(2)));
+      setFeeCny(String(Number(b.per_item_fee_cny).toFixed(2)));
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    if (!productName.trim()) { setError("商品名を入力してください"); return; }
+    if (!size.trim()) { setError("この1点の実サイズを入力してください"); return; }
+    if (!purchaseDate) { setError("仕入れ日を入力してください"); return; }
+
+    const purchaseCny = parseFloat(purchaseAmountCny) || 0;
+    const shippingCnyVal = parseFloat(shippingCny) || 0;
+    const feeCnyVal = parseFloat(feeCny) || 0;
+    const totalNeeded = purchaseCny + shippingCnyVal + feeCnyVal;
+
+    setSaving(true);
+
+    // 事前にウォレット残高を確認(部分消化を避けるため、ProductsPageの新規仕入登録と同じ方針)
+    const balance = await getWalletRemainingTotal();
+    if (!balance.ok) { setError("ウォレット残高の確認に失敗しました"); setSaving(false); return; }
+    if (balance.total < totalNeeded) {
+      setError(`ウォレット残高が不足しています(必要額: ${totalNeeded.toFixed(2)} CNY / 残高: ${balance.total.toFixed(2)} CNY)。先にチャージを追加してください。`);
+      setSaving(false);
+      return;
+    }
+
+    const { data: inserted, error: insertErr } = await supabase.from("products").insert({
+      type: "stock",
+      status: "未販売",
+      product_image_url: productImageUrl || null,
+      product_url: productUrl.trim() || null,
+      product_code: productCode.trim() || null,
+      product_name: productName.trim(),
+      category: category.trim() || null,
+      size: size.trim(),
+      size_options: sizeOptionsText.trim() || null,
+      selling_price_jpy: sellingPriceJpy ? parseFloat(sellingPriceJpy) : null,
+      purchase_date: purchaseDate,
+      batch_id: batchId || null,
+      purchase_amount_cny: purchaseCny,
+      shipping_cny: shippingCnyVal,
+      fee_cny: feeCnyVal,
+    }).select("id").single();
+
+    if (insertErr || !inserted) { setError("商品の登録に失敗しました"); setSaving(false); return; }
+
+    const consumeRes = await consumeAndFinalizeProductCost(inserted.id, {
+      purchaseCny, shippingCny: shippingCnyVal, feeCny: feeCnyVal,
+    });
+    if (!consumeRes.ok) {
+      setSaving(false);
+      alert(`商品は登録されましたが、ウォレット消化処理でエラーが発生しました: ${consumeRes.message}\nチャージ台帳・商品情報をご確認ください。`);
+      // 登録済み商品情報を渡して明細追加までは行う(在庫としては存在するため)
+    }
+
+    // 確定後の商品情報(原価JPY確定額込み)を取得し、そのまま販売明細へ追加する
+    const { data: finalProduct, error: fetchErr } = await supabase
+      .from("products")
+      .select("id,product_name,category,size,product_code,selling_price_jpy,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .eq("id", inserted.id)
+      .single();
+
+    setSaving(false);
+    if (fetchErr || !finalProduct) { setError("商品は登録されましたが、明細への反映に失敗しました。商品一覧からご確認ください。"); return; }
+
+    onCreated(finalProduct);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <form
+        onSubmit={handleSubmit}
+        className="w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[92vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <h2 className="font-display text-lg">新規仕入対応</h2>
+        <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+          在庫のない商品をその場で仕入れ確定し、このままこの販売の明細に追加します(ウォレットからFIFOで即時消化されます)。
+        </p>
+
+        {/* 参考サンプル検索 */}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>参考サンプルを選ぶ(商品名・URL・カテゴリを自動引き継ぎ)</label>
+          <input
+            type="text" value={referenceSearch} onChange={(e) => setReferenceSearch(e.target.value)}
+            placeholder="サンプルの商品名・商品番号で検索"
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent mb-2"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+          {references === null ? (
+            <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+          ) : referenceCandidates.length === 0 ? (
+            <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>該当するサンプルがありません</p>
+          ) : (
+            <div className="rounded-lg max-h-32 overflow-y-auto divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+              {referenceCandidates.map((p) => (
+                <button
+                  type="button" key={p.id} onClick={() => handleSelectReference(p)}
+                  className="w-full text-left px-3 py-2 text-xs flex items-center justify-between gap-2 hover:bg-white/5"
+                  style={{ color: p.id === selectedRefId ? "var(--mz-gold-soft)" : "var(--mz-ink)" }}
+                >
+                  <span className="truncate">{productLabel(p)}</span>
+                  {p.id === selectedRefId && <span className="shrink-0 text-[11px]">選択中</span>}
+                </button>
+              ))}
+            </div>
+          )}
+          {selectedRefId && (
+            <button type="button" onClick={clearReference} className="text-[11px] mt-1" style={{ color: "var(--mz-ink-muted)" }}>
+              参照を解除して手入力に戻す
+            </button>
+          )}
+        </div>
+
+        <div className="pt-1" style={{ borderTop: "1px solid var(--mz-border)" }} />
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品名</label>
+          <input type="text" value={productName} onChange={(e) => setProductName(e.target.value)} required
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>カテゴリ</label>
+            <input type="text" value={category} onChange={(e) => setCategory(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品番号</label>
+            <input type="text" value={productCode} onChange={(e) => setProductCode(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>この1点の実サイズ(必須)</label>
+          {sizeOptionsList.length > 0 ? (
+            <select value={size} onChange={(e) => setSize(e.target.value)} required
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+              <option value="">選択してください</option>
+              {sizeOptionsList.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          ) : (
+            <input type="text" value={size} onChange={(e) => setSize(e.target.value)} placeholder="M / L / 42 / フリー" required
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          )}
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>淘宝商品ページURL(任意)</label>
+          <input type="text" value={productUrl} onChange={(e) => setProductUrl(e.target.value)}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+        </div>
+
+        <div className="pt-1" style={{ borderTop: "1px solid var(--mz-border)" }} />
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入れ日</label>
+            <input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入れロット(任意)</label>
+            <select value={batchId} onChange={(e) => handleBatchChange(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+              <option value="">なし(単独仕入れ)</option>
+              {batches.map((b) => <option key={b.id} value={b.id}>{b.purchase_date}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入代(CNY)</label>
+            <input type="number" min="0" step="0.01" value={purchaseAmountCny} onChange={(e) => setPurchaseAmountCny(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>国際送料(CNY)</label>
+            <input type="number" min="0" step="0.01" value={shippingCny} onChange={(e) => setShippingCny(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>その他手数料(CNY)</label>
+            <input type="number" min="0" step="0.01" value={feeCny} onChange={(e) => setFeeCny(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>参考販売価格(JPY・任意)</label>
+          <input type="number" min="0" step="1" value={sellingPriceJpy} onChange={(e) => setSellingPriceJpy(e.target.value)}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+        </div>
+
+        {error && (
+          <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>
+        )}
+
+        <div className="flex gap-2 pt-1">
+          <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>キャンセル</button>
+          <button type="submit" disabled={saving} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+            {saving ? "処理中..." : "仕入れ確定して明細に追加"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function SaleFormModal({ clubs, batches, onClose, onSave }) {
+  const [transactionDate, setTransactionDate] = useState(todayISO());
+  const [hostClubId, setHostClubId] = useState("");
+  const [hosts, setHosts] = useState([]);
+  const [hostId, setHostId] = useState("");
+  const [unsoldProducts, setUnsoldProducts] = useState(null); // null = 読み込み中
+  const [searchText, setSearchText] = useState("");
+  const [items, setItems] = useState([]); // [{ productId, product, unitPrice }]
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [newPurchaseOpen, setNewPurchaseOpen] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    supabase
+      .from("products")
+      .select("id,product_name,category,size,product_code,selling_price_jpy,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .eq("status", "未販売")
+      .order("product_name")
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        setUnsoldProducts(error ? [] : (data || []));
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    setHostId("");
+    if (!hostClubId) { setHosts([]); return; }
+    let cancelled = false;
+    supabase.from("hosts").select("id,name").eq("host_club_id", hostClubId).order("name").then(({ data, error }) => {
+      if (cancelled) return;
+      setHosts(error ? [] : (data || []));
+    });
+    return () => { cancelled = true; };
+  }, [hostClubId]);
+
+  const selectedIds = useMemo(() => new Set(items.map((it) => it.productId)), [items]);
+
+  const candidates = useMemo(() => {
+    if (!unsoldProducts) return [];
+    return unsoldProducts.filter((p) => {
+      if (selectedIds.has(p.id)) return false;
+      if (!searchText.trim()) return true;
+      const q = searchText.trim().toLowerCase();
+      return (p.product_name || "").toLowerCase().includes(q) || (p.product_code || "").toLowerCase().includes(q);
+    }).slice(0, 20);
+  }, [unsoldProducts, selectedIds, searchText]);
+
+  const addItem = (product) => {
+    setItems((prev) => [...prev, {
+      productId: product.id,
+      product,
+      unitPrice: product.selling_price_jpy != null ? String(product.selling_price_jpy) : "",
+    }]);
+    setSearchText("");
+  };
+
+  // 新規仕入対応モーダルで商品が仕入れ確定された時: そのままこの販売の明細に追加する
+  const handleProductCreated = (product) => {
+    addItem(product);
+    setNewPurchaseOpen(false);
+  };
+  const removeItem = (productId) => setItems((prev) => prev.filter((it) => it.productId !== productId));
+  const updateUnitPrice = (productId, value) => setItems((prev) => prev.map((it) => (it.productId === productId ? { ...it, unitPrice: value } : it)));
+
+  const subtotalTotal = items.reduce((sum, it) => sum + (parseFloat(it.unitPrice) || 0), 0);
+  const totals = calcReceiptTotals(subtotalTotal);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    if (!hostClubId) { setError("ホストクラブを選択してください"); return; }
+    if (items.length === 0) { setError("商品を1点以上追加してください"); return; }
+    if (items.some((it) => it.unitPrice === "" || isNaN(parseFloat(it.unitPrice)) || parseFloat(it.unitPrice) < 0)) {
+      setError("単価をすべて正しく入力してください");
+      return;
+    }
+
+    const club = clubs.find((c) => c.id === hostClubId);
+    const host = hosts.find((h) => h.id === hostId);
+    const recipientName = host ? host.name : (club ? club.name : "");
+
+    setSaving(true);
+    const ok = await onSave({
+      transaction_date: transactionDate,
+      host_club_id: hostClubId,
+      host_id: hostId || null,
+      recipient_name: recipientName,
+      items: items.map((it) => ({
+        product_id: it.productId,
+        unit_price_jpy: parseFloat(it.unitPrice),
+        cost_jpy: productCostJpy(it.product),
+      })),
+    });
+    setSaving(false);
+    if (!ok) return; // onSave側でエラー表示済み。モーダルは開いたままにして再試行可能にする
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <form
+        onSubmit={handleSubmit}
+        className="w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[92vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <h2 className="font-display text-lg">販売登録</h2>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>取引日</label>
+            <input type="date" value={transactionDate} onChange={(e) => setTransactionDate(e.target.value)} required
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>ホストクラブ</label>
+            <select value={hostClubId} onChange={(e) => setHostClubId(e.target.value)} required
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+              <option value="">選択してください</option>
+              {clubs.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>ホスト(任意)</label>
+          <select value={hostId} onChange={(e) => setHostId(e.target.value)} disabled={!hostClubId}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent disabled:opacity-50" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+            <option value="">指定なし(クラブ宛)</option>
+            {hosts.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+          </select>
+        </div>
+
+        <div className="pt-1" style={{ borderTop: "1px solid var(--mz-border)" }} />
+
+        {/* 商品検索・追加 */}
+        <div>
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <label className="block text-xs" style={{ color: "var(--mz-ink-muted)" }}>商品を追加(未販売のサンプル・在庫から検索)</label>
+            <button
+              type="button" onClick={() => setNewPurchaseOpen(true)}
+              className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap shrink-0"
+              style={{ border: "1px solid var(--mz-gold)", color: "var(--mz-gold-soft)" }}
+            >
+              + 在庫がない場合(新規仕入対応)
+            </button>
+          </div>
+          <input
+            type="text" value={searchText} onChange={(e) => setSearchText(e.target.value)}
+            placeholder="商品名・商品番号で検索"
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent mb-2"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+          {unsoldProducts === null ? (
+            <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+          ) : candidates.length === 0 ? (
+            <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>該当する未販売商品がありません</p>
+          ) : (
+            <div className="rounded-lg max-h-40 overflow-y-auto divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+              {candidates.map((p) => (
+                <button
+                  type="button" key={p.id} onClick={() => addItem(p)}
+                  className="w-full text-left px-3 py-2 text-xs flex items-center justify-between gap-2 hover:bg-white/5"
+                  style={{ color: "var(--mz-ink)" }}
+                >
+                  <span className="truncate">{productLabel(p)}</span>
+                  {p.selling_price_jpy != null && (
+                    <span className="shrink-0" style={{ color: "var(--mz-ink-muted)" }}>{fmtJPY(p.selling_price_jpy)}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 選択済み明細 */}
+        <div className="space-y-2">
+          {items.length === 0 ? (
+            <p className="text-xs text-center py-4" style={{ color: "var(--mz-ink-muted)" }}>商品が追加されていません</p>
+          ) : (
+            items.map((it) => (
+              <div key={it.productId} className="rounded-lg p-3 flex items-center gap-2" style={{ background: "var(--mz-surface-hover)" }}>
+                <span className="flex-1 min-w-0 text-xs truncate">{productLabel(it.product)}</span>
+                <input
+                  type="number" min="0" step="1" value={it.unitPrice}
+                  onChange={(e) => updateUnitPrice(it.productId, e.target.value)}
+                  className="w-24 rounded-lg px-2 py-1.5 text-xs bg-transparent shrink-0"
+                  style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                />
+                <button type="button" onClick={() => removeItem(it.productId)} className="text-xs shrink-0" style={{ color: "#f2b8bd" }}>削除</button>
+              </div>
+            ))
+          )}
+        </div>
+
+        {items.length > 0 && (
+          <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: "var(--mz-surface-hover)" }}>
+            <div className="flex justify-between"><span style={{ color: "var(--mz-ink-muted)" }}>小計(税抜)</span><span>{fmtJPY(totals.subtotal)}</span></div>
+            <div className="flex justify-between"><span style={{ color: "var(--mz-ink-muted)" }}>消費税(10%・切り捨て)</span><span>{fmtJPY(totals.tax)}</span></div>
+            <div className="flex justify-between font-medium"><span>合計(税込)</span><span style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(totals.total)}</span></div>
+          </div>
+        )}
+
+        {error && (
+          <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>
+        )}
+
+        <div className="flex gap-2 pt-1">
+          <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>キャンセル</button>
+          <button type="submit" disabled={saving} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+            {saving ? "登録中..." : "販売登録+領収書発行"}
+          </button>
+        </div>
+      </form>
+
+      {newPurchaseOpen && (
+        <NewPurchaseModal
+          batches={batches}
+          onClose={() => setNewPurchaseOpen(false)}
+          onCreated={handleProductCreated}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ---- 販売カード(一覧) ---- */
+function SaleCard({ sale, onDelete }) {
+  const clubName = sale.host_clubs ? sale.host_clubs.name : "-";
+  const hostName = sale.hosts ? sale.hosts.name : null;
+  const receiptNumber = sale.receipts ? sale.receipts.receipt_number : null;
+  return (
+    <div className="rounded-xl p-4 flex items-center justify-between gap-3 flex-wrap" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+      <div className="min-w-0">
+        <div className="flex items-center gap-2 flex-wrap mb-1">
+          <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{sale.transaction_date}</span>
+          {receiptNumber && <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-gold-soft)" }}>No.{receiptNumber}</span>}
+        </div>
+        <p className="text-sm font-medium truncate">{clubName}{hostName ? ` / ${hostName}` : ""}</p>
+      </div>
+      <div className="flex items-center gap-3 shrink-0">
+        <span className="font-display text-base" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(sale.total_amount_jpy)}</span>
+        <button onClick={() => onDelete(sale)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}>削除</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---- 販売登録ページ本体 ---- */
+function SalesPage() {
+  const [sales, setSales] = useState(null); // null = 読み込み中
+  const [clubs, setClubs] = useState([]);
+  const [batches, setBatches] = useState([]);
+  const [error, setError] = useState(null);
+  const [modalOpen, setModalOpen] = useState(false);
+
+  const loadAll = useCallback(async () => {
+    setError(null);
+    const [salesRes, clubsRes, batchesRes] = await Promise.all([
+      supabase
+        .from("sales")
+        .select("id,transaction_date,host_club_id,host_id,total_amount_jpy,host_clubs(name),hosts(name),receipts(receipt_number)")
+        .order("transaction_date", { ascending: false }),
+      supabase.from("host_clubs").select("id,name").order("name"),
+      supabase.from("purchase_batches").select("id,purchase_date,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
+    ]);
+    if (salesRes.error) { setError("販売記録の取得に失敗しました"); setSales([]); return; }
+    setSales(salesRes.data || []);
+    setClubs(clubsRes.data || []);
+    setBatches(batchesRes.data || []);
+  }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  /* 販売登録本体: sales → sale_items → products状態更新 → receipts(採番込み) → sales.receipt_id を順に処理。
+     Supabase(PostgREST)からはクライアント側で複数テーブルにまたがるトランザクションを
+     張れないため、途中失敗時はアラートで状況を伝え、手動確認を促す形にしている。 */
+  const handleSaveSale = async (form) => {
+    const subtotalRaw = form.items.reduce((sum, it) => sum + it.unit_price_jpy, 0);
+    const totals = calcReceiptTotals(subtotalRaw);
+
+    const { data: saleRow, error: saleErr } = await supabase
+      .from("sales")
+      .insert({
+        transaction_date: form.transaction_date,
+        host_club_id: form.host_club_id,
+        host_id: form.host_id,
+        total_amount_jpy: totals.total,
+      })
+      .select("id")
+      .single();
+    if (saleErr || !saleRow) { alert("販売記録の登録に失敗しました"); return false; }
+    const saleId = saleRow.id;
+
+    const itemRows = form.items.map((it) => ({
+      sale_id: saleId,
+      product_id: it.product_id,
+      fulfillment_type: "サンプル現物販売",
+      quantity: 1,
+      unit_price_jpy: it.unit_price_jpy,
+      subtotal_jpy: it.unit_price_jpy,
+      profit_jpy: it.unit_price_jpy - it.cost_jpy,
+    }));
+    const { error: itemsErr } = await supabase.from("sale_items").insert(itemRows);
+    if (itemsErr) {
+      alert("販売明細の登録に失敗しました(sales行は作成済みです。手動でご確認・削除をお願いします)");
+      return false;
+    }
+
+    const productIds = form.items.map((it) => it.product_id);
+    const { error: statusErr } = await supabase.from("products").update({ status: "販売済み" }).in("id", productIds);
+    if (statusErr) {
+      alert("商品ステータスの更新に一部失敗した可能性があります。商品一覧をご確認ください。");
+    }
+
+    const receiptNumber = await generateReceiptNumber(form.transaction_date);
+    const { data: receiptRow, error: receiptErr } = await supabase
+      .from("receipts")
+      .insert({
+        receipt_number: receiptNumber,
+        sale_id: saleId,
+        issue_date: form.transaction_date,
+        recipient_name: form.recipient_name,
+        memo: "衣装代",
+        subtotal_jpy: totals.subtotal,
+        tax_jpy: totals.tax,
+        total_jpy: totals.total,
+        issuer_info: ISSUER_INFO_DEFAULT,
+      })
+      .select("id")
+      .single();
+    if (receiptErr || !receiptRow) {
+      alert("領収書の作成に失敗しました(販売記録・明細は登録済みです)");
+      setModalOpen(false);
+      loadAll();
+      return true;
+    }
+
+    await supabase.from("sales").update({ receipt_id: receiptRow.id }).eq("id", saleId);
+
+    setModalOpen(false);
+    loadAll();
+    return true;
+  };
+
+  /* 削除: sale_items・receiptsはsales削除時にDB側のON DELETE CASCADEで自動削除される想定
+     (SQL側で設定)。削除前に対象商品IDを取得しておき、削除後に「未販売」へ戻す。 */
+  const handleDeleteSale = async (sale) => {
+    if (!window.confirm("この販売記録を削除しますか?対象の商品は「未販売」に戻り、領収書も削除されます。")) return;
+    const { data: saleItems, error: itemsErr } = await supabase.from("sale_items").select("product_id").eq("sale_id", sale.id);
+    if (itemsErr) { alert("販売明細の取得に失敗しました"); return; }
+    const { error: delErr } = await supabase.from("sales").delete().eq("id", sale.id);
+    if (delErr) { alert("削除に失敗しました"); return; }
+    const productIds = (saleItems || []).map((i) => i.product_id);
+    if (productIds.length > 0) {
+      await supabase.from("products").update({ status: "未販売" }).in("id", productIds);
+    }
+    loadAll();
+  };
+
+  return (
+    <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-5">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="font-display text-lg">販売登録</h2>
+        <button onClick={() => setModalOpen(true)} className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+          + 新規販売登録
+        </button>
+      </div>
+
+      {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
+      {sales === null && !error && <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>}
+
+      {sales !== null && (
+        sales.length === 0 ? (
+          <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>販売記録がありません</p>
+        ) : (
+          <div className="space-y-2">
+            {sales.map((s) => <SaleCard key={s.id} sale={s} onDelete={handleDeleteSale} />)}
+          </div>
+        )
+      )}
+
+      {modalOpen && (
+        <SaleFormModal clubs={clubs} batches={batches} onClose={() => setModalOpen(false)} onSave={handleSaveSale} />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
    ルート → ページ の対応
    ============================================================ */
 const ROUTE_MAP = {
@@ -2989,6 +3752,8 @@ function AppShell({ staffName, onSwitchStaff, onSignOut }) {
             <WalletPage />
           ) : activeKey === "products" ? (
             <ProductsPage />
+          ) : activeKey === "sales" ? (
+            <SalesPage />
           ) : (
             <PlaceholderPage item={activeItem} />
           )}
