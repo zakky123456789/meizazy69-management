@@ -3557,15 +3557,16 @@ function SalesPage() {
     const [salesRes, clubsRes, batchesRes] = await Promise.all([
       supabase
         .from("sales")
-        .select("id,transaction_date,host_club_id,host_id,total_amount_jpy,host_clubs(name),hosts(name),receipts(receipt_number)")
+        .select("id,transaction_date,host_club_id,host_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number)")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
       supabase.from("purchase_batches").select("id,purchase_date,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
     ]);
-    if (salesRes.error) { setError("販売記録の取得に失敗しました"); setSales([]); return; }
-    setSales(salesRes.data || []);
+    // sales取得が失敗しても、同時に取得できたクラブ・ロットは反映する(販売登録モーダルを使えなくしないため)
     setClubs(clubsRes.data || []);
     setBatches(batchesRes.data || []);
+    if (salesRes.error) { setError("販売記録の取得に失敗しました"); setSales([]); return; }
+    setSales(salesRes.data || []);
   }, []);
 
   useEffect(() => { loadAll(); }, [loadAll]);
