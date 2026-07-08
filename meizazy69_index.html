@@ -512,6 +512,90 @@ function TopBar({ title, onMenuClick, staffName, onSwitchStaff, onSignOut }) {
   );
 }
 
+function DashboardStatCard({ label, value, highlight }) {
+  return (
+    <div className="rounded-2xl p-5" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+      <p className="text-xs mb-2" style={{ color: "var(--mz-ink-muted)" }}>{label}</p>
+      <p className="font-display text-2xl truncate" style={{ color: highlight ? "var(--mz-gold-soft)" : "var(--mz-ink)" }}>{value}</p>
+    </div>
+  );
+}
+
+/* ============================================================
+   ダッシュボード(売上・利益連携)
+   ・集計期間: 「全期間累計」+「今月分」の2本立て
+   ・salesテーブル(total_amount_jpy)とsale_items(profit_jpy)を集計
+   ============================================================ */
+function DashboardPage() {
+  const [sales, setSales] = useState(null); // null = 読み込み中
+  const [error, setError] = useState(null);
+
+  const loadSales = useCallback(async () => {
+    setError(null);
+    // 集計にしか使わないため必要最小限のカラムのみ取得(total_amount_jpyとsale_items.profit_jpy)
+    const { data, error } = await supabase
+      .from("sales")
+      .select("id,transaction_date,total_amount_jpy,sale_items(profit_jpy)")
+      .order("transaction_date", { ascending: false });
+    if (error) { setError("売上データの取得に失敗しました"); setSales([]); return; }
+    setSales(data || []);
+  }, []);
+
+  useEffect(() => { loadSales(); }, [loadSales]);
+
+  const thisMonthPrefix = todayISO().slice(0, 7); // 例: "2026-07"
+  const monthLabel = `${thisMonthPrefix.slice(0, 4)}年${parseInt(thisMonthPrefix.slice(5, 7), 10)}月`;
+
+  const summary = useMemo(() => {
+    const list = sales || [];
+    const calc = (arr) => {
+      let totalAmount = 0;
+      let totalProfit = 0;
+      arr.forEach((s) => {
+        totalAmount += Number(s.total_amount_jpy) || 0;
+        (s.sale_items || []).forEach((it) => { totalProfit += Number(it.profit_jpy) || 0; });
+      });
+      return { count: arr.length, totalAmount, totalProfit };
+    };
+    const monthList = list.filter((s) => (s.transaction_date || "").startsWith(thisMonthPrefix));
+    return { allTime: calc(list), thisMonth: calc(monthList) };
+  }, [sales, thisMonthPrefix]);
+
+  return (
+    <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-8">
+      {error && (
+        <p className="text-sm" style={{ color: "#f2b8bd" }}>{error}</p>
+      )}
+
+      <section className="space-y-3">
+        <h3 className="font-display text-base">全期間累計</h3>
+        {sales === null ? (
+          <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <DashboardStatCard label="取引件数" value={`${summary.allTime.count}件`} />
+            <DashboardStatCard label="売上合計" value={fmtJPY(summary.allTime.totalAmount)} highlight />
+            <DashboardStatCard label="利益合計" value={fmtJPY(summary.allTime.totalProfit)} highlight />
+          </div>
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h3 className="font-display text-base">{monthLabel}分</h3>
+        {sales === null ? (
+          <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <DashboardStatCard label="取引件数" value={`${summary.thisMonth.count}件`} />
+            <DashboardStatCard label="売上合計" value={fmtJPY(summary.thisMonth.totalAmount)} highlight />
+            <DashboardStatCard label="利益合計" value={fmtJPY(summary.thisMonth.totalProfit)} highlight />
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 /* ============================================================
    プレースホルダーページ
    (各機能は今後のセッションで個別に実装していく)
@@ -3214,14 +3298,22 @@ function ProductsPage() {
      ・ダッシュボードの売上・利益連携
    ============================================================ */
 
-const ISSUER_INFO_DEFAULT = "IMPORT PRIME合同会社\n（住所・登録番号などは実際の会社情報に差し替えてください）";
+const ISSUER_INFO_DEFAULT = "〒012-0055 秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
-/* ---- 消費税端数処理(インボイス制度準拠: 1領収書につき1回、切り捨て) ---- */
-function calcReceiptTotals(subtotalJpy) {
-  const subtotal = Math.round(Number(subtotalJpy) || 0);
-  const tax = Math.floor(subtotal * 0.1);
-  const total = subtotal + tax;
+/* ---- 消費税端数処理(インボイス制度準拠: 1領収書につき1回、切り捨て)
+   ※ 販売登録の単価入力は税込金額のため、税込合計から税抜金額を逆算する方式。
+      税抜金額 = 税込合計 ÷ 1.1 を小数点以下切り捨て(1領収書につき1回だけ計算)、
+      消費税額 = 税込合計 − 税抜金額。 ---- */
+function calcReceiptTotals(totalInclJpy) {
+  const total = Math.round(Number(totalInclJpy) || 0);
+  const subtotal = Math.floor(total / 1.1);
+  const tax = total - subtotal;
   return { subtotal, tax, total };
+}
+
+/* ---- 明細1件分の税抜金額(利益計算用。税込単価を1.1で割り、小数点以下切り捨て) ---- */
+function itemPretaxJpy(unitPriceInclJpy) {
+  return Math.floor((Number(unitPriceInclJpy) || 0) / 1.1);
 }
 
 /* ---- 商品の原価合計(仕入代+送料+手数料、JPY確定額) ---- */
@@ -3653,8 +3745,8 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
   const removeItem = (productId) => setItems((prev) => prev.filter((it) => it.productId !== productId));
   const updateUnitPrice = (productId, value) => setItems((prev) => prev.map((it) => (it.productId === productId ? { ...it, unitPrice: value } : it)));
 
-  const subtotalTotal = items.reduce((sum, it) => sum + (parseFloat(it.unitPrice) || 0), 0);
-  const totals = calcReceiptTotals(subtotalTotal);
+  const totalInclJpy = items.reduce((sum, it) => sum + (parseFloat(it.unitPrice) || 0), 0); // 単価は税込のため、単純合計が税込合計になる
+  const totals = calcReceiptTotals(totalInclJpy);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -3726,7 +3818,7 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
         {/* 商品検索・追加 */}
         <div>
           <div className="flex items-center justify-between gap-2 mb-1.5">
-            <label className="block text-xs" style={{ color: "var(--mz-ink-muted)" }}>商品を追加(未販売のサンプル・在庫から検索)</label>
+            <label className="block text-xs" style={{ color: "var(--mz-ink-muted)" }}>商品を追加(未販売のサンプル・在庫から検索・単価は税込金額)</label>
             <button
               type="button" onClick={() => setNewPurchaseOpen(true)}
               className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap shrink-0"
@@ -3774,6 +3866,7 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
                 <input
                   type="number" min="0" step="1" value={it.unitPrice}
                   onChange={(e) => updateUnitPrice(it.productId, e.target.value)}
+                  placeholder="税込単価"
                   className="w-24 rounded-lg px-2 py-1.5 text-xs bg-transparent shrink-0"
                   style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
                 />
@@ -4029,8 +4122,8 @@ function SalesPage() {
      Supabase(PostgREST)からはクライアント側で複数テーブルにまたがるトランザクションを
      張れないため、途中失敗時はアラートで状況を伝え、手動確認を促す形にしている。 */
   const handleSaveSale = async (form) => {
-    const subtotalRaw = form.items.reduce((sum, it) => sum + it.unit_price_jpy, 0);
-    const totals = calcReceiptTotals(subtotalRaw);
+    const totalInclJpy = form.items.reduce((sum, it) => sum + it.unit_price_jpy, 0); // 単価は税込のため、単純合計が税込合計になる
+    const totals = calcReceiptTotals(totalInclJpy);
 
     if (form.id) {
       const saleId = form.id;
@@ -4061,7 +4154,7 @@ function SalesPage() {
         quantity: 1,
         unit_price_jpy: it.unit_price_jpy,
         subtotal_jpy: it.unit_price_jpy,
-        profit_jpy: it.unit_price_jpy - it.cost_jpy,
+        profit_jpy: itemPretaxJpy(it.unit_price_jpy) - it.cost_jpy,
       }));
       const { error: itemsErr } = await supabase.from("sale_items").insert(itemRows);
       if (itemsErr) {
@@ -4116,7 +4209,7 @@ function SalesPage() {
       quantity: 1,
       unit_price_jpy: it.unit_price_jpy,
       subtotal_jpy: it.unit_price_jpy,
-      profit_jpy: it.unit_price_jpy - it.cost_jpy,
+      profit_jpy: itemPretaxJpy(it.unit_price_jpy) - it.cost_jpy,
     }));
     const { error: itemsErr } = await supabase.from("sale_items").insert(itemRows);
     if (itemsErr) {
@@ -4287,6 +4380,8 @@ function AppShell({ staffName, onSwitchStaff, onSignOut }) {
             <ProductsPage />
           ) : activeKey === "sales" ? (
             <SalesPage />
+          ) : activeKey === "dashboard" ? (
+            <DashboardPage />
           ) : (
             <PlaceholderPage item={activeItem} />
           )}
