@@ -2200,6 +2200,58 @@ function ProductStatusBadge({ status }) {
   return <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: s.bg, color: s.color }}>{status}</span>;
 }
 
+/* ---- 画像アップロード用ドロップゾーン(ドラッグ&ドロップ + クリック選択の両対応) ---- */
+function ImageDropZone({ label, previewUrl, uploading, onFile, helperText }) {
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef(null);
+
+  const handleFiles = (files) => {
+    const file = files && files[0];
+    if (file) onFile(file);
+  };
+
+  return (
+    <div>
+      <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>{label}</label>
+      <div
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          handleFiles(e.dataTransfer.files);
+        }}
+        onClick={() => inputRef.current && inputRef.current.click()}
+        className="rounded-lg p-3 flex items-center gap-3 cursor-pointer transition-colors"
+        style={{
+          border: `1.5px dashed ${dragOver ? "var(--mz-gold)" : "var(--mz-border)"}`,
+          background: dragOver ? "var(--mz-surface-hover)" : "transparent",
+        }}
+      >
+        {previewUrl ? (
+          <img src={previewUrl} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
+        ) : (
+          <div className="w-14 h-14 rounded-lg shrink-0 flex items-center justify-center" style={{ background: "var(--mz-surface-hover)" }}>
+            <Icon name="tag" className="w-5 h-5" style={{ color: "var(--mz-ink-muted)" }} />
+          </div>
+        )}
+        <div className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
+          {uploading ? "アップロード中..." : (
+            <>
+              ドラッグ&ドロップ、またはクリックして画像を選択
+              {helperText && <><br />{helperText}</>}
+            </>
+          )}
+        </div>
+        <input
+          ref={inputRef} type="file" accept="image/*" className="hidden"
+          onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }}
+        />
+      </div>
+    </div>
+  );
+}
+
 /* ---- サンプル商品番号の自動採番("S-0001"形式、既存最大値+1) ---- */
 async function generateNextProductCode(type) {
   const prefix = type === "sample" ? "S" : "P";
@@ -2224,7 +2276,9 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
   const [type, setType] = useState(product.type || "sample");
   const [status, setStatus] = useState(product.status || "未販売");
   const [imageUrl, setImageUrl] = useState(product.product_image_url || "");
-  const [uploading, setUploading] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [extractImageUrl, setExtractImageUrl] = useState("");
+  const [uploadingExtractImage, setUploadingExtractImage] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [visionError, setVisionError] = useState(null);
   const [productUrl, setProductUrl] = useState(product.product_url || "");
@@ -2254,26 +2308,37 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
   // 既に仕入れ確定済み(=ウォレット消化済み)かどうか。新規以外は原則コスト欄を編集不可にする。
   const costLocked = !isNew;
 
-  const handleImageChange = async (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    setUploading(true);
-    setVisionError(null);
+  // 商品画像(アプリ上に表示する写真)のアップロード
+  const handleProductImageFile = async (file) => {
+    setUploadingImage(true);
     const res = await uploadProductImage(file);
-    setUploading(false);
+    setUploadingImage(false);
     if (!res.ok) { alert(res.message); return; }
     setImageUrl(res.url);
   };
 
-  const handleExtract = async () => {
-    if (!imageUrl) return;
+  // AI自動抽出用スクショのアップロード → アップロード後、自動でVision抽出まで実行
+  const handleExtractImageFile = async (file) => {
+    setUploadingExtractImage(true);
+    setVisionError(null);
+    const res = await uploadProductImage(file);
+    setUploadingExtractImage(false);
+    if (!res.ok) { alert(res.message); return; }
+    setExtractImageUrl(res.url);
+    await runExtraction(res.url);
+  };
+
+  const runExtraction = async (url) => {
+    const target = url || extractImageUrl;
+    if (!target) return;
     setExtracting(true);
     setVisionError(null);
     try {
-      const info = await extractProductInfoFromImage(imageUrl);
+      const info = await extractProductInfoFromImage(target);
       if (info.product_name) setProductName(info.product_name);
       if (info.category) setCategory(info.category);
       if (info.price_cny != null) setPurchaseAmountCny(String(info.price_cny));
+      if (info.size_range) setSize(info.size_range);
     } catch (err) {
       setVisionError(err.message || "AI自動抽出に失敗しました");
     }
@@ -2324,25 +2389,33 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
       >
         <h2 className="font-display text-lg">{isNew ? "新規仕入れ登録" : "商品情報を編集"}</h2>
 
-        {/* 画像アップロード + Vision自動抽出 */}
+        {/* 商品画像(アプリ表示用) */}
+        <ImageDropZone
+          label="商品画像(アプリ上に表示される写真)"
+          previewUrl={imageUrl}
+          uploading={uploadingImage}
+          onFile={handleProductImageFile}
+          helperText="サムネイル・一覧表示に使用されます"
+        />
+
+        {/* AI自動抽出用スクショ(商品画像とは別に登録) */}
         <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品画像(淘宝スクリーンショット)</label>
-          <div className="flex items-center gap-3 flex-wrap">
-            {imageUrl && (
-              <img src={imageUrl} alt="" className="w-20 h-20 rounded-lg object-cover" style={{ border: "1px solid var(--mz-border)" }} />
-            )}
-            <div className="flex flex-col gap-2">
-              <input type="file" accept="image/*" onChange={handleImageChange}
-                className="text-xs" style={{ color: "var(--mz-ink-muted)" }} />
-              <button
-                type="button" onClick={handleExtract} disabled={!imageUrl || uploading || extracting}
-                className="text-xs px-3 py-1.5 rounded-lg disabled:opacity-40 whitespace-nowrap"
-                style={{ border: "1px solid var(--mz-gold)", color: "var(--mz-gold-soft)" }}
-              >
-                {uploading ? "アップロード中..." : extracting ? "AI解析中..." : "AIで自動抽出"}
-              </button>
-            </div>
-          </div>
+          <ImageDropZone
+            label="商品情報スクショ(淘宝の商品名・価格部分。AI自動抽出用)"
+            previewUrl={extractImageUrl}
+            uploading={uploadingExtractImage}
+            onFile={handleExtractImageFile}
+            helperText="ドロップすると自動でAI抽出を実行します"
+          />
+          {extractImageUrl && (
+            <button
+              type="button" onClick={() => runExtraction()} disabled={uploadingExtractImage || extracting}
+              className="mt-2 text-xs px-3 py-1.5 rounded-lg disabled:opacity-40 whitespace-nowrap"
+              style={{ border: "1px solid var(--mz-gold)", color: "var(--mz-gold-soft)" }}
+            >
+              {extracting ? "AI解析中..." : "もう一度AIで抽出する"}
+            </button>
+          )}
           {visionError && <p className="text-xs mt-1" style={{ color: "#f2b8bd" }}>{visionError}</p>}
         </div>
 
@@ -2380,6 +2453,9 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>サイズ</label>
             <input type="text" value={size} onChange={(e) => setSize(e.target.value)} placeholder="M / L / 42 / フリー"
               className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+            <p className="text-[11px] mt-1" style={{ color: "var(--mz-ink-muted)" }}>
+              AIがサイズ展開を検出すると自動入力されます(1登録=1点のため、複数サイズある場合はこの商品個体の実サイズ1つに絞ってください)
+            </p>
           </div>
         </div>
 
@@ -2457,7 +2533,7 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
           <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
             キャンセル
           </button>
-          <button type="submit" disabled={saving || uploading} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+          <button type="submit" disabled={saving || uploadingImage || uploadingExtractImage} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
             {saving ? "保存中..." : "保存"}
           </button>
         </div>
