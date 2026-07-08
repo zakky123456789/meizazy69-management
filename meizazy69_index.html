@@ -521,6 +521,523 @@ function PlaceholderPage({ item }) {
 }
 
 /* ============================================================
+   タスク管理(staff・tasks)
+   ============================================================ */
+const STATUS_OPTIONS = ["未着手", "進行中", "完了"];
+const STAFF_COLORS = ["#C9A227", "#6B3F52", "#3F6B8B", "#4C7A57", "#8B5A3F", "#5A4C8B"];
+
+function todayISO() {
+  const d = new Date();
+  const tz = d.getTimezoneOffset() * 60000;
+  return new Date(d - tz).toISOString().slice(0, 10);
+}
+
+function staffColor(staffId, staffList) {
+  const idx = staffList.findIndex((s) => s.id === staffId);
+  if (idx === -1) return "var(--mz-ink-muted)";
+  return STAFF_COLORS[idx % STAFF_COLORS.length];
+}
+
+function StatusBadge({ status }) {
+  const styles = {
+    "未着手": { bg: "#33301F", color: "var(--mz-ink-muted)" },
+    "進行中": { bg: "#3a3220", color: "var(--mz-gold-soft)" },
+    "完了": { bg: "#1f3a2a", color: "#8fd6ab" },
+  };
+  const s = styles[status] || styles["未着手"];
+  return (
+    <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: s.bg, color: s.color }}>
+      {status}
+    </span>
+  );
+}
+
+/* ---- 一覧表示 ---- */
+function TaskList({ tasks, staffMap, staffList, onEdit, onDelete, onQuickStatus }) {
+  if (tasks.length === 0) {
+    return (
+      <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>
+        該当するタスクがありません
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {tasks.map((t) => {
+        const staff = staffMap[t.staff_id];
+        const color = staffColor(t.staff_id, staffList);
+        return (
+          <div
+            key={t.id}
+            className="rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3"
+            style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)", borderLeft: `3px solid ${color}` }}
+          >
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap mb-1">
+                <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--mz-surface-hover)", color }}>
+                  {staff ? staff.name : "未割当"}
+                </span>
+                <StatusBadge status={t.status} />
+                {t.scheduled_date && (
+                  <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>予定: {t.scheduled_date}</span>
+                )}
+                {t.completed_date && (
+                  <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>完了: {t.completed_date}</span>
+                )}
+              </div>
+              <p className="text-sm break-words whitespace-pre-wrap">{t.content}</p>
+              {t.result && (
+                <p className="text-xs mt-1" style={{ color: "var(--mz-ink-muted)" }}>成果: {t.result}</p>
+              )}
+            </div>
+            <div className="flex items-center gap-2 shrink-0 flex-wrap">
+              <select
+                value={t.status}
+                onChange={(e) => onQuickStatus(t, e.target.value)}
+                className="rounded-lg px-2 py-1.5 text-xs bg-transparent"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+              >
+                {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <button
+                onClick={() => onEdit(t)}
+                className="text-xs px-2.5 py-1.5 rounded-lg"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+              >
+                編集
+              </button>
+              <button
+                onClick={() => onDelete(t.id)}
+                className="text-xs px-2.5 py-1.5 rounded-lg"
+                style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}
+              >
+                削除
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---- 登録・編集モーダル ---- */
+function TaskFormModal({ task, staffList, onClose, onSave }) {
+  const isNew = !task.id;
+  const [form, setForm] = useState({
+    id: task.id || null,
+    staff_id: task.staff_id || (staffList[0] && staffList[0].id) || "",
+    content: task.content || "",
+    status: task.status || "未着手",
+    scheduled_date: task.scheduled_date || "",
+    result: task.result || "",
+    completed_date: task.completed_date || null,
+  });
+  const [saving, setSaving] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!form.staff_id || !form.content.trim()) return;
+    setSaving(true);
+    await onSave(form);
+    setSaving(false);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
+      style={{ background: "rgba(0,0,0,0.6)" }}
+    >
+      <form
+        onSubmit={handleSubmit}
+        className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <h2 className="font-display text-lg">{isNew ? "新規タスク" : "タスクを編集"}</h2>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>担当者</label>
+          <select
+            value={form.staff_id}
+            onChange={(e) => setForm((f) => ({ ...f, staff_id: e.target.value }))}
+            required
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            <option value="" disabled>選択してください</option>
+            {staffList.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>タスク内容</label>
+          <textarea
+            value={form.content}
+            onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))}
+            required
+            rows={3}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent resize-none"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>状態</label>
+            <select
+              value={form.status}
+              onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            >
+              {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>予定日(任意)</label>
+            <input
+              type="date"
+              value={form.scheduled_date}
+              onChange={(e) => setForm((f) => ({ ...f, scheduled_date: e.target.value }))}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+          </div>
+        </div>
+
+        {form.status === "完了" && (
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>成果(任意)</label>
+            <textarea
+              value={form.result}
+              onChange={(e) => setForm((f) => ({ ...f, result: e.target.value }))}
+              rows={2}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent resize-none"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+          </div>
+        )}
+
+        <div className="flex gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 rounded-lg py-2.5 text-sm"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+          >
+            キャンセル
+          </button>
+          <button
+            type="submit"
+            disabled={saving}
+            className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60"
+            style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+          >
+            {saving ? "保存中..." : "保存"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ---- カレンダー表示 ---- */
+function TaskCalendar({ tasks, staffList, onEdit }) {
+  const [monthDate, setMonthDate] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d;
+  });
+
+  const year = monthDate.getFullYear();
+  const month = monthDate.getMonth(); // 0-indexed
+  const firstDay = new Date(year, month, 1);
+  const startWeekday = firstDay.getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  const cells = [];
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const dateKey = (d) => `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+  const tasksByDate = useMemo(() => {
+    const map = {};
+    tasks.forEach((t) => {
+      // 未完了かつ予定日があるもの → 「これからやること」
+      if (t.status !== "完了" && t.scheduled_date) {
+        (map[t.scheduled_date] = map[t.scheduled_date] || { scheduled: [], completed: [] }).scheduled.push(t);
+      }
+      // 完了日があるもの → 「やったこと」
+      if (t.completed_date) {
+        (map[t.completed_date] = map[t.completed_date] || { scheduled: [], completed: [] }).completed.push(t);
+      }
+    });
+    return map;
+  }, [tasks]);
+
+  const monthLabel = `${year}年${month + 1}月`;
+  const todayKey = todayISO();
+
+  return (
+    <div className="rounded-xl p-3 md:p-4" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+      <div className="flex items-center justify-between mb-3">
+        <button
+          onClick={() => setMonthDate(new Date(year, month - 1, 1))}
+          className="px-3 py-1.5 rounded-lg text-sm"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+        >
+          ‹ 前月
+        </button>
+        <h3 className="font-display text-base">{monthLabel}</h3>
+        <button
+          onClick={() => setMonthDate(new Date(year, month + 1, 1))}
+          className="px-3 py-1.5 rounded-lg text-sm"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+        >
+          翌月 ›
+        </button>
+      </div>
+
+      <div className="grid grid-cols-7 gap-1 text-center text-[11px] mb-1" style={{ color: "var(--mz-ink-muted)" }}>
+        {["日", "月", "火", "水", "木", "金", "土"].map((w) => <div key={w}>{w}</div>)}
+      </div>
+
+      <div className="grid grid-cols-7 gap-1">
+        {cells.map((d, i) => {
+          if (d === null) return <div key={`empty-${i}`} />;
+          const key = dateKey(d);
+          const entry = tasksByDate[key];
+          const isToday = key === todayKey;
+          return (
+            <div
+              key={key}
+              className="rounded-lg p-1 min-h-[64px] md:min-h-[84px] text-left align-top overflow-hidden"
+              style={{ background: isToday ? "var(--mz-surface-hover)" : "transparent", border: "1px solid var(--mz-border)" }}
+            >
+              <div className="text-[11px] mb-0.5" style={{ color: isToday ? "var(--mz-gold-soft)" : "var(--mz-ink-muted)" }}>
+                {d}
+              </div>
+              <div className="space-y-0.5">
+                {entry && entry.scheduled.map((t) => (
+                  <button
+                    key={"s" + t.id}
+                    onClick={() => onEdit(t)}
+                    className="w-full text-left text-[10px] px-1 py-0.5 rounded truncate block"
+                    style={{ background: staffColor(t.staff_id, staffList) + "33", color: staffColor(t.staff_id, staffList) }}
+                    title={t.content}
+                  >
+                    ▷{t.content}
+                  </button>
+                ))}
+                {entry && entry.completed.map((t) => (
+                  <button
+                    key={"c" + t.id}
+                    onClick={() => onEdit(t)}
+                    className="w-full text-left text-[10px] px-1 py-0.5 rounded truncate block line-through"
+                    style={{ background: "#1f3a2a", color: "#8fd6ab" }}
+                    title={t.content}
+                  >
+                    ✓{t.content}
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex items-center gap-4 mt-3 text-[11px] flex-wrap" style={{ color: "var(--mz-ink-muted)" }}>
+        <span>▷ これからやること(予定)</span>
+        <span>✓ やったこと(完了)</span>
+      </div>
+    </div>
+  );
+}
+
+/* ---- タスク管理ページ本体 ---- */
+function TasksPage() {
+  const [staffList, setStaffList] = useState([]);
+  const [tasks, setTasks] = useState(null); // null = 読み込み中
+  const [error, setError] = useState(null);
+  const [view, setView] = useState("list"); // "list" | "calendar"
+  const [filterStaff, setFilterStaff] = useState("all");
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [modalTask, setModalTask] = useState(null); // null=閉じる, {}=新規, obj=編集
+
+  const loadStaff = useCallback(async () => {
+    const { data, error } = await supabase.from("staff").select("id,name,is_active").order("name");
+    if (!error) setStaffList(data || []);
+  }, []);
+
+  const loadTasks = useCallback(async () => {
+    setError(null);
+    const { data, error } = await supabase
+      .from("tasks")
+      .select("id,staff_id,content,status,scheduled_date,completed_date,result,created_at")
+      .order("created_at", { ascending: false });
+    if (error) {
+      setError("タスクの取得に失敗しました");
+      setTasks([]);
+    } else {
+      setTasks(data || []);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadStaff();
+    loadTasks();
+  }, [loadStaff, loadTasks]);
+
+  const staffMap = useMemo(() => {
+    const m = {};
+    staffList.forEach((s) => { m[s.id] = s; });
+    return m;
+  }, [staffList]);
+
+  const filteredTasks = useMemo(() => {
+    if (!tasks) return [];
+    return tasks.filter((t) => {
+      if (filterStaff !== "all" && t.staff_id !== filterStaff) return false;
+      if (filterStatus !== "all" && t.status !== filterStatus) return false;
+      return true;
+    });
+  }, [tasks, filterStaff, filterStatus]);
+
+  // 保存(新規・編集共通)
+  // completed_date は「statusが完了に変わったタイミングでシステムが自動セット」する設計のため、
+  // ここで status に応じて自動的に completed_date を確定/解除する。
+  const handleSave = async (form) => {
+    const patch = {
+      staff_id: form.staff_id,
+      content: form.content.trim(),
+      status: form.status,
+      scheduled_date: form.scheduled_date || null,
+      result: form.result ? form.result.trim() : null,
+      completed_date: form.status === "完了" ? (form.completed_date || todayISO()) : null,
+    };
+
+    if (form.id) {
+      const { error } = await supabase.from("tasks").update(patch).eq("id", form.id);
+      if (error) { alert("更新に失敗しました"); return; }
+    } else {
+      const { error } = await supabase.from("tasks").insert({ ...patch, created_at: new Date().toISOString() });
+      if (error) { alert("登録に失敗しました"); return; }
+    }
+    setModalTask(null);
+    loadTasks();
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm("このタスクを削除しますか?")) return;
+    const { error } = await supabase.from("tasks").delete().eq("id", id);
+    if (error) { alert("削除に失敗しました"); return; }
+    loadTasks();
+  };
+
+  // 一覧上でのステータスのクイック変更(completed_dateも同時に自動制御)
+  const handleQuickStatus = async (task, newStatus) => {
+    const patch = {
+      status: newStatus,
+      completed_date: newStatus === "完了" ? todayISO() : null,
+    };
+    const { error } = await supabase.from("tasks").update(patch).eq("id", task.id);
+    if (!error) loadTasks();
+  };
+
+  return (
+    <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-5">
+      <div className="flex flex-wrap items-center gap-3 justify-between">
+        <div className="flex flex-wrap gap-2">
+          <select
+            value={filterStaff}
+            onChange={(e) => setFilterStaff(e.target.value)}
+            className="rounded-lg px-3 py-2 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            <option value="all">担当者: すべて</option>
+            {staffList.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+            className="rounded-lg px-3 py-2 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            <option value="all">状態: すべて</option>
+            {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="rounded-lg overflow-hidden flex text-sm" style={{ border: "1px solid var(--mz-border)" }}>
+            <button
+              onClick={() => setView("list")}
+              className="px-3 py-2"
+              style={{
+                background: view === "list" ? "var(--mz-surface-hover)" : "transparent",
+                color: view === "list" ? "var(--mz-gold-soft)" : "var(--mz-ink-muted)",
+              }}
+            >
+              一覧
+            </button>
+            <button
+              onClick={() => setView("calendar")}
+              className="px-3 py-2"
+              style={{
+                background: view === "calendar" ? "var(--mz-surface-hover)" : "transparent",
+                color: view === "calendar" ? "var(--mz-gold-soft)" : "var(--mz-ink-muted)",
+              }}
+            >
+              カレンダー
+            </button>
+          </div>
+          <button
+            onClick={() => setModalTask({})}
+            className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap"
+            style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+          >
+            + 新規タスク
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>
+      )}
+
+      {tasks === null && !error && (
+        <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+      )}
+
+      {tasks !== null && view === "list" && (
+        <TaskList
+          tasks={filteredTasks}
+          staffMap={staffMap}
+          staffList={staffList}
+          onEdit={(t) => setModalTask(t)}
+          onDelete={handleDelete}
+          onQuickStatus={handleQuickStatus}
+        />
+      )}
+
+      {tasks !== null && view === "calendar" && (
+        <TaskCalendar tasks={filteredTasks} staffList={staffList} onEdit={(t) => setModalTask(t)} />
+      )}
+
+      {modalTask && (
+        <TaskFormModal
+          task={modalTask}
+          staffList={staffList}
+          onClose={() => setModalTask(null)}
+          onSave={handleSave}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
    ルート → ページ の対応
    ============================================================ */
 const ROUTE_MAP = {
@@ -575,7 +1092,11 @@ function AppShell({ staffName, onSwitchStaff, onSignOut }) {
           onSignOut={onSignOut}
         />
         <main className="flex-1">
-          <PlaceholderPage item={activeItem} />
+          {activeKey === "tasks" ? (
+            <TasksPage />
+          ) : (
+            <PlaceholderPage item={activeItem} />
+          )}
         </main>
       </div>
     </div>
