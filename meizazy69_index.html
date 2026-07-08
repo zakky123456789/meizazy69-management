@@ -2286,6 +2286,7 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
   const [productName, setProductName] = useState(product.product_name || "");
   const [category, setCategory] = useState(product.category || "");
   const [size, setSize] = useState(product.size || "");
+  const [sizeOptionsText, setSizeOptionsText] = useState(product.size_options || "");
   const [sellingPriceJpy, setSellingPriceJpy] = useState(product.selling_price_jpy != null ? String(product.selling_price_jpy) : "");
   const [purchaseDate, setPurchaseDate] = useState(product.purchase_date || todayISO());
   const [batchId, setBatchId] = useState(product.batch_id || "");
@@ -2293,6 +2294,14 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
   const [shippingCny, setShippingCny] = useState(product.shipping_cny != null ? String(product.shipping_cny) : "");
   const [feeCny, setFeeCny] = useState(product.fee_cny != null ? String(product.fee_cny) : "");
   const [saving, setSaving] = useState(false);
+
+  // 「サイズ展開」テキスト(例: "S/M/L/XL")を選択肢配列にパース。
+  // 既存のsize(編集時)がリストに含まれていなければ先頭に追加しておく(選択が消えないように)。
+  const sizeOptionsList = useMemo(() => {
+    const list = sizeOptionsText.split(/[\/,、]/).map((s) => s.trim()).filter(Boolean);
+    if (size && !list.includes(size)) list.unshift(size);
+    return list;
+  }, [sizeOptionsText, size]);
 
   // 新規登録・サンプル区分の場合、商品番号が空欄なら自動採番する(手動入力があれば上書きしない)
   useEffect(() => {
@@ -2338,7 +2347,7 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
       if (info.product_name) setProductName(info.product_name);
       if (info.category) setCategory(info.category);
       if (info.price_cny != null) setPurchaseAmountCny(String(info.price_cny));
-      if (info.size_range) setSize(info.size_range);
+      if (info.size_range) setSizeOptionsText(info.size_range);
     } catch (err) {
       setVisionError(err.message || "AI自動抽出に失敗しました");
     }
@@ -2369,6 +2378,7 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
       product_name: productName.trim(),
       category: category.trim() || null,
       size: size.trim() || null,
+      size_options: sizeOptionsText.trim() || null,
       selling_price_jpy: sellingPriceJpy ? parseFloat(sellingPriceJpy) : null,
       purchase_date: purchaseDate,
       batch_id: batchId || null,
@@ -2450,14 +2460,42 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
               className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
           </div>
           <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>サイズ</label>
-            <input type="text" value={size} onChange={(e) => setSize(e.target.value)} placeholder="M / L / 42 / フリー"
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>サイズ展開</label>
+            <input
+              type="text" value={sizeOptionsText} onChange={(e) => setSizeOptionsText(e.target.value)}
+              placeholder="S/M/L/XL(AI自動抽出、編集可)"
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
             <p className="text-[11px] mt-1" style={{ color: "var(--mz-ink-muted)" }}>
-              AIがサイズ展開を検出すると自動入力されます(1登録=1点のため、複数サイズある場合はこの商品個体の実サイズ1つに絞ってください)
+              「/」区切りで複数入力可。この商品でお客様に案内できる全サイズ(将来の販売登録でも選択肢として使えます)
             </p>
           </div>
         </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>この商品(この1点)の実サイズ</label>
+          {sizeOptionsList.length > 0 ? (
+            <select
+              value={size} onChange={(e) => setSize(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            >
+              <option value="">選択してください</option>
+              {sizeOptionsList.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          ) : (
+            <input
+              type="text" value={size} onChange={(e) => setSize(e.target.value)} placeholder="M / L / 42 / フリー"
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+          )}
+          <p className="text-[11px] mt-1" style={{ color: "var(--mz-ink-muted)" }}>
+            1登録=1点のため、実際に届く(届いた)この個体のサイズを1つ選んでください
+          </p>
+        </div>
+
 
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -2603,6 +2641,7 @@ function ProductCard({ product, onEdit, onReturn, onDelete }) {
         <p className="text-sm font-medium truncate">{product.product_name}</p>
         <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>
           {product.category || "カテゴリ未設定"}{product.size ? ` ・ ${product.size}` : ""}
+          {product.size_options && ` (展開: ${product.size_options})`}
         </p>
         <div className="text-xs mt-1 flex flex-wrap gap-x-3" style={{ color: "var(--mz-ink-muted)" }}>
           {product.selling_price_jpy != null && <span>参考価格: {fmtJPY(product.selling_price_jpy)}</span>}
@@ -2642,7 +2681,7 @@ function ProductsPage() {
     setError(null);
     const [productsRes, batchesRes, consumptionsRes] = await Promise.all([
       supabase.from("products")
-        .select("id,type,status,product_url,product_code,product_image_url,product_name,category,size,selling_price_jpy,purchase_date,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+        .select("id,type,status,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
         .order("purchase_date", { ascending: false }),
       supabase.from("purchase_batches").select("id,purchase_date,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
       supabase.from("agent_charge_consumptions").select("id,product_id"),
@@ -2701,6 +2740,7 @@ function ProductsPage() {
         product_name: form.product_name,
         category: form.category,
         size: form.size,
+        size_options: form.size_options,
         selling_price_jpy: form.selling_price_jpy,
       };
       if (!form.costLocked) {
@@ -2735,6 +2775,7 @@ function ProductsPage() {
       product_name: form.product_name,
       category: form.category,
       size: form.size,
+      size_options: form.size_options,
       selling_price_jpy: form.selling_price_jpy,
       purchase_date: form.purchase_date,
       batch_id: form.batch_id,
@@ -2793,6 +2834,7 @@ function ProductsPage() {
       product_name: src.product_name,
       category: src.category,
       size: src.size,
+      size_options: src.size_options,
       selling_price_jpy: src.selling_price_jpy,
       purchase_date: src.purchase_date,
       return_date: form.return_date,
