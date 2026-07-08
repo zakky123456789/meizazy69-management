@@ -1626,6 +1626,36 @@ async function consumeWalletFIFO({ cnyAmount, usageType, productId }) {
   return { ok: true, consumptions: consumptionsToInsert };
 }
 
+/* ---- FIFO消化の払い戻し(商品削除時に、消化していたCNYをチャージ残高へ戻す) ----
+   ・登録直後の商品は必ず消化済み扱いになるため、単純な登録ミスの取り消しでも
+     削除できるようにするための仕組み(本当の返品は ReturnFormModal を使う)
+   ------------------------------------------------------------ */
+async function reverseWalletConsumption(productId) {
+  const { data: rows, error } = await supabase
+    .from("agent_charge_consumptions")
+    .select("id,charge_id,consumed_cny")
+    .eq("product_id", productId);
+  if (error) return { ok: false, message: "消化履歴の取得に失敗しました" };
+  if (!rows || rows.length === 0) return { ok: true };
+
+  for (const row of rows) {
+    const { data: charge, error: chargeErr } = await supabase
+      .from("agent_charges")
+      .select("remaining_cny")
+      .eq("id", row.charge_id)
+      .maybeSingle();
+    if (chargeErr || !charge) continue;
+    const newRemaining = (Number(charge.remaining_cny) || 0) + (Number(row.consumed_cny) || 0);
+    const { error: updErr } = await supabase.from("agent_charges").update({ remaining_cny: newRemaining }).eq("id", row.charge_id);
+    if (updErr) return { ok: false, message: "残高の払い戻しに失敗しました" };
+  }
+
+  const { error: delErr } = await supabase.from("agent_charge_consumptions").delete().eq("product_id", productId);
+  if (delErr) return { ok: false, message: "消化履歴の削除に失敗しました" };
+
+  return { ok: true };
+}
+
 /* ---- チャージ サマリーカード ---- */
 function WalletSummary({ charges }) {
   const totals = useMemo(() => {
@@ -2170,6 +2200,24 @@ function ProductStatusBadge({ status }) {
   return <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: s.bg, color: s.color }}>{status}</span>;
 }
 
+/* ---- サンプル商品番号の自動採番("S-0001"形式、既存最大値+1) ---- */
+async function generateNextProductCode(type) {
+  const prefix = type === "sample" ? "S" : "P";
+  const { data, error } = await supabase
+    .from("products")
+    .select("product_code")
+    .eq("type", type)
+    .not("product_code", "is", null)
+    .ilike("product_code", `${prefix}-%`);
+  if (error || !data) return `${prefix}-0001`;
+  let maxNum = 0;
+  data.forEach((r) => {
+    const m = /^[A-Z]-(\d+)$/.exec(r.product_code || "");
+    if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
+  });
+  return `${prefix}-${String(maxNum + 1).padStart(4, "0")}`;
+}
+
 /* ---- 商品登録・編集モーダル ---- */
 function ProductFormModal({ product, batches, onClose, onSave }) {
   const isNew = !product.id;
@@ -2191,6 +2239,17 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
   const [shippingCny, setShippingCny] = useState(product.shipping_cny != null ? String(product.shipping_cny) : "");
   const [feeCny, setFeeCny] = useState(product.fee_cny != null ? String(product.fee_cny) : "");
   const [saving, setSaving] = useState(false);
+
+  // 新規登録・サンプル区分の場合、商品番号が空欄なら自動採番する(手動入力があれば上書きしない)
+  useEffect(() => {
+    if (!isNew || type !== "sample" || productCode) return;
+    let cancelled = false;
+    (async () => {
+      const code = await generateNextProductCode("sample");
+      if (!cancelled) setProductCode(code);
+    })();
+    return () => { cancelled = true; };
+  }, [isNew, type]);
 
   // 既に仕入れ確定済み(=ウォレット消化済み)かどうか。新規以外は原則コスト欄を編集不可にする。
   const costLocked = !isNew;
@@ -2326,7 +2385,9 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
 
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品番号(任意)</label>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+              商品番号{type === "sample" && isNew ? "(サンプルは自動採番、編集可)" : "(任意)"}
+            </label>
             <input type="text" value={productCode} onChange={(e) => setProductCode(e.target.value)}
               className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
           </div>
@@ -2445,7 +2506,7 @@ function ReturnFormModal({ sourceProduct, onClose, onSave }) {
 }
 
 /* ---- 商品カード ---- */
-function ProductCard({ product, deletable, onEdit, onReturn, onDelete }) {
+function ProductCard({ product, onEdit, onReturn, onDelete }) {
   const costCny = (Number(product.purchase_amount_cny) || 0) + (Number(product.shipping_cny) || 0) + (Number(product.fee_cny) || 0);
   return (
     <div className="rounded-xl p-3 flex gap-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
@@ -2460,6 +2521,7 @@ function ProductCard({ product, deletable, onEdit, onReturn, onDelete }) {
         <div className="flex items-center gap-2 flex-wrap mb-1">
           <ProductStatusBadge status={product.status} />
           <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{product.type === "sample" ? "サンプル" : "在庫"}</span>
+          {product.product_code && <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>No. {product.product_code}</span>}
           {product.return_date && <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>返品: {product.return_date}</span>}
         </div>
         <p className="text-sm font-medium truncate">{product.product_name}</p>
@@ -2478,10 +2540,8 @@ function ProductCard({ product, deletable, onEdit, onReturn, onDelete }) {
         )}
         <button
           onClick={() => onDelete(product)}
-          disabled={!deletable}
-          className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap disabled:opacity-40"
+          className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap"
           style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}
-          title={deletable ? "" : "仕入れ確定済みのため削除できません"}
         >
           削除
         </button>
@@ -2623,11 +2683,17 @@ function ProductsPage() {
   };
 
   const handleDeleteProduct = async (product) => {
-    if (consumedProductIds.has(product.id)) {
-      alert("仕入れ確定済み(ウォレット消化済み)のため削除できません。返品登録をご利用ください。");
-      return;
+    const hasConsumption = consumedProductIds.has(product.id);
+    const confirmMsg = hasConsumption
+      ? "この商品を削除しますか?仕入れにかかったウォレット消化額(CNY)は、消化元のチャージ残高へ自動的に払い戻されます。"
+      : "この商品を削除しますか?";
+    if (!window.confirm(confirmMsg)) return;
+
+    if (hasConsumption) {
+      const reverseRes = await reverseWalletConsumption(product.id);
+      if (!reverseRes.ok) { alert(reverseRes.message); return; }
     }
-    if (!window.confirm("この商品を削除しますか?")) return;
+
     const { error } = await supabase.from("products").delete().eq("id", product.id);
     if (error) { alert("削除に失敗しました"); return; }
     loadAll();
@@ -2712,7 +2778,6 @@ function ProductsPage() {
               <ProductCard
                 key={p.id}
                 product={p}
-                deletable={!consumedProductIds.has(p.id)}
                 onEdit={(prod) => setModalProduct(prod)}
                 onReturn={(prod) => setReturnTarget(prod)}
                 onDelete={handleDeleteProduct}
