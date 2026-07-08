@@ -60,6 +60,18 @@
   .mz-drawer-enter-active{ transform: translateX(0); transition: transform 200ms ease-out; }
   .mz-drawer-exit{ transform: translateX(0); }
   .mz-drawer-exit-active{ transform: translateX(-100%); transition: transform 180ms ease-in; }
+
+  /* 領収書印刷プレビュー用: 印刷時はこの領域だけを表示する */
+  @media print {
+    body * { visibility: hidden; }
+    .mz-receipt-print-area, .mz-receipt-print-area * { visibility: visible; }
+    .mz-receipt-print-area {
+      position: absolute; top: 0; left: 0; width: 100%;
+      background: #ffffff !important; color: #1a1710 !important;
+      padding: 0; margin: 0;
+    }
+    .mz-no-print { display: none !important; }
+  }
 </style>
 </head>
 <body>
@@ -3191,16 +3203,14 @@ function ProductsPage() {
 /* ============================================================
    販売登録 + 領収書発行(sales / sale_items / receipts)
 
-   このセッションで実装する範囲:
-     ・既存の未販売商品(サンプル・在庫)を選択して販売登録
-     ・複数商品まとめて1回の取引として登録(sale_items)
+   実装済み範囲:
+     ・既存の未販売商品(サンプル・在庫)を選択して販売登録、複数商品まとめて1回の取引として登録(sale_items)
      ・消費税端数処理(1領収書につき1回、切り捨て)を反映した領収書自動作成
-     ・販売一覧・削除(削除時は商品を「未販売」へ自動復元)
-
-   次セッション以降で対応予定(積み残し):
+     ・販売一覧・削除(削除時は商品を「未販売」へ自動復元)、編集(明細差分反映)
      ・販売画面からの「新規仕入対応」(その場でproducts新規登録+ウォレット消化)
-     ・領収書のPDF/印刷プレビュー画面
-     ・ホストクラブ詳細ページの「取引履歴」をこのsalesデータで実データ化
+     ・領収書プレビュー・印刷/PDF保存(ReceiptPreviewModal, window.print())
+
+   積み残し:
      ・ダッシュボードの売上・利益連携
    ============================================================ */
 
@@ -3814,7 +3824,123 @@ function saleItemLabel(item) {
   return label;
 }
 
-function SaleCard({ sale, onDelete, onEdit }) {
+/* ---- 領収書プレビュー・印刷モーダル ----
+   ・saleに紐づくreceipts行(sale_idで検索)を取得し、実際の領収書レイアウトで表示。
+   ・「印刷 / PDFとして保存」ボタンでwindow.print()を呼び出す。
+     印刷時は body 側のCSS(@media print, .mz-receipt-print-area)により
+     このプレビュー領域だけが用紙に出力される(ブラウザの印刷ダイアログから
+     「PDFに保存」を選べばそのままPDF化できる)。
+   ------------------------------------------------------------ */
+function ReceiptPreviewModal({ sale, onClose }) {
+  const [receipt, setReceipt] = useState(null); // null=読込中, false=見つからない
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    supabase
+      .from("receipts")
+      .select("id,receipt_number,issue_date,recipient_name,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info")
+      .eq("sale_id", sale.id)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error || !data) { setError("領収書の取得に失敗しました"); setReceipt(false); return; }
+        setReceipt(data);
+      });
+    return () => { cancelled = true; };
+  }, [sale.id]);
+
+  const items = sale.sale_items || [];
+  const clubName = sale.host_clubs ? sale.host_clubs.name : "-";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <div
+        className="w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <div className="flex items-center justify-between mz-no-print">
+          <h2 className="font-display text-lg">領収書プレビュー</h2>
+          <button onClick={onClose} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+            閉じる
+          </button>
+        </div>
+
+        {receipt === null && (
+          <p className="text-sm mz-no-print" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+        )}
+        {error && (
+          <p className="text-sm rounded-lg px-3 py-2 mz-no-print" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>
+        )}
+
+        {receipt && (
+          <>
+            {/* 印刷対象領域(印刷時はここだけが用紙に出力される) */}
+            <div className="mz-receipt-print-area rounded-xl p-6" style={{ background: "#ffffff", color: "#1a1710" }}>
+              <div className="flex items-start justify-between mb-6">
+                <h3 className="font-display" style={{ fontSize: "22px" }}>領収書</h3>
+                <div className="text-right text-xs">
+                  <p>No. {receipt.receipt_number}</p>
+                  <p>{receipt.issue_date}</p>
+                </div>
+              </div>
+
+              <div className="mb-6">
+                <p className="text-base" style={{ borderBottom: "1px solid #1a1710", display: "inline-block", paddingBottom: "2px" }}>
+                  {receipt.recipient_name || clubName} 様
+                </p>
+              </div>
+
+              <div className="mb-6">
+                <p className="font-display" style={{ fontSize: "24px" }}>{fmtJPY(receipt.total_jpy)} -</p>
+                <p className="text-xs mt-1">但し {receipt.memo || "衣装代"} として</p>
+              </div>
+
+              {items.length > 0 && (
+                <table className="w-full text-xs mb-4" style={{ borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid #ccc" }}>
+                      <th className="text-left py-1">品名</th>
+                      <th className="text-right py-1">金額</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((it) => (
+                      <tr key={it.id}>
+                        <td className="py-1">{saleItemLabel(it)}</td>
+                        <td className="text-right py-1">{fmtJPY(it.unit_price_jpy)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+
+              <div className="text-xs space-y-1 mb-6" style={{ borderTop: "1px solid #ccc", paddingTop: "8px" }}>
+                <div className="flex justify-between"><span>小計</span><span>{fmtJPY(receipt.subtotal_jpy)}</span></div>
+                <div className="flex justify-between"><span>消費税(10%)</span><span>{fmtJPY(receipt.tax_jpy)}</span></div>
+                <div className="flex justify-between font-medium"><span>合計</span><span>{fmtJPY(receipt.total_jpy)}</span></div>
+              </div>
+
+              <div className="text-xs whitespace-pre-line" style={{ color: "#555" }}>
+                {receipt.issuer_info}
+              </div>
+            </div>
+
+            <button
+              onClick={() => window.print()}
+              className="mz-no-print w-full rounded-lg py-2.5 text-sm font-medium"
+              style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+            >
+              印刷 / PDFとして保存
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SaleCard({ sale, onDelete, onEdit, onViewReceipt }) {
   const [expanded, setExpanded] = useState(false);
   const clubName = sale.host_clubs ? sale.host_clubs.name : "-";
   const hostName = sale.hosts ? sale.hosts.name : null;
@@ -3826,7 +3952,15 @@ function SaleCard({ sale, onDelete, onEdit }) {
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap mb-1">
             <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{sale.transaction_date}</span>
-            {receiptNumber && <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-gold-soft)" }}>No.{receiptNumber}</span>}
+            {receiptNumber && (
+              <button
+                onClick={() => onViewReceipt(sale)}
+                className="text-xs px-2 py-0.5 rounded-full"
+                style={{ background: "var(--mz-surface-hover)", color: "var(--mz-gold-soft)" }}
+              >
+                No.{receiptNumber} ・領収書を見る
+              </button>
+            )}
           </div>
           <p className="text-sm font-medium truncate">{clubName}{hostName ? ` / ${hostName}` : ""}</p>
         </div>
@@ -3869,6 +4003,7 @@ function SalesPage() {
   const [error, setError] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingSale, setEditingSale] = useState(null); // null=新規登録モード, obj=編集対象
+  const [receiptSale, setReceiptSale] = useState(null); // 領収書プレビュー対象のsale(nullなら非表示)
 
   const loadAll = useCallback(async () => {
     setError(null);
@@ -4067,13 +4202,17 @@ function SalesPage() {
           <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>販売記録がありません</p>
         ) : (
           <div className="space-y-2">
-            {sales.map((s) => <SaleCard key={s.id} sale={s} onDelete={handleDeleteSale} onEdit={openEdit} />)}
+            {sales.map((s) => <SaleCard key={s.id} sale={s} onDelete={handleDeleteSale} onEdit={openEdit} onViewReceipt={setReceiptSale} />)}
           </div>
         )
       )}
 
       {modalOpen && (
         <SaleFormModal clubs={clubs} batches={batches} sale={editingSale} onClose={closeModal} onSave={handleSaveSale} />
+      )}
+
+      {receiptSale && (
+        <ReceiptPreviewModal sale={receiptSale} onClose={() => setReceiptSale(null)} />
       )}
     </div>
   );
