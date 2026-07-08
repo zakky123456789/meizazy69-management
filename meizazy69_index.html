@@ -1978,13 +1978,59 @@ function WalletPage() {
    ============================================================ */
 
 const PRODUCT_IMAGE_BUCKET = "product-images";
+const PRODUCT_IMAGE_MAX_DIMENSION = 1280; // 長辺の最大px(Storage無料枠節約のため)
+const PRODUCT_IMAGE_JPEG_QUALITY = 0.72;
 const PRODUCT_STATUS_OPTIONS = ["未販売", "販売済み", "返品済み"];
 
-/* ---- 画像アップロード(Supabase Storage) ---- */
+/* ---- 画像リサイズ+JPEG圧縮(ブラウザ側、Canvas使用) ----
+   ・Supabase Storageは無料枠の容量が限られるため、保存前に必ず圧縮する
+   ・長辺 PRODUCT_IMAGE_MAX_DIMENSION px 以内 / JPEG品質 PRODUCT_IMAGE_JPEG_QUALITY に変換
+   ・副次効果として、Edge FunctionでのBase64変換・Claude Vision API送信も軽量化される */
+function compressImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("画像の読み込みに失敗しました"));
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("画像の読み込みに失敗しました"));
+      img.onload = () => {
+        let { width, height } = img;
+        const maxDim = PRODUCT_IMAGE_MAX_DIMENSION;
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) { height = Math.round(height * (maxDim / width)); width = maxDim; }
+          else { width = Math.round(width * (maxDim / height)); height = maxDim; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.toBlob(
+          (blob) => { if (blob) resolve(blob); else reject(new Error("画像の圧縮に失敗しました")); },
+          "image/jpeg",
+          PRODUCT_IMAGE_JPEG_QUALITY
+        );
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/* ---- 画像アップロード(Supabase Storage) ----
+   ・アップロード前に必ず圧縮し、常に .jpg として保存する */
 async function uploadProductImage(file) {
-  const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
-  const path = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-  const { error: uploadError } = await supabase.storage.from(PRODUCT_IMAGE_BUCKET).upload(path, file, { upsert: false });
+  let blob;
+  try {
+    blob = await compressImageFile(file);
+  } catch (err) {
+    return { ok: false, message: err.message || "画像の圧縮に失敗しました" };
+  }
+  const path = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+  const { error: uploadError } = await supabase.storage.from(PRODUCT_IMAGE_BUCKET).upload(path, blob, {
+    upsert: false,
+    contentType: "image/jpeg",
+  });
   if (uploadError) return { ok: false, message: "画像のアップロードに失敗しました" };
   const { data } = supabase.storage.from(PRODUCT_IMAGE_BUCKET).getPublicUrl(path);
   return { ok: true, url: data.publicUrl };
