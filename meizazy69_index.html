@@ -66,6 +66,7 @@
 <div id="root"></div>
 
 <script type="text/babel" data-presets="react">
+(function () {
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 /* ============================================================
@@ -635,8 +636,13 @@ function App() {
   );
 }
 
-const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(<App />);
+const rootEl = document.getElementById("root");
+if (!rootEl._meizazy69Rendered) {
+  rootEl._meizazy69Rendered = true;
+  const root = ReactDOM.createRoot(rootEl);
+  root.render(<App />);
+}
+})();
 </script>
 </body>
 </html>
