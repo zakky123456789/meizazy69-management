@@ -3296,14 +3296,30 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
   );
 }
 
-function SaleFormModal({ clubs, batches, onClose, onSave }) {
-  const [transactionDate, setTransactionDate] = useState(todayISO());
-  const [hostClubId, setHostClubId] = useState("");
+function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
+  const isEdit = !!sale;
+  const [transactionDate, setTransactionDate] = useState(sale ? sale.transaction_date : todayISO());
+  const [hostClubId, setHostClubId] = useState(sale ? sale.host_club_id : "");
   const [hosts, setHosts] = useState([]);
-  const [hostId, setHostId] = useState("");
+  const [hostId, setHostId] = useState(sale ? (sale.host_id || "") : "");
   const [unsoldProducts, setUnsoldProducts] = useState(null); // null = 読み込み中
   const [searchText, setSearchText] = useState("");
-  const [items, setItems] = useState([]); // [{ productId, product, unitPrice }]
+  const [items, setItems] = useState(() => {
+    if (!sale) return [];
+    return (sale.sale_items || []).map((si) => ({
+      productId: si.product_id,
+      product: {
+        id: si.product_id,
+        product_name: si.products ? si.products.product_name : null,
+        size: si.products ? si.products.size : null,
+        product_code: si.products ? si.products.product_code : null,
+        purchase_amount_jpy: si.products ? si.products.purchase_amount_jpy : 0,
+        shipping_jpy: si.products ? si.products.shipping_jpy : 0,
+        fee_jpy: si.products ? si.products.fee_jpy : 0,
+      },
+      unitPrice: String(si.unit_price_jpy),
+    }));
+  }); // [{ productId, product, unitPrice }]
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [newPurchaseOpen, setNewPurchaseOpen] = useState(false);
@@ -3322,13 +3338,16 @@ function SaleFormModal({ clubs, batches, onClose, onSave }) {
     return () => { cancelled = true; };
   }, []);
 
+  // ホストクラブ変更時にホスト一覧を再取得。編集モードで最初から選択済みのホストは、
+  // そのクラブのホスト一覧に含まれていれば維持し、含まれていなければクリアする。
   useEffect(() => {
-    setHostId("");
-    if (!hostClubId) { setHosts([]); return; }
+    if (!hostClubId) { setHosts([]); setHostId(""); return; }
     let cancelled = false;
     supabase.from("hosts").select("id,name").eq("host_club_id", hostClubId).order("name").then(({ data, error }) => {
       if (cancelled) return;
-      setHosts(error ? [] : (data || []));
+      const list = error ? [] : (data || []);
+      setHosts(list);
+      setHostId((prev) => (list.some((h) => h.id === prev) ? prev : ""));
     });
     return () => { cancelled = true; };
   }, [hostClubId]);
@@ -3381,6 +3400,7 @@ function SaleFormModal({ clubs, batches, onClose, onSave }) {
 
     setSaving(true);
     const ok = await onSave({
+      id: sale ? sale.id : null,
       transaction_date: transactionDate,
       host_club_id: hostClubId,
       host_id: hostId || null,
@@ -3402,7 +3422,7 @@ function SaleFormModal({ clubs, batches, onClose, onSave }) {
         className="w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[92vh] overflow-y-auto"
         style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
       >
-        <h2 className="font-display text-lg">販売登録</h2>
+        <h2 className="font-display text-lg">{isEdit ? "販売記録を編集" : "販売登録"}</h2>
 
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -3506,7 +3526,7 @@ function SaleFormModal({ clubs, batches, onClose, onSave }) {
         <div className="flex gap-2 pt-1">
           <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>キャンセル</button>
           <button type="submit" disabled={saving} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
-            {saving ? "登録中..." : "販売登録+領収書発行"}
+            {saving ? "保存中..." : (isEdit ? "変更を保存" : "販売登録+領収書発行")}
           </button>
         </div>
       </form>
@@ -3523,23 +3543,58 @@ function SaleFormModal({ clubs, batches, onClose, onSave }) {
 }
 
 /* ---- 販売カード(一覧) ---- */
-function SaleCard({ sale, onDelete }) {
+/* ---- 販売明細1行の表示ラベル(商品名 - サイズ(No.商品番号)) ---- */
+function saleItemLabel(item) {
+  const p = item.products || {};
+  let label = p.product_name || "(名称未設定)";
+  if (p.size) label += ` - ${p.size}`;
+  if (p.product_code) label += `(No.${p.product_code})`;
+  return label;
+}
+
+function SaleCard({ sale, onDelete, onEdit }) {
+  const [expanded, setExpanded] = useState(false);
   const clubName = sale.host_clubs ? sale.host_clubs.name : "-";
   const hostName = sale.hosts ? sale.hosts.name : null;
   const receiptNumber = sale.receipts ? sale.receipts.receipt_number : null;
+  const items = sale.sale_items || [];
   return (
-    <div className="rounded-xl p-4 flex items-center justify-between gap-3 flex-wrap" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
-      <div className="min-w-0">
-        <div className="flex items-center gap-2 flex-wrap mb-1">
-          <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{sale.transaction_date}</span>
-          {receiptNumber && <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-gold-soft)" }}>No.{receiptNumber}</span>}
+    <div className="rounded-xl p-4 space-y-2" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap mb-1">
+            <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{sale.transaction_date}</span>
+            {receiptNumber && <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-gold-soft)" }}>No.{receiptNumber}</span>}
+          </div>
+          <p className="text-sm font-medium truncate">{clubName}{hostName ? ` / ${hostName}` : ""}</p>
         </div>
-        <p className="text-sm font-medium truncate">{clubName}{hostName ? ` / ${hostName}` : ""}</p>
+        <div className="flex items-center gap-3 shrink-0">
+          <span className="font-display text-base" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(sale.total_amount_jpy)}</span>
+          <button onClick={() => onEdit(sale)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>編集</button>
+          <button onClick={() => onDelete(sale)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}>削除</button>
+        </div>
       </div>
-      <div className="flex items-center gap-3 shrink-0">
-        <span className="font-display text-base" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(sale.total_amount_jpy)}</span>
-        <button onClick={() => onDelete(sale)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}>削除</button>
-      </div>
+
+      {items.length > 0 && (
+        <div>
+          <button
+            type="button" onClick={() => setExpanded((v) => !v)}
+            className="text-xs" style={{ color: "var(--mz-ink-muted)" }}
+          >
+            {expanded ? "▲ 明細を閉じる" : `▼ 明細を見る(${items.length}点)`}
+          </button>
+          {expanded && (
+            <div className="mt-2 space-y-1.5 pt-2" style={{ borderTop: "1px solid var(--mz-border)" }}>
+              {items.map((it) => (
+                <div key={it.id} className="flex items-center justify-between gap-2 text-xs">
+                  <span className="truncate" style={{ color: "var(--mz-ink)" }}>{saleItemLabel(it)}</span>
+                  <span className="shrink-0" style={{ color: "var(--mz-ink-muted)" }}>{fmtJPY(it.unit_price_jpy)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -3551,13 +3606,14 @@ function SalesPage() {
   const [batches, setBatches] = useState([]);
   const [error, setError] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingSale, setEditingSale] = useState(null); // null=新規登録モード, obj=編集対象
 
   const loadAll = useCallback(async () => {
     setError(null);
     const [salesRes, clubsRes, batchesRes] = await Promise.all([
       supabase
         .from("sales")
-        .select("id,transaction_date,host_club_id,host_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number)")
+        .select("id,transaction_date,host_club_id,host_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,products(product_name,size,product_code,purchase_amount_jpy,shipping_jpy,fee_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
       supabase.from("purchase_batches").select("id,purchase_date,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
@@ -3571,12 +3627,77 @@ function SalesPage() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  /* 販売登録本体: sales → sale_items → products状態更新 → receipts(採番込み) → sales.receipt_id を順に処理。
+  /* 販売登録本体(新規): sales → sale_items → products状態更新 → receipts(採番込み) → sales.receipt_id を順に処理。
+     編集: sales更新 → sale_itemsを一度全削除して作り直し → 商品ステータスは差分のみ反映 → receiptsは番号を変えずに金額等のみ更新。
      Supabase(PostgREST)からはクライアント側で複数テーブルにまたがるトランザクションを
      張れないため、途中失敗時はアラートで状況を伝え、手動確認を促す形にしている。 */
   const handleSaveSale = async (form) => {
     const subtotalRaw = form.items.reduce((sum, it) => sum + it.unit_price_jpy, 0);
     const totals = calcReceiptTotals(subtotalRaw);
+
+    if (form.id) {
+      const saleId = form.id;
+
+      const { data: oldItems, error: oldItemsErr } = await supabase.from("sale_items").select("product_id").eq("sale_id", saleId);
+      if (oldItemsErr) { alert("既存の販売明細の取得に失敗しました"); return false; }
+      const oldProductIds = new Set((oldItems || []).map((i) => i.product_id));
+      const newProductIds = new Set(form.items.map((it) => it.product_id));
+
+      const { error: saleErr } = await supabase
+        .from("sales")
+        .update({
+          transaction_date: form.transaction_date,
+          host_club_id: form.host_club_id,
+          host_id: form.host_id,
+          total_amount_jpy: totals.total,
+        })
+        .eq("id", saleId);
+      if (saleErr) { alert("販売記録の更新に失敗しました"); return false; }
+
+      const { error: delItemsErr } = await supabase.from("sale_items").delete().eq("sale_id", saleId);
+      if (delItemsErr) { alert("既存明細の削除に失敗しました"); return false; }
+
+      const itemRows = form.items.map((it) => ({
+        sale_id: saleId,
+        product_id: it.product_id,
+        fulfillment_type: "サンプル現物販売",
+        quantity: 1,
+        unit_price_jpy: it.unit_price_jpy,
+        subtotal_jpy: it.unit_price_jpy,
+        profit_jpy: it.unit_price_jpy - it.cost_jpy,
+      }));
+      const { error: itemsErr } = await supabase.from("sale_items").insert(itemRows);
+      if (itemsErr) {
+        alert("販売明細の再登録に失敗しました(sales行は更新済みです。手動でご確認ください)");
+        return false;
+      }
+
+      // 商品ステータスは差分のみ反映(明細から外れた商品→未販売に復元、新たに加わった商品→販売済みに)
+      const toRestore = [...oldProductIds].filter((id) => !newProductIds.has(id));
+      const toMarkSold = [...newProductIds].filter((id) => !oldProductIds.has(id));
+      if (toRestore.length > 0) await supabase.from("products").update({ status: "未販売" }).in("id", toRestore);
+      if (toMarkSold.length > 0) await supabase.from("products").update({ status: "販売済み" }).in("id", toMarkSold);
+
+      // 領収書は番号を変えず、金額等のみ更新
+      const { error: receiptUpdErr } = await supabase
+        .from("receipts")
+        .update({
+          issue_date: form.transaction_date,
+          recipient_name: form.recipient_name,
+          subtotal_jpy: totals.subtotal,
+          tax_jpy: totals.tax,
+          total_jpy: totals.total,
+        })
+        .eq("sale_id", saleId);
+      if (receiptUpdErr) {
+        alert("領収書の更新に失敗しました(販売記録・明細は更新済みです)");
+      }
+
+      setModalOpen(false);
+      setEditingSale(null);
+      loadAll();
+      return true;
+    }
 
     const { data: saleRow, error: saleErr } = await supabase
       .from("sales")
@@ -3657,6 +3778,16 @@ function SalesPage() {
     loadAll();
   };
 
+  const openEdit = (sale) => {
+    setEditingSale(sale);
+    setModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setModalOpen(false);
+    setEditingSale(null);
+  };
+
   return (
     <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-5">
       <div className="flex items-center justify-between gap-3">
@@ -3674,13 +3805,13 @@ function SalesPage() {
           <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>販売記録がありません</p>
         ) : (
           <div className="space-y-2">
-            {sales.map((s) => <SaleCard key={s.id} sale={s} onDelete={handleDeleteSale} />)}
+            {sales.map((s) => <SaleCard key={s.id} sale={s} onDelete={handleDeleteSale} onEdit={openEdit} />)}
           </div>
         )
       )}
 
       {modalOpen && (
-        <SaleFormModal clubs={clubs} batches={batches} onClose={() => setModalOpen(false)} onSave={handleSaveSale} />
+        <SaleFormModal clubs={clubs} batches={batches} sale={editingSale} onClose={closeModal} onSave={handleSaveSale} />
       )}
     </div>
   );
