@@ -3298,7 +3298,7 @@ function ProductsPage() {
      ・ダッシュボードの売上・利益連携
    ============================================================ */
 
-const ISSUER_INFO_DEFAULT = "〒012-0055 秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
+const ISSUER_INFO_DEFAULT = "〒012-0055\n秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
 /* ---- 消費税端数処理(インボイス制度準拠: 1領収書につき1回、切り捨て)
    ※ 販売登録の単価入力は税込金額のため、税込合計から税抜金額を逆算する方式。
@@ -4168,7 +4168,7 @@ function SalesPage() {
       if (toRestore.length > 0) await supabase.from("products").update({ status: "未販売" }).in("id", toRestore);
       if (toMarkSold.length > 0) await supabase.from("products").update({ status: "販売済み" }).in("id", toMarkSold);
 
-      // 領収書は番号を変えず、金額等のみ更新
+      // 領収書は番号を変えず、金額等のみ更新(発行者情報も最新の固定値に揃える)
       const { error: receiptUpdErr } = await supabase
         .from("receipts")
         .update({
@@ -4177,6 +4177,7 @@ function SalesPage() {
           subtotal_jpy: totals.subtotal,
           tax_jpy: totals.tax,
           total_jpy: totals.total,
+          issuer_info: ISSUER_INFO_DEFAULT,
         })
         .eq("sale_id", saleId);
       if (receiptUpdErr) {
