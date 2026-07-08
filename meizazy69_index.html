@@ -1042,9 +1042,10 @@ function TasksPage() {
 /* ============================================================
    ホストクラブ管理(host_clubs / hosts / visits)
    ・一覧ページ: HostClubsPage
-   ・詳細ページ: HostClubDetailPage(所属ホスト・訪問記録・次回訪問予定)
-   ・取引履歴(sales集計)は sales テーブル実装後に接続予定のためプレースホルダー
-   ・visit_samples(訪問時持参サンプル)は products テーブル実装後に対応予定
+   ・詳細ページ: HostClubDetailPage(所属ホスト・訪問記録・持参サンプル・次回訪問予定・取引履歴)
+   ・取引履歴: salesデータを host_club_id で絞り込み実データ集計表示(件数/売上合計/利益合計 + 明細展開)
+   ・visit_samples(訪問時持参サンプル): 訪問記録の登録・編集時に「未販売」の全商品(在庫・サンプル問わず)
+     から検索して複数選択し、visit_samplesへ差分同期(追加/削除)。visit削除時はFKのON DELETE CASCADEで自動削除。
    ============================================================ */
 
 /* ---- ホストクラブ一覧カード ---- */
@@ -1292,17 +1293,56 @@ function HostFormModal({ host, onClose, onSave }) {
 }
 
 /* ---- 訪問記録 登録・編集モーダル ---- */
-function VisitFormModal({ visit, onClose, onSave }) {
+function VisitFormModal({ visit, initialSamples, onClose, onSave }) {
   const isNew = !visit.id;
   const [visitDate, setVisitDate] = useState(visit.visit_date || todayISO());
   const [nextVisitDate, setNextVisitDate] = useState(visit.next_visit_date || "");
   const [saving, setSaving] = useState(false);
 
+  // 持参サンプル選択: 候補は「未販売」の全商品(在庫・サンプル問わず)から検索
+  const [unsoldProducts, setUnsoldProducts] = useState(null); // null = 読み込み中
+  const [sampleSearch, setSampleSearch] = useState("");
+  const [selectedSamples, setSelectedSamples] = useState(initialSamples || []); // [{id,product_name,size,product_code}]
+
+  useEffect(() => {
+    let cancelled = false;
+    supabase
+      .from("products")
+      .select("id,product_name,size,product_code")
+      .eq("status", "未販売")
+      .order("product_name")
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        setUnsoldProducts(error ? [] : (data || []));
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const selectedIds = useMemo(() => new Set(selectedSamples.map((p) => p.id)), [selectedSamples]);
+
+  const sampleCandidates = useMemo(() => {
+    if (!unsoldProducts) return [];
+    const q = sampleSearch.trim().toLowerCase();
+    return unsoldProducts.filter((p) => {
+      if (selectedIds.has(p.id)) return false;
+      if (!q) return false; // 未入力時は候補を出さない(一覧が長くなりすぎるため)
+      return (p.product_name || "").toLowerCase().includes(q) || (p.product_code || "").toLowerCase().includes(q);
+    }).slice(0, 20);
+  }, [unsoldProducts, selectedIds, sampleSearch]);
+
+  const addSample = (p) => { setSelectedSamples((prev) => [...prev, p]); setSampleSearch(""); };
+  const removeSample = (id) => setSelectedSamples((prev) => prev.filter((p) => p.id !== id));
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!visitDate) return;
     setSaving(true);
-    await onSave({ id: visit.id || null, visit_date: visitDate, next_visit_date: nextVisitDate || null });
+    await onSave({
+      id: visit.id || null,
+      visit_date: visitDate,
+      next_visit_date: nextVisitDate || null,
+      sampleProductIds: selectedSamples.map((p) => p.id),
+    });
     setSaving(false);
   };
 
@@ -1310,7 +1350,7 @@ function VisitFormModal({ visit, onClose, onSave }) {
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
       <form
         onSubmit={handleSubmit}
-        className="w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl p-5 space-y-4"
+        className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
         style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
       >
         <h2 className="font-display text-lg">{isNew ? "新規訪問記録" : "訪問記録を編集"}</h2>
@@ -1330,6 +1370,60 @@ function VisitFormModal({ visit, onClose, onSave }) {
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           />
         </div>
+
+        {/* 持参サンプル(visit_samples): 未販売の全商品(在庫・サンプル問わず)から検索して複数選択 */}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+            持参サンプル{selectedSamples.length > 0 ? `(${selectedSamples.length}点)` : ""}
+          </label>
+
+          {selectedSamples.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              {selectedSamples.map((p) => (
+                <span
+                  key={p.id}
+                  className="inline-flex items-center gap-1 text-xs pl-2 pr-1.5 py-1 rounded-full"
+                  style={{ background: "var(--mz-surface-hover)", color: "var(--mz-ink)" }}
+                >
+                  {p.product_name}{p.size ? ` - ${p.size}` : ""}
+                  <button
+                    type="button" onClick={() => removeSample(p.id)}
+                    className="w-4 h-4 flex items-center justify-center rounded-full"
+                    style={{ color: "var(--mz-ink-muted)" }}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <input
+            type="text" value={sampleSearch} onChange={(e) => setSampleSearch(e.target.value)}
+            placeholder="商品名・商品番号で検索して追加..."
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+
+          {unsoldProducts === null ? (
+            <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+          ) : sampleSearch.trim() && sampleCandidates.length === 0 ? (
+            <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>該当する未販売商品がありません</p>
+          ) : sampleCandidates.length > 0 && (
+            <div className="mt-1.5 rounded-lg max-h-40 overflow-y-auto" style={{ border: "1px solid var(--mz-border)" }}>
+              {sampleCandidates.map((p) => (
+                <button
+                  key={p.id} type="button" onClick={() => addSample(p)}
+                  className="w-full text-left px-3 py-2 text-xs truncate"
+                  style={{ borderBottom: "1px solid var(--mz-border)" }}
+                >
+                  {p.product_name}{p.size ? ` - ${p.size}` : ""}{p.product_code ? `(No.${p.product_code})` : ""}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className="flex gap-2 pt-1">
           <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
             キャンセル
@@ -1343,21 +1437,86 @@ function VisitFormModal({ visit, onClose, onSave }) {
   );
 }
 
+/* ---- 取引履歴サマリーカード(件数・売上合計・利益合計) ---- */
+function ClubSalesStat({ label, value, highlight }) {
+  return (
+    <div className="rounded-xl p-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+      <p className="text-[11px] mb-1" style={{ color: "var(--mz-ink-muted)" }}>{label}</p>
+      <p className="font-display text-sm truncate" style={{ color: highlight ? "var(--mz-gold-soft)" : "var(--mz-ink)" }}>{value}</p>
+    </div>
+  );
+}
+
+/* ---- 取引履歴の1件表示(読み取り専用。編集・削除は販売管理ページで行う) ---- */
+function ClubSaleRow({ sale }) {
+  const [expanded, setExpanded] = useState(false);
+  const hostName = sale.hosts ? sale.hosts.name : null;
+  const receiptNumber = sale.receipts ? sale.receipts.receipt_number : null;
+  const items = sale.sale_items || [];
+  return (
+    <div className="rounded-xl p-3 space-y-2" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap mb-1">
+            <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{sale.transaction_date}</span>
+            {receiptNumber && <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-gold-soft)" }}>No.{receiptNumber}</span>}
+          </div>
+          {hostName && <p className="text-sm truncate" style={{ color: "var(--mz-ink-muted)" }}>{hostName}</p>}
+        </div>
+        <span className="font-display text-base shrink-0" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(sale.total_amount_jpy)}</span>
+      </div>
+
+      {items.length > 0 && (
+        <div>
+          <button
+            type="button" onClick={() => setExpanded((v) => !v)}
+            className="text-xs" style={{ color: "var(--mz-ink-muted)" }}
+          >
+            {expanded ? "▲ 明細を閉じる" : `▼ 明細を見る(${items.length}点)`}
+          </button>
+          {expanded && (
+            <div className="mt-2 space-y-1.5 pt-2" style={{ borderTop: "1px solid var(--mz-border)" }}>
+              {items.map((it) => (
+                <div key={it.id} className="flex items-center justify-between gap-2 text-xs">
+                  <span className="truncate" style={{ color: "var(--mz-ink)" }}>{saleItemLabel(it)}</span>
+                  <span className="shrink-0" style={{ color: "var(--mz-ink-muted)" }}>{fmtJPY(it.unit_price_jpy)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---- ホストクラブ詳細ページ本体 ---- */
 function HostClubDetailPage({ clubId }) {
   const [club, setClub] = useState(null); // null=読込中, false=見つからない
   const [hosts, setHosts] = useState([]);
   const [visits, setVisits] = useState([]);
+  const [visitSamples, setVisitSamples] = useState([]); // visit_samples(このクラブの全訪問分。visit_idごとにグルーピングして使う)
+  const [expandedVisitId, setExpandedVisitId] = useState(null); // 持参サンプル明細を展開中の訪問記録id
+  const [sales, setSales] = useState(null); // null=読込中, []=取引なし。取引履歴(実データ集計)用
   const [error, setError] = useState(null);
   const [modalHost, setModalHost] = useState(null);
   const [modalVisit, setModalVisit] = useState(null);
 
   const loadAll = useCallback(async () => {
     setError(null);
-    const [clubRes, hostsRes, visitsRes] = await Promise.all([
+    const [clubRes, hostsRes, visitsRes, visitSamplesRes, salesRes] = await Promise.all([
       supabase.from("host_clubs").select("id,name").eq("id", clubId).maybeSingle(),
       supabase.from("hosts").select("id,host_club_id,name").eq("host_club_id", clubId).order("name"),
       supabase.from("visits").select("id,host_club_id,visit_date,next_visit_date").eq("host_club_id", clubId).order("visit_date", { ascending: false }),
+      supabase
+        .from("visit_samples")
+        .select("id,visit_id,product_id,products(product_name,size,product_code),visits!inner(host_club_id)")
+        .eq("visits.host_club_id", clubId),
+      supabase
+        .from("sales")
+        .select("id,transaction_date,host_id,total_amount_jpy,hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,unit_price_jpy,profit_jpy,products(product_name,size,product_code))")
+        .eq("host_club_id", clubId)
+        .order("transaction_date", { ascending: false }),
     ]);
     if (clubRes.error || !clubRes.data) {
       setError("ホストクラブが見つかりません");
@@ -1367,6 +1526,10 @@ function HostClubDetailPage({ clubId }) {
     setClub(clubRes.data);
     setHosts(hostsRes.data || []);
     setVisits(visitsRes.data || []);
+    // 持参サンプルの取得に失敗しても、訪問記録自体の表示は継続する
+    setVisitSamples(visitSamplesRes.error ? [] : (visitSamplesRes.data || []));
+    // 取引履歴の取得に失敗しても、クラブ本体の表示は継続する(salesテーブル側の一時的な問題でページ全体を止めないため)
+    setSales(salesRes.error ? [] : (salesRes.data || []));
   }, [clubId]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
@@ -1384,6 +1547,33 @@ function HostClubDetailPage({ clubId }) {
     }
     return null;
   }, [visits]);
+
+  // 取引履歴サマリー(件数・売上合計・利益合計)。利益は各sale_itemsのprofit_jpyを合算。
+  const salesSummary = useMemo(() => {
+    const list = sales || [];
+    let totalAmount = 0;
+    let totalProfit = 0;
+    list.forEach((s) => {
+      totalAmount += Number(s.total_amount_jpy) || 0;
+      (s.sale_items || []).forEach((it) => { totalProfit += Number(it.profit_jpy) || 0; });
+    });
+    return { count: list.length, totalAmount, totalProfit };
+  }, [sales]);
+
+  // 持参サンプルをvisit_idごとにグルーピング({ product_id, product_name, size, product_code }の配列)
+  const samplesByVisit = useMemo(() => {
+    const m = {};
+    visitSamples.forEach((vs) => {
+      if (!m[vs.visit_id]) m[vs.visit_id] = [];
+      m[vs.visit_id].push({
+        id: vs.product_id,
+        product_name: vs.products ? vs.products.product_name : null,
+        size: vs.products ? vs.products.size : null,
+        product_code: vs.products ? vs.products.product_code : null,
+      });
+    });
+    return m;
+  }, [visitSamples]);
 
   const handleSaveHost = async (form) => {
     if (form.id) {
@@ -1404,15 +1594,34 @@ function HostClubDetailPage({ clubId }) {
     loadAll();
   };
 
+  // 訪問記録の保存 + 持参サンプル(visit_samples)の差分同期。
+  // 新規登録時はvisits.insert().select("id")でidを取得してからvisit_samplesを紐付ける。
   const handleSaveVisit = async (form) => {
     const patch = { visit_date: form.visit_date, next_visit_date: form.next_visit_date };
+    let visitId = form.id;
     if (form.id) {
       const { error } = await supabase.from("visits").update(patch).eq("id", form.id);
       if (error) { alert("更新に失敗しました"); return; }
     } else {
-      const { error } = await supabase.from("visits").insert({ ...patch, host_club_id: clubId });
+      const { data, error } = await supabase.from("visits").insert({ ...patch, host_club_id: clubId }).select("id").single();
       if (error) { alert("登録に失敗しました"); return; }
+      visitId = data.id;
     }
+
+    const currentIds = new Set((samplesByVisit[visitId] || []).map((p) => p.id));
+    const nextIds = new Set(form.sampleProductIds || []);
+    const toAdd = [...nextIds].filter((id) => !currentIds.has(id));
+    const toRemove = [...currentIds].filter((id) => !nextIds.has(id));
+
+    if (toAdd.length > 0) {
+      const { error } = await supabase.from("visit_samples").insert(toAdd.map((productId) => ({ visit_id: visitId, product_id: productId })));
+      if (error) alert("持参サンプルの追加に失敗しました(訪問記録自体は保存済みです)");
+    }
+    if (toRemove.length > 0) {
+      const { error } = await supabase.from("visit_samples").delete().eq("visit_id", visitId).in("product_id", toRemove);
+      if (error) alert("持参サンプルの削除に失敗しました(訪問記録自体は保存済みです)");
+    }
+
     setModalVisit(null);
     loadAll();
   };
@@ -1503,41 +1712,94 @@ function HostClubDetailPage({ clubId }) {
           <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>訪問記録がありません</p>
         ) : (
           <div className="space-y-2">
-            {visits.map((v) => (
-              <div
-                key={v.id}
-                className="rounded-xl p-3 flex items-center justify-between gap-3 flex-wrap"
-                style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
-              >
-                <div className="text-sm">
-                  <span>訪問日: {v.visit_date}</span>
-                  {v.next_visit_date && (
-                    <span className="ml-3" style={{ color: "var(--mz-ink-muted)" }}>次回予定: {v.next_visit_date}</span>
+            {visits.map((v) => {
+              const samples = samplesByVisit[v.id] || [];
+              const isExpanded = expandedVisitId === v.id;
+              return (
+                <div
+                  key={v.id}
+                  className="rounded-xl p-3 space-y-2"
+                  style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+                >
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div className="text-sm">
+                      <span>訪問日: {v.visit_date}</span>
+                      {v.next_visit_date && (
+                        <span className="ml-3" style={{ color: "var(--mz-ink-muted)" }}>次回予定: {v.next_visit_date}</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button onClick={() => setModalVisit(v)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>編集</button>
+                      <button onClick={() => handleDeleteVisit(v.id)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}>削除</button>
+                    </div>
+                  </div>
+
+                  {samples.length > 0 && (
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => setExpandedVisitId(isExpanded ? null : v.id)}
+                        className="text-xs"
+                        style={{ color: "var(--mz-ink-muted)" }}
+                      >
+                        {isExpanded ? "▲ 持参サンプルを閉じる" : `▼ 持参サンプル(${samples.length}点)`}
+                      </button>
+                      {isExpanded && (
+                        <div className="mt-2 space-y-1 pt-2" style={{ borderTop: "1px solid var(--mz-border)" }}>
+                          {samples.map((p) => (
+                            <div key={p.id} className="text-xs truncate" style={{ color: "var(--mz-ink)" }}>
+                              {p.product_name || "(名称未設定)"}{p.size ? ` - ${p.size}` : ""}{p.product_code ? `(No.${p.product_code})` : ""}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button onClick={() => setModalVisit(v)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>編集</button>
-                  <button onClick={() => handleDeleteVisit(v.id)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}>削除</button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
 
-      {/* 取引履歴(salesテーブル実装後に自動集計で接続予定) */}
+      {/* 取引履歴(salesデータの実データ集計) */}
       <section className="space-y-3">
-        <h3 className="font-display text-base">取引履歴</h3>
-        <div
-          className="rounded-xl p-4 text-sm"
-          style={{ background: "var(--mz-surface)", border: "1px dashed var(--mz-border)", color: "var(--mz-ink-muted)" }}
-        >
-          販売登録機能(sales)の実装後、このクラブの取引履歴が日付順に自動集計表示されます。
+        <div className="flex items-center justify-between">
+          <h3 className="font-display text-base">取引履歴</h3>
+          {sales !== null && sales.length > 0 && (
+            <a href="#/sales" className="text-xs" style={{ color: "var(--mz-gold-soft)" }}>販売管理で編集 →</a>
+          )}
         </div>
+
+        {sales === null ? (
+          <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+        ) : sales.length === 0 ? (
+          <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>取引履歴がありません</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-3 gap-2">
+              <ClubSalesStat label="取引件数" value={`${salesSummary.count}件`} />
+              <ClubSalesStat label="売上合計" value={fmtJPY(salesSummary.totalAmount)} highlight />
+              <ClubSalesStat label="利益合計" value={fmtJPY(salesSummary.totalProfit)} highlight />
+            </div>
+            <div className="space-y-2">
+              {sales.map((s) => (
+                <ClubSaleRow key={s.id} sale={s} />
+              ))}
+            </div>
+          </>
+        )}
       </section>
 
       {modalHost && <HostFormModal host={modalHost} onClose={() => setModalHost(null)} onSave={handleSaveHost} />}
-      {modalVisit && <VisitFormModal visit={modalVisit} onClose={() => setModalVisit(null)} onSave={handleSaveVisit} />}
+      {modalVisit && (
+        <VisitFormModal
+          visit={modalVisit}
+          initialSamples={modalVisit.id ? (samplesByVisit[modalVisit.id] || []) : []}
+          onClose={() => setModalVisit(null)}
+          onSave={handleSaveVisit}
+        />
+      )}
     </div>
   );
 }
