@@ -2456,8 +2456,28 @@ async function uploadProductImage(file) {
 const EXPENSE_RECEIPT_BUCKET = "expense-receipts";
 const EXPENSE_RECEIPT_MAX_DIMENSION = 1600;
 const EXPENSE_RECEIPT_JPEG_QUALITY = 0.82;
+const EXPENSE_RECEIPT_MAX_PDF_BYTES = 15 * 1024 * 1024; // 15MB(PDFは圧縮できないためサイズ上限を設ける)
 
+/* ---- 領収書ファイルのアップロード(画像 or PDF) ----
+   ・画像: 従来通りcompressImageFileでJPEGに圧縮してからアップロード
+   ・PDF: 圧縮せずそのままアップロード(canvasで扱えないため)。上限15MBを超える場合はエラー */
 async function uploadExpenseReceiptFile(file) {
+  const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
+
+  if (isPdf) {
+    if (file.size > EXPENSE_RECEIPT_MAX_PDF_BYTES) {
+      return { ok: false, message: "PDFファイルが大きすぎます(15MB以内にしてください)" };
+    }
+    const path = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pdf`;
+    const { error: uploadError } = await supabase.storage.from(EXPENSE_RECEIPT_BUCKET).upload(path, file, {
+      upsert: false,
+      contentType: "application/pdf",
+    });
+    if (uploadError) return { ok: false, message: "領収書ファイル(PDF)のアップロードに失敗しました" };
+    const { data: pub } = supabase.storage.from(EXPENSE_RECEIPT_BUCKET).getPublicUrl(path);
+    return { ok: true, url: pub.publicUrl };
+  }
+
   let blob;
   try {
     blob = await compressImageFile(file, EXPENSE_RECEIPT_MAX_DIMENSION, EXPENSE_RECEIPT_JPEG_QUALITY);
@@ -2630,9 +2650,10 @@ function ProductStatusBadge({ status }) {
 }
 
 /* ---- 画像アップロード用ドロップゾーン(ドラッグ&ドロップ + クリック選択の両対応) ---- */
-function ImageDropZone({ label, previewUrl, uploading, onFile, helperText }) {
+function ImageDropZone({ label, previewUrl, uploading, onFile, helperText, accept = "image/*", dropText = "ドラッグ&ドロップ、またはクリックして画像を選択" }) {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef(null);
+  const isPdfPreview = !!previewUrl && /\.pdf($|\?)/i.test(previewUrl);
 
   const handleFiles = (files) => {
     const file = files && files[0];
@@ -2658,7 +2679,14 @@ function ImageDropZone({ label, previewUrl, uploading, onFile, helperText }) {
         }}
       >
         {previewUrl ? (
-          <img src={previewUrl} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
+          isPdfPreview ? (
+            <div className="w-14 h-14 rounded-lg shrink-0 flex flex-col items-center justify-center gap-0.5" style={{ background: "var(--mz-surface-hover)", border: "1px solid var(--mz-border)" }}>
+              <Icon name="file" className="w-5 h-5" style={{ color: "var(--mz-ink-muted)" }} />
+              <span className="text-[9px]" style={{ color: "var(--mz-ink-muted)" }}>PDF</span>
+            </div>
+          ) : (
+            <img src={previewUrl} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
+          )
         ) : (
           <div className="w-14 h-14 rounded-lg shrink-0 flex items-center justify-center" style={{ background: "var(--mz-surface-hover)" }}>
             <Icon name="tag" className="w-5 h-5" style={{ color: "var(--mz-ink-muted)" }} />
@@ -2667,13 +2695,13 @@ function ImageDropZone({ label, previewUrl, uploading, onFile, helperText }) {
         <div className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
           {uploading ? "アップロード中..." : (
             <>
-              ドラッグ&ドロップ、またはクリックして画像を選択
+              {dropText}
               {helperText && <><br />{helperText}</>}
             </>
           )}
         </div>
         <input
-          ref={inputRef} type="file" accept="image/*" className="hidden"
+          ref={inputRef} type="file" accept={accept} className="hidden"
           onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }}
         />
       </div>
@@ -5009,7 +5037,9 @@ function ExpenseFormModal({ expense, onClose, onSave }) {
             previewUrl={form.receipt_file_url}
             uploading={uploadingReceipt}
             onFile={handleReceiptFile}
-            helperText="ドラッグ&ドロップ、またはクリックして領収書の写真をアップロード"
+            accept="image/*,application/pdf"
+            dropText="ドラッグ&ドロップ、またはクリックして画像/PDFを選択"
+            helperText="写真のほかPDF(明細書等)もそのままアップロードできます"
           />
           <div className="mt-2">
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>領収書URL(アップロード後に自動入力。手入力での上書きも可)</label>
