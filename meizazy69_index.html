@@ -2511,6 +2511,44 @@ async function extractProductInfoFromImage(imageUrl) {
   return resp.json();
 }
 
+/* ---- 経費の領収書AI自動抽出(Edge Function呼び出し) ----
+   デプロイ必要: supabase/functions/extract-expense-info(別ファイルとして用意。要デプロイ)
+   レスポンス想定: {
+     payment_date: "YYYY-MM-DD"|null, payee: string|null, item_name: string|null,
+     amount_incl_tax: number|null, tax_category: string|null, account_category: string|null,
+     invoice_number: string|null
+   }
+   画像・PDFどちらの公開URLも受け付ける(Edge Function側でcontent-typeを見て分岐する想定)。 */
+async function extractExpenseInfoFromImage(fileUrl) {
+  const resp = await fetch(`${SUPABASE_URL}/functions/v1/extract-expense-info`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      apikey: SUPABASE_ANON_KEY,
+    },
+    body: JSON.stringify({ fileUrl }),
+  });
+  if (!resp.ok) throw new Error("AI自動抽出に失敗しました(Edge Functionが未デプロイの可能性があります)");
+  return resp.json();
+}
+
+/* ---- AI抽出結果を経費フォームの値へ安全にマッピング ----
+   ・勘定科目/税区分は固定選択肢に一致する場合のみ採用し、一致しなければフォーム側のデフォルトに委ねる(undefinedを返す)
+   ・金額は文字列化(フォームのinput[type=number]の値と型を揃えるため) */
+function mapExtractedExpenseInfo(info) {
+  const safe = info || {};
+  return {
+    payment_date: safe.payment_date || undefined,
+    payee: safe.payee || undefined,
+    item_name: safe.item_name || undefined,
+    amount_incl_tax: safe.amount_incl_tax != null ? String(safe.amount_incl_tax) : undefined,
+    account_category: EXPENSE_ACCOUNT_CATEGORY_OPTIONS.includes(safe.account_category) ? safe.account_category : undefined,
+    tax_category: EXPENSE_TAX_CATEGORY_OPTIONS.includes(safe.tax_category) ? safe.tax_category : undefined,
+    invoice_number: safe.invoice_number || undefined,
+  };
+}
+
 /* ---- ウォレット残高の事前チェック(不足時は登録前に中断するため) ---- */
 async function getWalletRemainingTotal() {
   const { data, error } = await supabase.from("agent_charges").select("remaining_cny").gt("remaining_cny", 0);
@@ -4871,8 +4909,86 @@ function ExpenseList({ expenses, onEdit, onDelete }) {
   );
 }
 
-/* ---- 登録・編集モーダル ---- */
-function ExpenseFormModal({ expense, onClose, onSave }) {
+/* ---- AIレシート読み込みカード ----
+   ・画像/PDFをドラッグ&ドロップまたはクリックで選択
+   ・アップロード(uploadExpenseReceiptFile)→AI自動抽出(extractExpenseInfoFromImage)を連続実行し、
+     結果を親(ExpensesPage)へ渡して下の入力フォームに反映する。DBへの経費登録は行わない(あくまで下書き反映のみ)。 */
+function AiReceiptReaderCard({ onExtracted }) {
+  const [dragOver, setDragOver] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [extracting, setExtracting] = useState(false);
+  const [error, setError] = useState(null);
+  const inputRef = useRef(null);
+  const busy = uploading || extracting;
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    setError(null);
+    setUploading(true);
+    const uploadRes = await uploadExpenseReceiptFile(file);
+    setUploading(false);
+    if (!uploadRes.ok) { setError(uploadRes.message); return; }
+
+    setExtracting(true);
+    try {
+      const info = await extractExpenseInfoFromImage(uploadRes.url);
+      onExtracted(mapExtractedExpenseInfo(info), uploadRes.url);
+    } catch (err) {
+      setError(err.message || "AI自動抽出に失敗しました");
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+  const handleFiles = (files) => {
+    const file = files && files[0];
+    if (file) handleFile(file);
+  };
+
+  return (
+    <div className="rounded-xl p-4 space-y-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+      <h2 className="font-display text-base">AIレシート読み込み(画像・PDF→自動入力)</h2>
+      <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+        レシート・領収書の画像またはPDFをアップロードすると、支払日・支払先・品目・金額・税区分・勘定科目・インボイス番号を自動で読み取り、下の入力欄に反映します。
+      </p>
+
+      <div
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          handleFiles(e.dataTransfer.files);
+        }}
+        onClick={() => !busy && inputRef.current && inputRef.current.click()}
+        className="rounded-lg p-8 flex flex-col items-center justify-center gap-2 cursor-pointer transition-colors text-center"
+        style={{
+          border: `1.5px dashed ${dragOver ? "var(--mz-gold)" : "var(--mz-border)"}`,
+          background: dragOver ? "var(--mz-surface-hover)" : "transparent",
+        }}
+      >
+        <Icon name="file" className="w-8 h-8" style={{ color: "var(--mz-ink-muted)" }} />
+        <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>
+          {uploading ? "アップロード中..." : extracting ? "AIが読み取り中..." : "クリックまたはドラッグ&ドロップ"}
+        </p>
+        {!busy && <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>JPG / PNG / PDF対応</p>}
+        <input
+          ref={inputRef} type="file" accept="image/*,application/pdf" className="hidden"
+          onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }}
+        />
+      </div>
+
+      {error && (
+        <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>
+      )}
+    </div>
+  );
+}
+
+/* ---- 経費 常設入力フォーム(モーダルではなくページ本体に常設。新規/編集を兼ねる) ----
+   ・expense.idがあれば編集モード、なければ新規モード(AIレシート読み込みからの下書き反映時もid=nullの新規モード扱い)
+   ・呼び出し側(ExpensesPage)が`key`propを変えることで、編集開始/AI反映/保存完了のたびに内部stateを再初期化する */
+function ExpenseInlineForm({ expense, onSave, onCancel }) {
   const isNew = !expense.id;
   const [form, setForm] = useState({
     id: expense.id || null,
@@ -4908,203 +5024,208 @@ function ExpenseFormModal({ expense, onClose, onSave }) {
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
-      style={{ background: "rgba(0,0,0,0.6)" }}
+    <form
+      onSubmit={handleSubmit}
+      className="rounded-xl p-4 md:p-5 space-y-4"
+      style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
     >
-      <form
-        onSubmit={handleSubmit}
-        className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
-        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
-      >
-        <h2 className="font-display text-lg">{isNew ? "新規経費" : "経費を編集"}</h2>
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <h2 className="font-display text-lg">{isNew ? "経費入力" : "経費を編集"}</h2>
+        {!isNew && (
+          <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(199,168,105,0.15)", color: "var(--mz-gold-soft)" }}>
+            編集中
+          </span>
+        )}
+      </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払日</label>
-            <input
-              type="date"
-              value={form.payment_date}
-              onChange={(e) => setForm((f) => ({ ...f, payment_date: e.target.value }))}
-              required
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-            />
-          </div>
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>金額(税込)</label>
-            <input
-              type="number"
-              inputMode="numeric"
-              min="0"
-              value={form.amount_incl_tax}
-              onChange={(e) => setForm((f) => ({ ...f, amount_incl_tax: e.target.value }))}
-              required
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-            />
-          </div>
-        </div>
-
+      <div className="grid grid-cols-2 gap-3">
         <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払先</label>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払日</label>
           <input
-            type="text"
-            value={form.payee}
-            onChange={(e) => setForm((f) => ({ ...f, payee: e.target.value }))}
+            type="date"
+            value={form.payment_date}
+            onChange={(e) => setForm((f) => ({ ...f, payment_date: e.target.value }))}
             required
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           />
         </div>
-
         <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>品目・内容(任意)</label>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>金額(税込)</label>
           <input
-            type="text"
-            value={form.item_name}
-            onChange={(e) => setForm((f) => ({ ...f, item_name: e.target.value }))}
+            type="number"
+            inputMode="numeric"
+            min="0"
+            value={form.amount_incl_tax}
+            onChange={(e) => setForm((f) => ({ ...f, amount_incl_tax: e.target.value }))}
+            required
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           />
         </div>
+      </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>勘定科目</label>
-            <select
-              value={form.account_category}
-              onChange={(e) => setForm((f) => ({ ...f, account_category: e.target.value }))}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-            >
-              {EXPENSE_ACCOUNT_CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>税区分</label>
-            <select
-              value={form.tax_category}
-              onChange={(e) => setForm((f) => ({ ...f, tax_category: e.target.value }))}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-            >
-              {EXPENSE_TAX_CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-        </div>
+      <div>
+        <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払先</label>
+        <input
+          type="text"
+          value={form.payee}
+          onChange={(e) => setForm((f) => ({ ...f, payee: e.target.value }))}
+          required
+          className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+        />
+      </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払方法</label>
-            <select
-              value={form.payment_method}
-              onChange={(e) => setForm((f) => ({ ...f, payment_method: e.target.value }))}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-            >
-              {EXPENSE_PAYMENT_METHOD_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>立替精算状況(任意)</label>
-            <select
-              value={form.reimbursement_status}
-              onChange={(e) => setForm((f) => ({ ...f, reimbursement_status: e.target.value }))}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-            >
-              <option value="">(立替なし)</option>
-              {EXPENSE_REIMBURSEMENT_STATUS_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-        </div>
+      <div>
+        <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>品目・内容(任意)</label>
+        <input
+          type="text"
+          value={form.item_name}
+          onChange={(e) => setForm((f) => ({ ...f, item_name: e.target.value }))}
+          className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+        />
+      </div>
 
+      <div className="grid grid-cols-2 gap-3">
         <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>請求書番号(任意)</label>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>勘定科目</label>
+          <select
+            value={form.account_category}
+            onChange={(e) => setForm((f) => ({ ...f, account_category: e.target.value }))}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            {EXPENSE_ACCOUNT_CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>税区分</label>
+          <select
+            value={form.tax_category}
+            onChange={(e) => setForm((f) => ({ ...f, tax_category: e.target.value }))}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            {EXPENSE_TAX_CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払方法</label>
+          <select
+            value={form.payment_method}
+            onChange={(e) => setForm((f) => ({ ...f, payment_method: e.target.value }))}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            {EXPENSE_PAYMENT_METHOD_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>立替精算状況(任意)</label>
+          <select
+            value={form.reimbursement_status}
+            onChange={(e) => setForm((f) => ({ ...f, reimbursement_status: e.target.value }))}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            <option value="">(立替なし)</option>
+            {EXPENSE_REIMBURSEMENT_STATUS_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>請求書番号(任意)</label>
+        <input
+          type="text"
+          value={form.invoice_number}
+          onChange={(e) => setForm((f) => ({ ...f, invoice_number: e.target.value }))}
+          className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+        />
+      </div>
+
+      <div>
+        <ImageDropZone
+          label="領収書ファイル(任意)"
+          previewUrl={form.receipt_file_url}
+          uploading={uploadingReceipt}
+          onFile={handleReceiptFile}
+          accept="image/*,application/pdf"
+          dropText="ドラッグ&ドロップ、またはクリックして画像/PDFを選択"
+          helperText="写真のほかPDF(明細書等)もそのままアップロードできます"
+        />
+        <div className="mt-2">
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>領収書URL(アップロード後に自動入力。手入力での上書きも可)</label>
           <input
             type="text"
-            value={form.invoice_number}
-            onChange={(e) => setForm((f) => ({ ...f, invoice_number: e.target.value }))}
+            value={form.receipt_file_url}
+            onChange={(e) => setForm((f) => ({ ...f, receipt_file_url: e.target.value }))}
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           />
+          {form.receipt_file_url && (
+            <a
+              href={form.receipt_file_url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs mt-1 inline-block"
+              style={{ color: "var(--mz-gold-soft)" }}
+            >
+              現在のファイルを別タブで開く
+            </a>
+          )}
         </div>
+      </div>
 
-        <div>
-          <ImageDropZone
-            label="領収書ファイル(任意)"
-            previewUrl={form.receipt_file_url}
-            uploading={uploadingReceipt}
-            onFile={handleReceiptFile}
-            accept="image/*,application/pdf"
-            dropText="ドラッグ&ドロップ、またはクリックして画像/PDFを選択"
-            helperText="写真のほかPDF(明細書等)もそのままアップロードできます"
-          />
-          <div className="mt-2">
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>領収書URL(アップロード後に自動入力。手入力での上書きも可)</label>
-            <input
-              type="text"
-              value={form.receipt_file_url}
-              onChange={(e) => setForm((f) => ({ ...f, receipt_file_url: e.target.value }))}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-            />
-            {form.receipt_file_url && (
-              <a
-                href={form.receipt_file_url}
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs mt-1 inline-block"
-                style={{ color: "var(--mz-gold-soft)" }}
-              >
-                現在のファイルを別タブで開く
-              </a>
-            )}
-          </div>
-        </div>
+      <div>
+        <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>メモ(任意)</label>
+        <textarea
+          value={form.memo}
+          onChange={(e) => setForm((f) => ({ ...f, memo: e.target.value }))}
+          rows={2}
+          className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent resize-none"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+        />
+      </div>
 
-        <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>メモ(任意)</label>
-          <textarea
-            value={form.memo}
-            onChange={(e) => setForm((f) => ({ ...f, memo: e.target.value }))}
-            rows={2}
-            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent resize-none"
-            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-          />
-        </div>
-
-        <div className="flex gap-2 pt-1">
-          <button
-            type="button"
-            onClick={onClose}
-            className="flex-1 rounded-lg py-2.5 text-sm"
-            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
-          >
-            キャンセル
-          </button>
-          <button
-            type="submit"
-            disabled={saving || uploadingReceipt}
-            className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60"
-            style={{ background: "var(--mz-gold)", color: "#1a1710" }}
-          >
-            {saving ? "保存中..." : "保存"}
-          </button>
-        </div>
-      </form>
-    </div>
+      <div className="flex gap-2 pt-1">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="flex-1 rounded-lg py-2.5 text-sm"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+        >
+          {isNew ? "クリア" : "キャンセル"}
+        </button>
+        <button
+          type="submit"
+          disabled={saving || uploadingReceipt}
+          className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60"
+          style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+        >
+          {saving ? "保存中..." : isNew ? "追加" : "更新"}
+        </button>
+      </div>
+    </form>
   );
 }
 
-/* ---- 経費ページ本体 ---- */
+/* ---- 経費ページ本体 ----
+   ・AIレシート読み込みカード → 常設入力フォーム(新規/編集兼用) → フィルタ・合計 → 一覧、の縦並び構成
+   ・モーダルは使用しない(2026-07-09改修: 常設フォーム方式に変更) */
 function ExpensesPage() {
   const [expenses, setExpenses] = useState(null); // null = 読み込み中
   const [error, setError] = useState(null);
   const [filterMonth, setFilterMonth] = useState("all"); // "all" | "YYYY-MM"
   const [filterCategory, setFilterCategory] = useState("all");
-  const [modalExpense, setModalExpense] = useState(null); // null=閉じる, {}=新規, obj=編集
+  const [formExpense, setFormExpense] = useState({}); // {}=新規(空), idを持つオブジェクト=編集, AI抽出結果(id無し)=新規への下書き反映
+  const [formKey, setFormKey] = useState(0); // 変更するたびにExpenseInlineFormを再マウントし、内部stateを再初期化する
 
   const loadExpenses = useCallback(async () => {
     setError(null);
@@ -5142,6 +5263,22 @@ function ExpensesPage() {
     [filteredExpenses]
   );
 
+  const resetForm = () => {
+    setFormExpense({});
+    setFormKey((k) => k + 1);
+  };
+
+  const handleEdit = (expense) => {
+    setFormExpense(expense);
+    setFormKey((k) => k + 1);
+  };
+
+  /* ---- AIレシート読み込みカードからの反映。id無しの新規下書きとしてフォームへ流し込む ---- */
+  const handleExtracted = (mappedFields, uploadedUrl) => {
+    setFormExpense({ ...mappedFields, receipt_file_url: uploadedUrl });
+    setFormKey((k) => k + 1);
+  };
+
   const handleSave = async (form) => {
     const patch = {
       payment_date: form.payment_date,
@@ -5164,7 +5301,7 @@ function ExpensesPage() {
       const { error } = await supabase.from("expenses").insert({ ...patch, entry_method: "手動" });
       if (error) { alert("登録に失敗しました"); return; }
     }
-    setModalExpense(null);
+    resetForm();
     loadExpenses();
   };
 
@@ -5177,7 +5314,17 @@ function ExpensesPage() {
 
   return (
     <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-5">
-      <div className="flex flex-wrap items-center gap-3 justify-between">
+      <h1 className="font-display text-xl">経費入力</h1>
+
+      {error && (
+        <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>
+      )}
+
+      <AiReceiptReaderCard onExtracted={handleExtracted} />
+
+      <ExpenseInlineForm key={formKey} expense={formExpense} onSave={handleSave} onCancel={resetForm} />
+
+      <div className="flex flex-wrap items-center gap-3 justify-between pt-2">
         <div className="flex flex-wrap gap-2">
           <select
             value={filterMonth}
@@ -5198,18 +5345,7 @@ function ExpensesPage() {
             {EXPENSE_ACCOUNT_CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
         </div>
-        <button
-          onClick={() => setModalExpense({})}
-          className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap"
-          style={{ background: "var(--mz-gold)", color: "#1a1710" }}
-        >
-          + 新規経費
-        </button>
       </div>
-
-      {error && (
-        <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>
-      )}
 
       {expenses !== null && (
         <div className="rounded-xl p-4 flex items-center justify-between" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
@@ -5221,11 +5357,7 @@ function ExpensesPage() {
       {expenses === null ? (
         <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
       ) : (
-        <ExpenseList expenses={filteredExpenses} onEdit={setModalExpense} onDelete={handleDelete} />
-      )}
-
-      {modalExpense && (
-        <ExpenseFormModal expense={modalExpense} onClose={() => setModalExpense(null)} onSave={handleSave} />
+        <ExpenseList expenses={filteredExpenses} onEdit={handleEdit} onDelete={handleDelete} />
       )}
     </div>
   );
