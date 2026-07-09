@@ -4677,6 +4677,434 @@ function CatalogsPage() {
 }
 
 /* ============================================================
+   経費(expenses)
+   ・列構成はSupabase側の既存テーブルに合わせる(2026-07-09確認)
+   ・領収書ファイルのアップロード(receipt_file_url)は次の機能単位で対応予定。
+     このステップでは手入力のURLとしてのみ扱う。
+   ・entry_method は本UIからの登録時は常に "手動" を自動セットする(手動編集不可)。
+   ============================================================ */
+const EXPENSE_ACCOUNT_CATEGORY_OPTIONS = [
+  "消耗品費", "旅費交通費", "通信費", "接待交際費", "地代家賃",
+  "支払手数料", "広告宣伝費", "水道光熱費", "荷造運賃", "雑費", "その他",
+];
+const EXPENSE_TAX_CATEGORY_OPTIONS = ["課税仕入10%", "軽減税率8%", "非課税", "不課税", "対象外"];
+const EXPENSE_PAYMENT_METHOD_OPTIONS = ["現金", "クレジットカード", "銀行振込", "その他"];
+const EXPENSE_REIMBURSEMENT_STATUS_OPTIONS = ["未精算", "精算済み"];
+
+function ExpenseReimbursementBadge({ status }) {
+  if (!status) return null;
+  const styles = {
+    "未精算": { bg: "#3a3220", color: "var(--mz-gold-soft)" },
+    "精算済み": { bg: "#1f3a2a", color: "#8fd6ab" },
+  };
+  const s = styles[status] || { bg: "#33301F", color: "var(--mz-ink-muted)" };
+  return (
+    <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: s.bg, color: s.color }}>
+      {status}
+    </span>
+  );
+}
+
+/* ---- 一覧表示 ---- */
+function ExpenseList({ expenses, onEdit, onDelete }) {
+  if (expenses.length === 0) {
+    return (
+      <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>
+        該当する経費がありません
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {expenses.map((e) => (
+        <div
+          key={e.id}
+          className="rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3"
+          style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+        >
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap mb-1">
+              <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{e.payment_date}</span>
+              <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-gold-soft)" }}>
+                {e.account_category}
+              </span>
+              <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{e.tax_category}</span>
+              <ExpenseReimbursementBadge status={e.reimbursement_status} />
+            </div>
+            <p className="text-sm font-medium truncate">{e.payee}</p>
+            {(e.item_name || e.memo) && (
+              <p className="text-xs mt-0.5 break-words whitespace-pre-wrap" style={{ color: "var(--mz-ink-muted)" }}>
+                {[e.item_name, e.memo].filter(Boolean).join(" / ")}
+              </p>
+            )}
+            <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+              <span>{e.payment_method}</span>
+              {e.invoice_number && <span>請求書番号: {e.invoice_number}</span>}
+              {e.receipt_file_url && (
+                <a href={e.receipt_file_url} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--mz-gold-soft)" }}>
+                  領収書を見る
+                </a>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            <p className="font-display text-base whitespace-nowrap" style={{ color: "var(--mz-gold-soft)" }}>
+              {fmtJPY(e.amount_incl_tax)}
+            </p>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => onEdit(e)}
+                className="text-xs px-2.5 py-1.5 rounded-lg"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+              >
+                編集
+              </button>
+              <button
+                onClick={() => onDelete(e.id)}
+                className="text-xs px-2.5 py-1.5 rounded-lg"
+                style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}
+              >
+                削除
+              </button>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---- 登録・編集モーダル ---- */
+function ExpenseFormModal({ expense, onClose, onSave }) {
+  const isNew = !expense.id;
+  const [form, setForm] = useState({
+    id: expense.id || null,
+    payment_date: expense.payment_date || todayISO(),
+    payee: expense.payee || "",
+    payment_method: expense.payment_method || EXPENSE_PAYMENT_METHOD_OPTIONS[0],
+    reimbursement_status: expense.reimbursement_status || "",
+    invoice_number: expense.invoice_number || "",
+    item_name: expense.item_name || "",
+    account_category: expense.account_category || EXPENSE_ACCOUNT_CATEGORY_OPTIONS[0],
+    tax_category: expense.tax_category || EXPENSE_TAX_CATEGORY_OPTIONS[0],
+    amount_incl_tax: expense.amount_incl_tax != null ? String(expense.amount_incl_tax) : "",
+    memo: expense.memo || "",
+    receipt_file_url: expense.receipt_file_url || "",
+  });
+  const [saving, setSaving] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!form.payment_date || !form.payee.trim() || !form.amount_incl_tax) return;
+    setSaving(true);
+    await onSave(form);
+    setSaving(false);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
+      style={{ background: "rgba(0,0,0,0.6)" }}
+    >
+      <form
+        onSubmit={handleSubmit}
+        className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <h2 className="font-display text-lg">{isNew ? "新規経費" : "経費を編集"}</h2>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払日</label>
+            <input
+              type="date"
+              value={form.payment_date}
+              onChange={(e) => setForm((f) => ({ ...f, payment_date: e.target.value }))}
+              required
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>金額(税込)</label>
+            <input
+              type="number"
+              inputMode="numeric"
+              min="0"
+              value={form.amount_incl_tax}
+              onChange={(e) => setForm((f) => ({ ...f, amount_incl_tax: e.target.value }))}
+              required
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払先</label>
+          <input
+            type="text"
+            value={form.payee}
+            onChange={(e) => setForm((f) => ({ ...f, payee: e.target.value }))}
+            required
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>品目・内容(任意)</label>
+          <input
+            type="text"
+            value={form.item_name}
+            onChange={(e) => setForm((f) => ({ ...f, item_name: e.target.value }))}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>勘定科目</label>
+            <select
+              value={form.account_category}
+              onChange={(e) => setForm((f) => ({ ...f, account_category: e.target.value }))}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            >
+              {EXPENSE_ACCOUNT_CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>税区分</label>
+            <select
+              value={form.tax_category}
+              onChange={(e) => setForm((f) => ({ ...f, tax_category: e.target.value }))}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            >
+              {EXPENSE_TAX_CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払方法</label>
+            <select
+              value={form.payment_method}
+              onChange={(e) => setForm((f) => ({ ...f, payment_method: e.target.value }))}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            >
+              {EXPENSE_PAYMENT_METHOD_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>立替精算状況(任意)</label>
+            <select
+              value={form.reimbursement_status}
+              onChange={(e) => setForm((f) => ({ ...f, reimbursement_status: e.target.value }))}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            >
+              <option value="">(立替なし)</option>
+              {EXPENSE_REIMBURSEMENT_STATUS_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>請求書番号(任意)</label>
+          <input
+            type="text"
+            value={form.invoice_number}
+            onChange={(e) => setForm((f) => ({ ...f, invoice_number: e.target.value }))}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>領収書URL(任意)</label>
+          <input
+            type="text"
+            value={form.receipt_file_url}
+            onChange={(e) => setForm((f) => ({ ...f, receipt_file_url: e.target.value }))}
+            placeholder="画像アップロード機能は次のステップで対応予定"
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>メモ(任意)</label>
+          <textarea
+            value={form.memo}
+            onChange={(e) => setForm((f) => ({ ...f, memo: e.target.value }))}
+            rows={2}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent resize-none"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div className="flex gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 rounded-lg py-2.5 text-sm"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+          >
+            キャンセル
+          </button>
+          <button
+            type="submit"
+            disabled={saving}
+            className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60"
+            style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+          >
+            {saving ? "保存中..." : "保存"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ---- 経費ページ本体 ---- */
+function ExpensesPage() {
+  const [expenses, setExpenses] = useState(null); // null = 読み込み中
+  const [error, setError] = useState(null);
+  const [filterMonth, setFilterMonth] = useState("all"); // "all" | "YYYY-MM"
+  const [filterCategory, setFilterCategory] = useState("all");
+  const [modalExpense, setModalExpense] = useState(null); // null=閉じる, {}=新規, obj=編集
+
+  const loadExpenses = useCallback(async () => {
+    setError(null);
+    const { data, error } = await supabase
+      .from("expenses")
+      .select("id,payment_date,payee,payment_method,reimbursement_status,invoice_number,item_name,account_category,tax_category,amount_incl_tax,memo,receipt_file_url,entry_method,created_at")
+      .order("payment_date", { ascending: false });
+    if (error) {
+      setError("経費データの取得に失敗しました");
+      setExpenses([]);
+    } else {
+      setExpenses(data || []);
+    }
+  }, []);
+
+  useEffect(() => { loadExpenses(); }, [loadExpenses]);
+
+  const monthOptions = useMemo(() => {
+    if (!expenses) return [];
+    const set = new Set(expenses.map((e) => (e.payment_date || "").slice(0, 7)).filter(Boolean));
+    return Array.from(set).sort((a, b) => b.localeCompare(a));
+  }, [expenses]);
+
+  const filteredExpenses = useMemo(() => {
+    if (!expenses) return [];
+    return expenses.filter((e) => {
+      if (filterMonth !== "all" && !(e.payment_date || "").startsWith(filterMonth)) return false;
+      if (filterCategory !== "all" && e.account_category !== filterCategory) return false;
+      return true;
+    });
+  }, [expenses, filterMonth, filterCategory]);
+
+  const totalAmount = useMemo(
+    () => filteredExpenses.reduce((sum, e) => sum + (Number(e.amount_incl_tax) || 0), 0),
+    [filteredExpenses]
+  );
+
+  const handleSave = async (form) => {
+    const patch = {
+      payment_date: form.payment_date,
+      payee: form.payee.trim(),
+      payment_method: form.payment_method,
+      reimbursement_status: form.reimbursement_status || null,
+      invoice_number: form.invoice_number.trim() || null,
+      item_name: form.item_name.trim() || null,
+      account_category: form.account_category,
+      tax_category: form.tax_category,
+      amount_incl_tax: Number(form.amount_incl_tax),
+      memo: form.memo.trim() || null,
+      receipt_file_url: form.receipt_file_url.trim() || null,
+    };
+
+    if (form.id) {
+      const { error } = await supabase.from("expenses").update(patch).eq("id", form.id);
+      if (error) { alert("更新に失敗しました"); return; }
+    } else {
+      const { error } = await supabase.from("expenses").insert({ ...patch, entry_method: "手動" });
+      if (error) { alert("登録に失敗しました"); return; }
+    }
+    setModalExpense(null);
+    loadExpenses();
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm("この経費を削除しますか?")) return;
+    const { error } = await supabase.from("expenses").delete().eq("id", id);
+    if (error) { alert("削除に失敗しました"); return; }
+    loadExpenses();
+  };
+
+  return (
+    <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-5">
+      <div className="flex flex-wrap items-center gap-3 justify-between">
+        <div className="flex flex-wrap gap-2">
+          <select
+            value={filterMonth}
+            onChange={(e) => setFilterMonth(e.target.value)}
+            className="rounded-lg px-3 py-2 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            <option value="all">対象月: すべて</option>
+            {monthOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+          <select
+            value={filterCategory}
+            onChange={(e) => setFilterCategory(e.target.value)}
+            className="rounded-lg px-3 py-2 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            <option value="all">勘定科目: すべて</option>
+            {EXPENSE_ACCOUNT_CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <button
+          onClick={() => setModalExpense({})}
+          className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap"
+          style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+        >
+          + 新規経費
+        </button>
+      </div>
+
+      {error && (
+        <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>
+      )}
+
+      {expenses !== null && (
+        <div className="rounded-xl p-4 flex items-center justify-between" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+          <span className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>表示中の合計({filteredExpenses.length}件)</span>
+          <span className="font-display text-lg" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(totalAmount)}</span>
+        </div>
+      )}
+
+      {expenses === null ? (
+        <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+      ) : (
+        <ExpenseList expenses={filteredExpenses} onEdit={setModalExpense} onDelete={handleDelete} />
+      )}
+
+      {modalExpense && (
+        <ExpenseFormModal expense={modalExpense} onClose={() => setModalExpense(null)} onSave={handleSave} />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
    ルート → ページ の対応
    ============================================================ */
 const ROUTE_MAP = {
@@ -4749,6 +5177,8 @@ function AppShell({ staffName, onSwitchStaff, onSignOut }) {
             <CatalogsPage />
           ) : activeKey === "dashboard" ? (
             <DashboardPage />
+          ) : activeKey === "expenses" ? (
+            <ExpensesPage />
           ) : (
             <PlaceholderPage item={activeItem} />
           )}
