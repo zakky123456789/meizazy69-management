@@ -2397,7 +2397,9 @@ const PRODUCT_STATUS_OPTIONS = ["未販売", "販売済み", "返品済み"];
    ・Supabase Storageは無料枠の容量が限られるため、保存前に必ず圧縮する
    ・長辺 PRODUCT_IMAGE_MAX_DIMENSION px 以内 / JPEG品質 PRODUCT_IMAGE_JPEG_QUALITY に変換
    ・副次効果として、Edge FunctionでのBase64変換・Claude Vision API送信も軽量化される */
-function compressImageFile(file) {
+function compressImageFile(file, maxDimension, quality) {
+  const maxDim = maxDimension || PRODUCT_IMAGE_MAX_DIMENSION;
+  const jpegQuality = quality || PRODUCT_IMAGE_JPEG_QUALITY;
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error("画像の読み込みに失敗しました"));
@@ -2406,7 +2408,6 @@ function compressImageFile(file) {
       img.onerror = () => reject(new Error("画像の読み込みに失敗しました"));
       img.onload = () => {
         let { width, height } = img;
-        const maxDim = PRODUCT_IMAGE_MAX_DIMENSION;
         if (width > maxDim || height > maxDim) {
           if (width >= height) { height = Math.round(height * (maxDim / width)); width = maxDim; }
           else { width = Math.round(width * (maxDim / height)); height = maxDim; }
@@ -2419,7 +2420,7 @@ function compressImageFile(file) {
         canvas.toBlob(
           (blob) => { if (blob) resolve(blob); else reject(new Error("画像の圧縮に失敗しました")); },
           "image/jpeg",
-          PRODUCT_IMAGE_JPEG_QUALITY
+          jpegQuality
         );
       };
       img.src = e.target.result;
@@ -2445,6 +2446,32 @@ async function uploadProductImage(file) {
   if (uploadError) return { ok: false, message: "画像のアップロードに失敗しました" };
   const { data } = supabase.storage.from(PRODUCT_IMAGE_BUCKET).getPublicUrl(path);
   return { ok: true, url: data.publicUrl };
+}
+
+/* ---- 経費(expenses)の領収書ファイルアップロード(Supabase Storage) ----
+   ・商品画像とは別のバケット("expense-receipts")を使用する。
+     Supabase側で事前に同名のpublicバケットを作成しておく必要がある(product-imagesと同様の設定)。
+   ・領収書は文字の判読性(金額・日付・宛名等)が重要なため、商品画像より
+     長辺の上限を大きめ・JPEG品質を高めに設定して圧縮する。 */
+const EXPENSE_RECEIPT_BUCKET = "expense-receipts";
+const EXPENSE_RECEIPT_MAX_DIMENSION = 1600;
+const EXPENSE_RECEIPT_JPEG_QUALITY = 0.82;
+
+async function uploadExpenseReceiptFile(file) {
+  let blob;
+  try {
+    blob = await compressImageFile(file, EXPENSE_RECEIPT_MAX_DIMENSION, EXPENSE_RECEIPT_JPEG_QUALITY);
+  } catch (err) {
+    return { ok: false, message: err.message || "画像の圧縮に失敗しました" };
+  }
+  const path = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+  const { error: uploadError } = await supabase.storage.from(EXPENSE_RECEIPT_BUCKET).upload(path, blob, {
+    upsert: false,
+    contentType: "image/jpeg",
+  });
+  if (uploadError) return { ok: false, message: "領収書ファイルのアップロードに失敗しました" };
+  const { data: pub } = supabase.storage.from(EXPENSE_RECEIPT_BUCKET).getPublicUrl(path);
+  return { ok: true, url: pub.publicUrl };
 }
 
 /* ---- Vision自動抽出(Edge Function呼び出し) ----
@@ -4834,6 +4861,15 @@ function ExpenseFormModal({ expense, onClose, onSave }) {
     receipt_file_url: expense.receipt_file_url || "",
   });
   const [saving, setSaving] = useState(false);
+  const [uploadingReceipt, setUploadingReceipt] = useState(false);
+
+  const handleReceiptFile = async (file) => {
+    setUploadingReceipt(true);
+    const res = await uploadExpenseReceiptFile(file);
+    setUploadingReceipt(false);
+    if (!res.ok) { alert(res.message); return; }
+    setForm((f) => ({ ...f, receipt_file_url: res.url }));
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -4968,15 +5004,34 @@ function ExpenseFormModal({ expense, onClose, onSave }) {
         </div>
 
         <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>領収書URL(任意)</label>
-          <input
-            type="text"
-            value={form.receipt_file_url}
-            onChange={(e) => setForm((f) => ({ ...f, receipt_file_url: e.target.value }))}
-            placeholder="画像アップロード機能は次のステップで対応予定"
-            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          <ImageDropZone
+            label="領収書ファイル(任意)"
+            previewUrl={form.receipt_file_url}
+            uploading={uploadingReceipt}
+            onFile={handleReceiptFile}
+            helperText="ドラッグ&ドロップ、またはクリックして領収書の写真をアップロード"
           />
+          <div className="mt-2">
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>領収書URL(アップロード後に自動入力。手入力での上書きも可)</label>
+            <input
+              type="text"
+              value={form.receipt_file_url}
+              onChange={(e) => setForm((f) => ({ ...f, receipt_file_url: e.target.value }))}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+            {form.receipt_file_url && (
+              <a
+                href={form.receipt_file_url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs mt-1 inline-block"
+                style={{ color: "var(--mz-gold-soft)" }}
+              >
+                現在のファイルを別タブで開く
+              </a>
+            )}
+          </div>
         </div>
 
         <div>
@@ -5001,7 +5056,7 @@ function ExpenseFormModal({ expense, onClose, onSave }) {
           </button>
           <button
             type="submit"
-            disabled={saving}
+            disabled={saving || uploadingReceipt}
             className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60"
             style={{ background: "var(--mz-gold)", color: "#1a1710" }}
           >
