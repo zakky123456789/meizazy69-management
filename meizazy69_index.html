@@ -4313,6 +4313,370 @@ function SalesPage() {
 }
 
 /* ============================================================
+   カタログ(catalogs / catalog_items)
+
+   ホスト向けに商品を選んで共有する「カタログ」機能。
+   ・カタログ本体(catalogs)+ 選択商品(catalog_items, catalogs⇔productsの中間テーブル)
+   ・掲載商品はステータス・種別を問わず個別に検索して選択する
+   ・共有は share_token を含む公開URL(#/catalog/:token)経由を想定
+     (ログイン不要の公開閲覧ページ自体は次の実装ステップで対応)
+
+   積み残し:
+     ・公開閲覧ページ(#/catalog/:token, 認証ゲートの外側で描画)
+   ============================================================ */
+
+/* ---- 共有トークン生成(公開URL用のランダム文字列) ---- */
+function generateShareToken() {
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/* ---- カタログ カード(一覧表示) ---- */
+function CatalogCard({ catalog, itemCount, onEdit, onDelete, onShare }) {
+  return (
+    <div
+      className="rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3"
+      style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+    >
+      <div className="flex-1 min-w-0">
+        <p className="font-display text-base truncate">{catalog.name}</p>
+        <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+          <span>掲載商品: {itemCount}点</span>
+          <span>作成日: {(catalog.created_at || "").slice(0, 10)}</span>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 shrink-0 flex-wrap">
+        <button
+          onClick={() => onShare(catalog)}
+          className="text-xs px-2.5 py-1.5 rounded-lg font-medium"
+          style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+        >
+          共有リンク
+        </button>
+        <button
+          onClick={() => onEdit(catalog)}
+          className="text-xs px-2.5 py-1.5 rounded-lg"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+        >
+          編集
+        </button>
+        <button
+          onClick={() => onDelete(catalog.id)}
+          className="text-xs px-2.5 py-1.5 rounded-lg"
+          style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}
+        >
+          削除
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ---- カタログ 登録・編集モーダル(商品はステータス・種別を問わず検索して個別選択) ---- */
+function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
+  const isNew = !catalog.id;
+  const [name, setName] = useState(catalog.name || "");
+  const [saving, setSaving] = useState(false);
+
+  const [allProducts, setAllProducts] = useState(null); // null = 読み込み中
+  const [productSearch, setProductSearch] = useState("");
+  const [selectedProducts, setSelectedProducts] = useState(initialItems || []); // [{id,product_name,size,product_code,selling_price_jpy}]
+
+  useEffect(() => {
+    let cancelled = false;
+    supabase
+      .from("products")
+      .select("id,product_name,size,product_code,selling_price_jpy,size_options")
+      .order("product_name")
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        setAllProducts(error ? [] : (data || []));
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const selectedIds = useMemo(() => new Set(selectedProducts.map((p) => p.id)), [selectedProducts]);
+
+  const candidates = useMemo(() => {
+    if (!allProducts) return [];
+    const q = productSearch.trim().toLowerCase();
+    return allProducts.filter((p) => {
+      if (selectedIds.has(p.id)) return false;
+      if (!q) return false; // 未入力時は候補を出さない(一覧が長くなりすぎるため)
+      return (p.product_name || "").toLowerCase().includes(q) || (p.product_code || "").toLowerCase().includes(q);
+    }).slice(0, 20);
+  }, [allProducts, selectedIds, productSearch]);
+
+  const addProduct = (p) => { setSelectedProducts((prev) => [...prev, p]); setProductSearch(""); };
+  const removeProduct = (id) => setSelectedProducts((prev) => prev.filter((p) => p.id !== id));
+  const moveProduct = (index, dir) => {
+    setSelectedProducts((prev) => {
+      const next = [...prev];
+      const j = index + dir;
+      if (j < 0 || j >= next.length) return prev;
+      [next[index], next[j]] = [next[j], next[index]];
+      return next;
+    });
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    if (selectedProducts.length === 0) { alert("商品を1点以上選択してください"); return; }
+    setSaving(true);
+    await onSave({ id: catalog.id || null, name: name.trim(), productIds: selectedProducts.map((p) => p.id) });
+    setSaving(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <form
+        onSubmit={handleSubmit}
+        className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <h2 className="font-display text-lg">{isNew ? "新規カタログ" : "カタログを編集"}</h2>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>カタログ名(社内管理用)</label>
+          <input
+            type="text" value={name} onChange={(e) => setName(e.target.value)} required autoFocus
+            placeholder="例: ○○クラブ向け 7月カタログ"
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+            掲載商品{selectedProducts.length > 0 ? `(${selectedProducts.length}点)` : ""}
+          </label>
+
+          {selectedProducts.length > 0 && (
+            <div className="space-y-1 mb-2">
+              {selectedProducts.map((p, idx) => (
+                <div
+                  key={p.id}
+                  className="flex items-center gap-2 text-xs px-2.5 py-1.5 rounded-lg"
+                  style={{ background: "var(--mz-surface-hover)", color: "var(--mz-ink)" }}
+                >
+                  <span className="flex-1 min-w-0 truncate">{productLabel(p)}</span>
+                  <button type="button" onClick={() => moveProduct(idx, -1)} disabled={idx === 0} className="disabled:opacity-30" style={{ color: "var(--mz-ink-muted)" }}>↑</button>
+                  <button type="button" onClick={() => moveProduct(idx, 1)} disabled={idx === selectedProducts.length - 1} className="disabled:opacity-30" style={{ color: "var(--mz-ink-muted)" }}>↓</button>
+                  <button
+                    type="button" onClick={() => removeProduct(p.id)}
+                    className="w-4 h-4 flex items-center justify-center rounded-full shrink-0"
+                    style={{ color: "var(--mz-ink-muted)" }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <input
+            type="text" value={productSearch} onChange={(e) => setProductSearch(e.target.value)}
+            placeholder="商品名・商品番号で検索して追加...(ステータス問わず)"
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+
+          {allProducts === null ? (
+            <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+          ) : productSearch.trim() && candidates.length === 0 ? (
+            <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>該当する商品がありません</p>
+          ) : candidates.length > 0 && (
+            <div className="mt-1.5 rounded-lg max-h-40 overflow-y-auto" style={{ border: "1px solid var(--mz-border)" }}>
+              {candidates.map((p) => (
+                <button
+                  key={p.id} type="button" onClick={() => addProduct(p)}
+                  className="w-full text-left px-3 py-2 text-xs truncate"
+                  style={{ borderBottom: "1px solid var(--mz-border)" }}
+                >
+                  {productLabel(p)}{p.selling_price_jpy != null ? ` / ${fmtJPY(p.selling_price_jpy)}` : ""}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="flex gap-2 pt-1">
+          <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+            キャンセル
+          </button>
+          <button type="submit" disabled={saving} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+            {saving ? "保存中..." : "保存"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ---- 共有リンク・QRコード表示モーダル ---- */
+function ShareCatalogModal({ catalog, onClose }) {
+  const shareUrl = `${window.location.origin}${window.location.pathname}#/catalog/${catalog.share_token}`;
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      window.prompt("以下のURLをコピーしてください:", shareUrl);
+    }
+  };
+
+  const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(shareUrl)}`;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <div
+        className="w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl p-5 space-y-4 text-center"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <h2 className="font-display text-lg">共有リンク</h2>
+        <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+          ログイン不要でホストが直接開けるページです。LINEなどでURLを送るか、QRコードを見せてください。
+        </p>
+
+        <div className="flex justify-center">
+          <img src={qrSrc} alt="QRコード" className="rounded-lg" style={{ border: "1px solid var(--mz-border)", background: "#fff", padding: "8px" }} />
+        </div>
+
+        <div
+          className="text-xs px-3 py-2.5 rounded-lg break-all text-left"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+        >
+          {shareUrl}
+        </div>
+
+        <button
+          onClick={handleCopy}
+          className="w-full rounded-lg py-2.5 text-sm font-medium"
+          style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+        >
+          {copied ? "コピーしました" : "リンクをコピー"}
+        </button>
+        <button onClick={onClose} className="w-full rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+          閉じる
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ---- カタログ一覧ページ本体 ---- */
+function CatalogsPage() {
+  const [catalogs, setCatalogs] = useState(null); // null = 読み込み中
+  const [error, setError] = useState(null);
+  const [modalCatalog, setModalCatalog] = useState(null); // null=閉じる, {}=新規, obj=編集
+  const [modalInitialItems, setModalInitialItems] = useState([]);
+  const [shareTarget, setShareTarget] = useState(null);
+
+  const loadAll = useCallback(async () => {
+    setError(null);
+    const { data, error } = await supabase
+      .from("catalogs")
+      .select("id,name,share_token,created_at,catalog_items(count)")
+      .order("created_at", { ascending: false });
+    if (error) { setError("カタログの取得に失敗しました"); setCatalogs([]); return; }
+    setCatalogs(data || []);
+  }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  const openNew = () => { setModalInitialItems([]); setModalCatalog({}); };
+
+  const openEdit = async (catalog) => {
+    const { data, error } = await supabase
+      .from("catalog_items")
+      .select("sort_order,products(id,product_name,size,product_code,selling_price_jpy,size_options)")
+      .eq("catalog_id", catalog.id)
+      .order("sort_order");
+    if (error) { alert("掲載商品の取得に失敗しました"); return; }
+    setModalInitialItems((data || []).map((row) => row.products).filter(Boolean));
+    setModalCatalog(catalog);
+  };
+
+  const handleSave = async (form) => {
+    if (form.id) {
+      const { error: updErr } = await supabase.from("catalogs").update({ name: form.name }).eq("id", form.id);
+      if (updErr) { alert("更新に失敗しました"); return; }
+      const { error: delErr } = await supabase.from("catalog_items").delete().eq("catalog_id", form.id);
+      if (delErr) { alert("掲載商品の更新に失敗しました(カタログ名は更新済みです)"); return; }
+      const rows = form.productIds.map((productId, idx) => ({ catalog_id: form.id, product_id: productId, sort_order: idx }));
+      const { error: insErr } = await supabase.from("catalog_items").insert(rows);
+      if (insErr) { alert("掲載商品の登録に失敗しました"); return; }
+    } else {
+      const { data: inserted, error: insErr } = await supabase
+        .from("catalogs")
+        .insert({ name: form.name, share_token: generateShareToken() })
+        .select("id")
+        .single();
+      if (insErr) { alert("登録に失敗しました"); return; }
+      const rows = form.productIds.map((productId, idx) => ({ catalog_id: inserted.id, product_id: productId, sort_order: idx }));
+      const { error: itemsErr } = await supabase.from("catalog_items").insert(rows);
+      if (itemsErr) { alert("掲載商品の登録に失敗しました(カタログ本体は作成済みです)"); return; }
+    }
+    setModalCatalog(null);
+    loadAll();
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm("このカタログを削除しますか?共有リンクも無効になります。")) return;
+    const { error } = await supabase.from("catalogs").delete().eq("id", id);
+    if (error) { alert("削除に失敗しました"); return; }
+    loadAll();
+  };
+
+  return (
+    <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-5">
+      <div className="flex items-center justify-end">
+        <button
+          onClick={openNew}
+          className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap"
+          style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+        >
+          + 新規カタログ
+        </button>
+      </div>
+
+      {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
+      {catalogs === null && !error && <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>}
+      {catalogs !== null && catalogs.length === 0 && !error && (
+        <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>カタログが登録されていません</p>
+      )}
+
+      {catalogs !== null && catalogs.length > 0 && (
+        <div className="space-y-2">
+          {catalogs.map((c) => (
+            <CatalogCard
+              key={c.id}
+              catalog={c}
+              itemCount={c.catalog_items?.[0]?.count || 0}
+              onEdit={openEdit}
+              onDelete={handleDelete}
+              onShare={setShareTarget}
+            />
+          ))}
+        </div>
+      )}
+
+      {modalCatalog && (
+        <CatalogFormModal catalog={modalCatalog} initialItems={modalInitialItems} onClose={() => setModalCatalog(null)} onSave={handleSave} />
+      )}
+      {shareTarget && (
+        <ShareCatalogModal catalog={shareTarget} onClose={() => setShareTarget(null)} />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
    ルート → ページ の対応
    ============================================================ */
 const ROUTE_MAP = {
@@ -4381,6 +4745,8 @@ function AppShell({ staffName, onSwitchStaff, onSignOut }) {
             <ProductsPage />
           ) : activeKey === "sales" ? (
             <SalesPage />
+          ) : activeKey === "catalogs" ? (
+            <CatalogsPage />
           ) : activeKey === "dashboard" ? (
             <DashboardPage />
           ) : (
@@ -4393,9 +4759,104 @@ function AppShell({ staffName, onSwitchStaff, onSignOut }) {
 }
 
 /* ============================================================
+   カタログ 公開閲覧ページ(#/catalog/:token)
+   ログイン不要。認証ゲートの外側(App関数の最初)で描画する。
+   get_public_catalog RPC(SECURITY DEFINER)経由でのみデータ取得し、
+   catalogs/products テーブルへの直接アクセスは行わない。
+   ============================================================ */
+function PublicCatalogItemCard({ item }) {
+  return (
+    <div
+      className="rounded-xl overflow-hidden flex flex-col"
+      style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+    >
+      <div className="aspect-square w-full flex items-center justify-center" style={{ background: "var(--mz-surface-hover)" }}>
+        {item.product_image_url ? (
+          <img src={item.product_image_url} alt={item.product_name || ""} className="w-full h-full object-cover" />
+        ) : (
+          <Icon name="tag" className="w-8 h-8" style={{ color: "var(--mz-ink-muted)" }} />
+        )}
+      </div>
+      <div className="p-3 space-y-1">
+        <p className="font-display text-sm truncate">{item.product_name || "(名称未設定)"}</p>
+        <div className="flex items-center justify-between text-xs gap-2" style={{ color: "var(--mz-ink-muted)" }}>
+          <span className="truncate">{item.product_code ? `No.${item.product_code}` : ""}</span>
+          {item.selling_price_jpy != null && (
+            <span className="font-medium shrink-0" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(item.selling_price_jpy)}</span>
+          )}
+        </div>
+        {item.size_options && (
+          <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>サイズ展開: {item.size_options}</p>
+        )}
+        {item.category && (
+          <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>{item.category}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PublicCatalogPage({ token }) {
+  const [items, setItems] = useState(null); // null = 読み込み中
+  const [catalogName, setCatalogName] = useState("");
+  const [notFound, setNotFound] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    supabase.rpc("get_public_catalog", { p_token: token }).then(({ data, error }) => {
+      if (cancelled) return;
+      if (error || !data || data.length === 0) {
+        setItems([]);
+        setNotFound(true);
+        return;
+      }
+      setCatalogName(data[0].catalog_name || "");
+      setItems(data);
+    });
+    return () => { cancelled = true; };
+  }, [token]);
+
+  return (
+    <div className="min-h-screen" style={{ background: "var(--mz-bg)", color: "var(--mz-ink)" }}>
+      <header className="px-4 md:px-6 py-6 text-center" style={{ borderBottom: "1px solid var(--mz-border)" }}>
+        <p className="text-xs tracking-widest" style={{ color: "var(--mz-ink-muted)" }}>IMPORT PRIME</p>
+        <h1 className="font-display text-xl mt-1">{catalogName || "カタログ"}</h1>
+      </header>
+
+      <main className="px-4 md:px-6 py-6 max-w-5xl mx-auto w-full">
+        {items === null && (
+          <p className="text-sm text-center py-16" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+        )}
+        {items !== null && notFound && (
+          <p className="text-sm text-center py-16" style={{ color: "var(--mz-ink-muted)" }}>
+            このカタログは見つかりませんでした。リンクをもう一度ご確認ください。
+          </p>
+        )}
+        {items !== null && !notFound && items.length === 0 && (
+          <p className="text-sm text-center py-16" style={{ color: "var(--mz-ink-muted)" }}>掲載商品がありません</p>
+        )}
+        {items !== null && items.length > 0 && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+            {items.map((item) => <PublicCatalogItemCard key={item.product_id} item={item} />)}
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+/* ============================================================
    ルートコンポーネント(認証ゲート)
    ============================================================ */
 function App() {
+  const hash = useHashRoute();
+
+  // カタログ公開閲覧ページ(#/catalog/:token)は認証ゲートの外側で描画する
+  if (hash.startsWith("#/catalog/")) {
+    const token = hash.slice("#/catalog/".length);
+    return <PublicCatalogPage token={token} />;
+  }
+
   const { session, submitPasscode, signOut } = useAuth();
   const [staff, setStaff] = useState(undefined); // undefined = 未確認, null = 未選択
 
