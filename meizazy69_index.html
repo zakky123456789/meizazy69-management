@@ -630,6 +630,14 @@ function todayISO() {
   return new Date(d - tz).toISOString().slice(0, 10);
 }
 
+/* ---- "YYYY-MM-DD" に日数を加減算する(歩合率の適用期間の自動調整等で使用) ---- */
+function addDaysISO(dateStr, days) {
+  const d = new Date(`${dateStr}T00:00:00`);
+  d.setDate(d.getDate() + days);
+  const tz = d.getTimezoneOffset() * 60000;
+  return new Date(d - tz).toISOString().slice(0, 10);
+}
+
 function staffColor(staffId, staffList) {
   const idx = staffList.findIndex((s) => s.id === staffId);
   if (idx === -1) return "var(--mz-ink-muted)";
@@ -5105,6 +5113,347 @@ function ExpensesPage() {
 }
 
 /* ============================================================
+   外注費請求書(contractor_invoices)
+   ・commission_rates(歩合率)/ monthly_profits(月次損益)と連携する
+   ・タブ構成: 歩合率設定 → 月次損益 → 請求書一覧 の順に実装する
+     (このステップでは「歩合率設定」タブのみ実装。他はプレースホルダー)
+   ============================================================ */
+const CONTRACTOR_TABS = [
+  { key: "rates", label: "歩合率設定" },
+  { key: "profits", label: "月次損益" },
+  { key: "invoices", label: "請求書一覧" },
+];
+
+/* ---- 指定日時点でその歩合率が有効かどうか(dateStr省略時は今日) ---- */
+function isCommissionRateActive(rate, dateStr) {
+  const d = dateStr || todayISO();
+  if (rate.effective_from && rate.effective_from > d) return false;
+  if (rate.effective_to && rate.effective_to < d) return false;
+  return true;
+}
+
+/* ---- 担当者・対象月(YYYY-MM)から適用すべき歩合率を1件返す(外注費請求書ページで使用予定) ----
+   対象月の1日を基準日として判定し、複数該当する場合は適用開始日が最も新しいものを優先する。 */
+function getApplicableCommissionRate(staffId, targetMonth, rates) {
+  const refDate = `${targetMonth}-01`;
+  const candidates = (rates || []).filter(
+    (r) => r.staff_id === staffId && isCommissionRateActive(r, refDate)
+  );
+  if (candidates.length === 0) return null;
+  return candidates.sort((a, b) => (b.effective_from || "").localeCompare(a.effective_from || ""))[0];
+}
+
+/* ---- 歩合率 一覧表示(担当者名でグルーピングし、適用開始日の新しい順に表示) ---- */
+function CommissionRateList({ rates, staffList, onEdit, onDelete }) {
+  const staffName = (id) => (staffList.find((s) => s.id === id) || {}).name || "(不明な担当者)";
+
+  if (rates.length === 0) {
+    return <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>歩合率が登録されていません</p>;
+  }
+
+  const sorted = [...rates].sort((a, b) => {
+    const n = staffName(a.staff_id).localeCompare(staffName(b.staff_id), "ja");
+    if (n !== 0) return n;
+    return (b.effective_from || "").localeCompare(a.effective_from || "");
+  });
+
+  return (
+    <div className="space-y-2">
+      {sorted.map((r) => {
+        const active = isCommissionRateActive(r);
+        return (
+          <div
+            key={r.id}
+            className="rounded-xl p-4 flex items-center justify-between flex-wrap gap-3"
+            style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="text-sm font-medium">{staffName(r.staff_id)}</p>
+                {active && (
+                  <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "#1f3a2a", color: "#8fd6ab" }}>
+                    現在有効
+                  </span>
+                )}
+              </div>
+              <p className="text-xs mt-1" style={{ color: "var(--mz-ink-muted)" }}>
+                {r.effective_from} 〜 {r.effective_to || "(継続中)"}
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <span className="font-display text-lg" style={{ color: "var(--mz-gold-soft)" }}>{r.rate_percent}%</span>
+              <button
+                onClick={() => onEdit(r)}
+                className="text-xs px-2.5 py-1.5 rounded-lg"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+              >
+                編集
+              </button>
+              <button
+                onClick={() => onDelete(r.id)}
+                className="text-xs px-2.5 py-1.5 rounded-lg"
+                style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}
+              >
+                削除
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---- 歩合率 登録・編集モーダル ---- */
+function CommissionRateFormModal({ rate, staffList, onClose, onSave }) {
+  const isNew = !rate.id;
+  const [form, setForm] = useState({
+    id: rate.id || null,
+    staff_id: rate.staff_id || (staffList[0] && staffList[0].id) || "",
+    rate_percent: rate.rate_percent != null ? String(rate.rate_percent) : "",
+    effective_from: rate.effective_from || todayISO(),
+    effective_to: rate.effective_to || "",
+  });
+  const [saving, setSaving] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!form.staff_id || form.rate_percent === "" || !form.effective_from) return;
+    setSaving(true);
+    await onSave(form);
+    setSaving(false);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
+      style={{ background: "rgba(0,0,0,0.6)" }}
+    >
+      <form
+        onSubmit={handleSubmit}
+        className="w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <h2 className="font-display text-lg">{isNew ? "新規歩合率" : "歩合率を編集"}</h2>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>担当者</label>
+          <select
+            value={form.staff_id}
+            onChange={(e) => setForm((f) => ({ ...f, staff_id: e.target.value }))}
+            required
+            disabled={!isNew}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent disabled:opacity-60"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            {staffList.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>歩合率(%)</label>
+          <input
+            type="number"
+            inputMode="decimal"
+            min="0"
+            max="100"
+            step="0.1"
+            value={form.rate_percent}
+            onChange={(e) => setForm((f) => ({ ...f, rate_percent: e.target.value }))}
+            required
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>適用開始日</label>
+            <input
+              type="date"
+              value={form.effective_from}
+              onChange={(e) => setForm((f) => ({ ...f, effective_from: e.target.value }))}
+              required
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>適用終了日(任意)</label>
+            <input
+              type="date"
+              value={form.effective_to}
+              onChange={(e) => setForm((f) => ({ ...f, effective_to: e.target.value }))}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+          </div>
+        </div>
+
+        {isNew && (
+          <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+            ※この担当者に「現在有効(終了日なし)」の歩合率が既にある場合、その終了日は新しい適用開始日の前日に自動更新されます。
+          </p>
+        )}
+
+        <div className="flex gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 rounded-lg py-2.5 text-sm"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+          >
+            キャンセル
+          </button>
+          <button
+            type="submit"
+            disabled={saving}
+            className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60"
+            style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+          >
+            {saving ? "保存中..." : "保存"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ---- 外注費請求書ページ本体(タブ構成) ---- */
+function ContractorInvoicesPage() {
+  const [tab, setTab] = useState("rates");
+  const [staffList, setStaffList] = useState([]);
+  const [rates, setRates] = useState(null); // null = 読み込み中
+  const [error, setError] = useState(null);
+  const [modalRate, setModalRate] = useState(null); // null=閉じる, {}=新規, obj=編集
+
+  const loadStaff = useCallback(async () => {
+    const { data, error } = await supabase.from("staff").select("id,name,is_active").order("name");
+    if (!error) setStaffList(data || []);
+  }, []);
+
+  const loadRates = useCallback(async () => {
+    setError(null);
+    const { data, error } = await supabase
+      .from("commission_rates")
+      .select("id,staff_id,rate_percent,effective_from,effective_to,created_at")
+      .order("effective_from", { ascending: false });
+    if (error) {
+      setError("歩合率データの取得に失敗しました");
+      setRates([]);
+    } else {
+      setRates(data || []);
+    }
+  }, []);
+
+  useEffect(() => { loadStaff(); loadRates(); }, [loadStaff, loadRates]);
+
+  const handleSaveRate = async (form) => {
+    const patch = {
+      staff_id: form.staff_id,
+      rate_percent: Number(form.rate_percent),
+      effective_from: form.effective_from,
+      effective_to: form.effective_to || null,
+    };
+
+    if (form.id) {
+      const { error } = await supabase.from("commission_rates").update(patch).eq("id", form.id);
+      if (error) { alert("更新に失敗しました"); return; }
+    } else {
+      // 同一担当者で「現在も有効」(effective_to=null)な既存の歩合率があれば、
+      // 新しい適用開始日の前日で自動的に終了させる(歩合率の履歴が途切れないようにするため)
+      const openRate = (rates || []).find((r) => r.staff_id === form.staff_id && !r.effective_to);
+      if (openRate) {
+        const prevDay = addDaysISO(form.effective_from, -1);
+        if (prevDay >= openRate.effective_from) {
+          const { error: closeError } = await supabase
+            .from("commission_rates")
+            .update({ effective_to: prevDay })
+            .eq("id", openRate.id);
+          if (closeError) { alert("既存の歩合率の終了処理に失敗しました"); return; }
+        }
+      }
+      const { error } = await supabase.from("commission_rates").insert(patch);
+      if (error) { alert("登録に失敗しました"); return; }
+    }
+    setModalRate(null);
+    loadRates();
+  };
+
+  const handleDeleteRate = async (id) => {
+    if (!window.confirm("この歩合率を削除しますか?")) return;
+    const { error } = await supabase.from("commission_rates").delete().eq("id", id);
+    if (error) { alert("削除に失敗しました"); return; }
+    loadRates();
+  };
+
+  return (
+    <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-5">
+      <div className="flex gap-2 flex-wrap">
+        {CONTRACTOR_TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className="text-sm px-3.5 py-2 rounded-lg"
+            style={{
+              background: tab === t.key ? "var(--mz-gold)" : "transparent",
+              color: tab === t.key ? "#1a1710" : "var(--mz-ink-muted)",
+              border: "1px solid var(--mz-border)",
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {error && (
+        <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>
+      )}
+
+      {tab === "rates" && (
+        <>
+          <div className="flex justify-end">
+            <button
+              onClick={() => setModalRate({})}
+              className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap"
+              style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+            >
+              + 新規歩合率
+            </button>
+          </div>
+          {rates === null ? (
+            <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+          ) : (
+            <CommissionRateList rates={rates} staffList={staffList} onEdit={setModalRate} onDelete={handleDeleteRate} />
+          )}
+        </>
+      )}
+
+      {tab === "profits" && (
+        <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>
+          月次損益は次のステップで実装予定です
+        </p>
+      )}
+
+      {tab === "invoices" && (
+        <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>
+          請求書一覧は次のステップで実装予定です
+        </p>
+      )}
+
+      {modalRate && (
+        <CommissionRateFormModal
+          rate={modalRate}
+          staffList={staffList}
+          onClose={() => setModalRate(null)}
+          onSave={handleSaveRate}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
    ルート → ページ の対応
    ============================================================ */
 const ROUTE_MAP = {
@@ -5179,6 +5528,8 @@ function AppShell({ staffName, onSwitchStaff, onSignOut }) {
             <DashboardPage />
           ) : activeKey === "expenses" ? (
             <ExpensesPage />
+          ) : activeKey === "contractor_invoices" ? (
+            <ContractorInvoicesPage />
           ) : (
             <PlaceholderPage item={activeItem} />
           )}
