@@ -638,6 +638,21 @@ function addDaysISO(dateStr, days) {
   return new Date(d - tz).toISOString().slice(0, 10);
 }
 
+/* ---- "YYYY-MM" の翌月1日を "YYYY-MM-DD" で返す(月次損益集計の期間指定に使用) ---- */
+function nextMonthFirstDay(targetMonth) {
+  const [y, m] = targetMonth.split("-").map(Number);
+  const ny = m === 12 ? y + 1 : y;
+  const nm = m === 12 ? 1 : m + 1;
+  return `${ny}-${String(nm).padStart(2, "0")}-01`;
+}
+
+/* ---- "YYYY-MM" を "2026年7月" 形式のラベルに変換 ---- */
+function formatMonthLabel(targetMonth) {
+  const [y, m] = (targetMonth || "").split("-");
+  if (!y || !m) return targetMonth || "";
+  return `${y}年${parseInt(m, 10)}月`;
+}
+
 function staffColor(staffId, staffList) {
   const idx = staffList.findIndex((s) => s.id === staffId);
   if (idx === -1) return "var(--mz-ink-muted)";
@@ -3354,6 +3369,25 @@ async function generateReceiptNumber(dateStr) {
   return `${year}-${String(maxNum + 1).padStart(4, "0")}`;
 }
 
+/* ---- 外注費請求書番号の自動採番(generateInvoiceNumber) ----
+   receiptsと同じ考え方で年ごとにリセットする連番だが、領収書番号と混同しないよう
+   "INV-{年}-{4桁連番}"形式にする(例: INV-2026-0001)。 */
+async function generateInvoiceNumber(dateStr) {
+  const year = (dateStr || todayISO()).slice(0, 4);
+  const { data, error } = await supabase
+    .from("contractor_invoices")
+    .select("invoice_number")
+    .ilike("invoice_number", `INV-${year}-%`);
+  if (error || !data) return `INV-${year}-0001`;
+  let maxNum = 0;
+  const re = new RegExp(`^INV-${year}-(\\d+)$`);
+  data.forEach((r) => {
+    const m = re.exec(r.invoice_number || "");
+    if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
+  });
+  return `INV-${year}-${String(maxNum + 1).padStart(4, "0")}`;
+}
+
 /* ---- 販売登録モーダル ----
    ・ホストクラブ/ホスト選択 → 未販売商品を検索して複数点まとめて追加
    ・単価はselling_price_jpyを初期値に編集可(値引き等に対応)
@@ -5319,6 +5353,113 @@ function CommissionRateFormModal({ rate, staffList, onClose, onSave }) {
   );
 }
 
+/* ---- 月次損益 一覧表示(対象月の新しい順) ---- */
+function MonthlyProfitList({ profits, onDelete }) {
+  if (profits.length === 0) {
+    return <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>月次損益がまだ集計されていません</p>;
+  }
+  return (
+    <div className="space-y-2">
+      {profits.map((p) => {
+        const gross = Number(p.gross_profit_jpy) || 0;
+        return (
+          <div
+            key={p.id}
+            className="rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3"
+            style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+          >
+            <div className="flex-1 min-w-0">
+              <p className="font-display text-base">{formatMonthLabel(p.target_month)}</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1.5 text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                <span>売上合計: {fmtJPY(p.total_sales_jpy)}</span>
+                <span>仕入原価合計: {fmtJPY(p.total_purchase_cost_jpy)}</span>
+                <span>一般経費合計: {fmtJPY(p.total_general_expenses_jpy)}</span>
+              </div>
+              <p className="text-xs mt-1" style={{ color: "var(--mz-ink-muted)" }}>
+                算出日時: {(p.calculated_at || "").slice(0, 16).replace("T", " ")}
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <span className="font-display text-lg" style={{ color: gross >= 0 ? "var(--mz-gold-soft)" : "#f2b8bd" }}>
+                粗利益 {fmtJPY(gross)}
+              </span>
+              <button
+                onClick={() => onDelete(p.id)}
+                className="text-xs px-2.5 py-1.5 rounded-lg"
+                style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}
+              >
+                削除
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---- 請求書 一覧表示(対象月降順・同月内は発行順)。ステータス切替・削除ボタンを持つ ---- */
+function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete }) {
+  if (invoices.length === 0) {
+    return <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>請求書がまだ発行されていません</p>;
+  }
+  return (
+    <div className="space-y-2">
+      {invoices.map((inv) => {
+        const staffName = (inv.staff || {}).name || "(不明な担当者)";
+        const paid = inv.status === "支払済み";
+        return (
+          <div
+            key={inv.id}
+            className="rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3"
+            style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+          >
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="font-display text-base">{inv.invoice_number}</p>
+                <span
+                  className="text-xs px-2 py-0.5 rounded-full"
+                  style={{
+                    background: paid ? "rgba(199,168,105,0.15)" : "rgba(242,184,189,0.15)",
+                    color: paid ? "var(--mz-gold-soft)" : "#f2b8bd",
+                  }}
+                >
+                  {inv.status}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1.5 text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                <span>担当者: {staffName}</span>
+                <span>対象月: {formatMonthLabel(inv.target_month)}</span>
+                <span>適用歩合率: {inv.rate_percent}%</span>
+                <span>発行日: {inv.issue_date}</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <span className="font-display text-lg" style={{ color: "var(--mz-gold-soft)" }}>
+                {fmtJPY(inv.amount_jpy)}
+              </span>
+              <button
+                onClick={() => onUpdateStatus(inv.id, paid ? "未払い" : "支払済み")}
+                className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+              >
+                {paid ? "未払いに戻す" : "支払済みにする"}
+              </button>
+              <button
+                onClick={() => onDelete(inv.id)}
+                className="text-xs px-2.5 py-1.5 rounded-lg"
+                style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}
+              >
+                削除
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ---- 外注費請求書ページ本体(タブ構成) ---- */
 function ContractorInvoicesPage() {
   const [tab, setTab] = useState("rates");
@@ -5326,6 +5467,19 @@ function ContractorInvoicesPage() {
   const [rates, setRates] = useState(null); // null = 読み込み中
   const [error, setError] = useState(null);
   const [modalRate, setModalRate] = useState(null); // null=閉じる, {}=新規, obj=編集
+
+  const [monthlyProfits, setMonthlyProfits] = useState(null); // null = 読み込み中
+  const [profitError, setProfitError] = useState(null);
+  const [calcTargetMonth, setCalcTargetMonth] = useState(todayISO().slice(0, 7));
+  const [calculating, setCalculating] = useState(false);
+
+  const [invoices, setInvoices] = useState(null); // null = 読み込み中
+  const [invoiceError, setInvoiceError] = useState(null);
+  const [issueStaffId, setIssueStaffId] = useState("");
+  const [issueTargetMonth, setIssueTargetMonth] = useState(todayISO().slice(0, 7));
+  const [invoicePreview, setInvoicePreview] = useState(null); // null=未計算, {error}=計算不可, {monthlyProfit,rate,amount}=計算済み
+  const [previewing, setPreviewing] = useState(false);
+  const [issuing, setIssuing] = useState(false);
 
   const loadStaff = useCallback(async () => {
     const { data, error } = await supabase.from("staff").select("id,name,is_active").order("name");
@@ -5346,7 +5500,36 @@ function ContractorInvoicesPage() {
     }
   }, []);
 
-  useEffect(() => { loadStaff(); loadRates(); }, [loadStaff, loadRates]);
+  const loadMonthlyProfits = useCallback(async () => {
+    setProfitError(null);
+    const { data, error } = await supabase
+      .from("monthly_profits")
+      .select("id,target_month,total_sales_jpy,total_purchase_cost_jpy,total_general_expenses_jpy,gross_profit_jpy,calculated_at")
+      .order("target_month", { ascending: false });
+    if (error) {
+      setProfitError("月次損益データの取得に失敗しました");
+      setMonthlyProfits([]);
+    } else {
+      setMonthlyProfits(data || []);
+    }
+  }, []);
+
+  const loadInvoices = useCallback(async () => {
+    setInvoiceError(null);
+    const { data, error } = await supabase
+      .from("contractor_invoices")
+      .select("id,invoice_number,staff_id,target_month,monthly_profit_id,rate_percent,amount_jpy,issue_date,status,staff(name)")
+      .order("target_month", { ascending: false })
+      .order("created_at", { ascending: false });
+    if (error) {
+      setInvoiceError("請求書データの取得に失敗しました");
+      setInvoices([]);
+    } else {
+      setInvoices(data || []);
+    }
+  }, []);
+
+  useEffect(() => { loadStaff(); loadRates(); loadMonthlyProfits(); loadInvoices(); }, [loadStaff, loadRates, loadMonthlyProfits, loadInvoices]);
 
   const handleSaveRate = async (form) => {
     const patch = {
@@ -5385,6 +5568,160 @@ function ContractorInvoicesPage() {
     const { error } = await supabase.from("commission_rates").delete().eq("id", id);
     if (error) { alert("削除に失敗しました"); return; }
     loadRates();
+  };
+
+  /* ---- 月次損益の集計(売上合計・仕入原価合計・一般経費合計を算出し、既存行があれば再計算=update、なければinsert) ---- */
+  const handleCalculateMonthlyProfit = async () => {
+    if (!calcTargetMonth) return;
+    setCalculating(true);
+    setProfitError(null);
+    try {
+      const monthStart = `${calcTargetMonth}-01`;
+      const monthEndExclusive = nextMonthFirstDay(calcTargetMonth);
+
+      // 売上合計(税込)と、その月に売れた商品の原価合計(sale_items→productsの確定JPY原価)
+      const { data: salesData, error: salesError } = await supabase
+        .from("sales")
+        .select("id,transaction_date,total_amount_jpy,sale_items(product_id,products(purchase_amount_jpy,shipping_jpy,fee_jpy))")
+        .gte("transaction_date", monthStart)
+        .lt("transaction_date", monthEndExclusive);
+      if (salesError) { setProfitError("売上データの取得に失敗しました"); setCalculating(false); return; }
+
+      let totalSales = 0;
+      let totalPurchaseCost = 0;
+      (salesData || []).forEach((s) => {
+        totalSales += Number(s.total_amount_jpy) || 0;
+        (s.sale_items || []).forEach((it) => {
+          const p = it.products || {};
+          totalPurchaseCost += (Number(p.purchase_amount_jpy) || 0) + (Number(p.shipping_jpy) || 0) + (Number(p.fee_jpy) || 0);
+        });
+      });
+
+      // 一般経費合計
+      const { data: expenseData, error: expenseError } = await supabase
+        .from("expenses")
+        .select("amount_incl_tax,payment_date")
+        .gte("payment_date", monthStart)
+        .lt("payment_date", monthEndExclusive);
+      if (expenseError) { setProfitError("経費データの取得に失敗しました"); setCalculating(false); return; }
+
+      const totalExpenses = (expenseData || []).reduce((sum, e) => sum + (Number(e.amount_incl_tax) || 0), 0);
+      const grossProfit = totalSales - totalPurchaseCost - totalExpenses;
+
+      const patch = {
+        target_month: calcTargetMonth,
+        total_sales_jpy: totalSales,
+        total_purchase_cost_jpy: totalPurchaseCost,
+        total_general_expenses_jpy: totalExpenses,
+        gross_profit_jpy: grossProfit,
+        calculated_at: new Date().toISOString(),
+      };
+
+      const { data: existing, error: existingError } = await supabase
+        .from("monthly_profits")
+        .select("id")
+        .eq("target_month", calcTargetMonth)
+        .maybeSingle();
+      if (existingError) { setProfitError("既存の月次損益データの確認に失敗しました"); setCalculating(false); return; }
+
+      if (existing) {
+        const { error: updateError } = await supabase.from("monthly_profits").update(patch).eq("id", existing.id);
+        if (updateError) { setProfitError("月次損益の更新に失敗しました"); setCalculating(false); return; }
+      } else {
+        const { error: insertError } = await supabase.from("monthly_profits").insert(patch);
+        if (insertError) { setProfitError("月次損益の登録に失敗しました"); setCalculating(false); return; }
+      }
+
+      await loadMonthlyProfits();
+    } finally {
+      setCalculating(false);
+    }
+  };
+
+  /* ---- 請求内容の計算(実際のinsertは行わず、プレビューをstateに保持するだけ) ----
+     1) 同一担当者・同一対象月の請求書が既に発行済みでないか確認(重複発行防止)
+     2) monthly_profitsから対象月の粗利益を取得(未集計ならエラー)
+     3) getApplicableCommissionRateで適用歩合率を取得(未設定ならエラー)
+     4) 請求金額 = 粗利益 × 歩合率 ÷ 100(円未満四捨五入) */
+  const handlePreviewInvoice = async () => {
+    if (!issueStaffId || !issueTargetMonth) return;
+    setPreviewing(true);
+    setInvoicePreview(null);
+    try {
+      const { data: existing, error: existingError } = await supabase
+        .from("contractor_invoices")
+        .select("id,invoice_number")
+        .eq("staff_id", issueStaffId)
+        .eq("target_month", issueTargetMonth)
+        .maybeSingle();
+      if (existingError) { setInvoicePreview({ error: "既存請求書の確認に失敗しました" }); return; }
+      if (existing) {
+        setInvoicePreview({ error: `この担当者・対象月の請求書は発行済みです(${existing.invoice_number})。再発行する場合は下の一覧から削除してから行ってください。` });
+        return;
+      }
+
+      const { data: mp, error: mpError } = await supabase
+        .from("monthly_profits")
+        .select("id,target_month,gross_profit_jpy")
+        .eq("target_month", issueTargetMonth)
+        .maybeSingle();
+      if (mpError) { setInvoicePreview({ error: "月次損益データの取得に失敗しました" }); return; }
+      if (!mp) { setInvoicePreview({ error: "この対象月の月次損益がまだ集計されていません。先に「月次損益」タブで集計してください。" }); return; }
+
+      const rate = getApplicableCommissionRate(issueStaffId, issueTargetMonth, rates || []);
+      if (!rate) { setInvoicePreview({ error: "この担当者・対象月に適用できる歩合率が設定されていません。先に「歩合率設定」タブで登録してください。" }); return; }
+
+      const amount = Math.round((Number(mp.gross_profit_jpy) || 0) * (Number(rate.rate_percent) || 0) / 100);
+      setInvoicePreview({ monthlyProfit: mp, rate, amount });
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  /* ---- プレビュー内容でcontractor_invoicesにinsertし、実際に発行する ---- */
+  const handleIssueInvoice = async () => {
+    if (!invoicePreview || invoicePreview.error) return;
+    setIssuing(true);
+    try {
+      const issueDate = todayISO();
+      const invoiceNumber = await generateInvoiceNumber(issueDate);
+      const { error } = await supabase.from("contractor_invoices").insert({
+        invoice_number: invoiceNumber,
+        staff_id: issueStaffId,
+        target_month: issueTargetMonth,
+        monthly_profit_id: invoicePreview.monthlyProfit.id,
+        rate_percent: invoicePreview.rate.rate_percent,
+        amount_jpy: invoicePreview.amount,
+        issue_date: issueDate,
+        status: "未払い",
+      });
+      if (error) { alert("請求書の発行に失敗しました"); return; }
+      setInvoicePreview(null);
+      setIssueStaffId("");
+      await loadInvoices();
+    } finally {
+      setIssuing(false);
+    }
+  };
+
+  const handleUpdateInvoiceStatus = async (id, status) => {
+    const { error } = await supabase.from("contractor_invoices").update({ status }).eq("id", id);
+    if (error) { alert("ステータスの更新に失敗しました"); return; }
+    loadInvoices();
+  };
+
+  const handleDeleteInvoice = async (id) => {
+    if (!window.confirm("この請求書を削除しますか?")) return;
+    const { error } = await supabase.from("contractor_invoices").delete().eq("id", id);
+    if (error) { alert("削除に失敗しました"); return; }
+    loadInvoices();
+  };
+
+  const handleDeleteMonthlyProfit = async (id) => {
+    if (!window.confirm("この月次損益を削除しますか?")) return;
+    const { error } = await supabase.from("monthly_profits").delete().eq("id", id);
+    if (error) { alert("削除に失敗しました"); return; }
+    loadMonthlyProfits();
   };
 
   return (
@@ -5430,15 +5767,124 @@ function ContractorInvoicesPage() {
       )}
 
       {tab === "profits" && (
-        <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>
-          月次損益は次のステップで実装予定です
-        </p>
+        <>
+          {profitError && (
+            <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{profitError}</p>
+          )}
+          <div
+            className="rounded-xl p-4 flex flex-wrap items-end gap-3"
+            style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+          >
+            <div>
+              <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>対象月</label>
+              <input
+                type="month"
+                value={calcTargetMonth}
+                onChange={(e) => setCalcTargetMonth(e.target.value)}
+                className="rounded-lg px-3 py-2 text-sm bg-transparent"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+              />
+            </div>
+            <button
+              onClick={handleCalculateMonthlyProfit}
+              disabled={calculating || !calcTargetMonth}
+              className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap disabled:opacity-60"
+              style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+            >
+              {calculating ? "集計中..." : "この月を集計する"}
+            </button>
+            <p className="text-xs w-full" style={{ color: "var(--mz-ink-muted)" }}>
+              売上合計(税込)・その月に売れた商品の仕入原価合計・一般経費合計から粗利益を自動算出します。既にこの対象月のデータがあれば上書き(再集計)されます。
+            </p>
+          </div>
+
+          {monthlyProfits === null ? (
+            <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+          ) : (
+            <MonthlyProfitList profits={monthlyProfits} onDelete={handleDeleteMonthlyProfit} />
+          )}
+        </>
       )}
 
       {tab === "invoices" && (
-        <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>
-          請求書一覧は次のステップで実装予定です
-        </p>
+        <>
+          {invoiceError && (
+            <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{invoiceError}</p>
+          )}
+
+          <div
+            className="rounded-xl p-4 space-y-3"
+            style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+          >
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>担当者</label>
+                <select
+                  value={issueStaffId}
+                  onChange={(e) => { setIssueStaffId(e.target.value); setInvoicePreview(null); }}
+                  className="rounded-lg px-3 py-2 text-sm bg-transparent"
+                  style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                >
+                  <option value="">選択してください</option>
+                  {staffList.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>対象月</label>
+                <input
+                  type="month"
+                  value={issueTargetMonth}
+                  onChange={(e) => { setIssueTargetMonth(e.target.value); setInvoicePreview(null); }}
+                  className="rounded-lg px-3 py-2 text-sm bg-transparent"
+                  style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                />
+              </div>
+              <button
+                onClick={handlePreviewInvoice}
+                disabled={previewing || !issueStaffId || !issueTargetMonth}
+                className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap disabled:opacity-60"
+                style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+              >
+                {previewing ? "確認中..." : "請求内容を計算する"}
+              </button>
+            </div>
+
+            {invoicePreview && invoicePreview.error && (
+              <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{invoicePreview.error}</p>
+            )}
+
+            {invoicePreview && !invoicePreview.error && (
+              <div
+                className="rounded-lg p-3 flex flex-wrap items-center justify-between gap-3"
+                style={{ border: "1px solid var(--mz-border)" }}
+              >
+                <div className="text-xs space-y-1" style={{ color: "var(--mz-ink-muted)" }}>
+                  <p>対象月の粗利益: {fmtJPY(invoicePreview.monthlyProfit.gross_profit_jpy)}</p>
+                  <p>適用歩合率: {invoicePreview.rate.rate_percent}%</p>
+                  <p className="text-sm font-display" style={{ color: "var(--mz-ink)" }}>
+                    請求金額: {fmtJPY(invoicePreview.amount)}
+                  </p>
+                </div>
+                <button
+                  onClick={handleIssueInvoice}
+                  disabled={issuing}
+                  className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap disabled:opacity-60"
+                  style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+                >
+                  {issuing ? "発行中..." : "この内容で発行する"}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {invoices === null ? (
+            <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+          ) : (
+            <ContractorInvoiceList invoices={invoices} onUpdateStatus={handleUpdateInvoiceStatus} onDelete={handleDeleteInvoice} />
+          )}
+        </>
       )}
 
       {modalRate && (
