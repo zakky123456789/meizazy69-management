@@ -4814,16 +4814,19 @@ function CatalogsPage() {
 /* ============================================================
    経費(expenses)
    ・列構成はSupabase側の既存テーブルに合わせる(2026-07-09確認)
-   ・領収書ファイルのアップロード(receipt_file_url)は次の機能単位で対応予定。
-     このステップでは手入力のURLとしてのみ扱う。
-   ・entry_method は本UIからの登録時は常に "手動" を自動セットする(手動編集不可)。
+   ・選択肢定数(勘定科目/税区分/支払方法)は、必ずSupabase側のCHECK制約(pg_constraint)の
+     実際の値と一致させること。2026-07-09時点で以下のSQLで確認した値を反映済み:
+       select conname, pg_get_constraintdef(oid) from pg_constraint
+       where conrelid = 'expenses'::regclass and contype = 'c';
+   ・entry_method は "手動"(通常の入力) / "AI自動"(AIレシート読み込みからの下書きをそのまま登録した場合)を
+     フォームの出所に応じて自動セットする(手動編集不可)。
    ============================================================ */
 const EXPENSE_ACCOUNT_CATEGORY_OPTIONS = [
-  "消耗品費", "旅費交通費", "通信費", "接待交際費", "地代家賃",
-  "支払手数料", "広告宣伝費", "水道光熱費", "荷造運賃", "雑費", "その他",
+  "消耗品費", "旅費交通費", "通信費", "会議費", "接待交際費", "広告宣伝費",
+  "支払手数料", "荷造運賃(送料)", "地代家賃", "水道光熱費", "租税公課", "外注費", "仕入高", "雑費", "その他",
 ];
-const EXPENSE_TAX_CATEGORY_OPTIONS = ["課税仕入10%", "軽減税率8%", "非課税", "不課税", "対象外"];
-const EXPENSE_PAYMENT_METHOD_OPTIONS = ["現金", "クレジットカード", "銀行振込", "その他"];
+const EXPENSE_TAX_CATEGORY_OPTIONS = ["課税10%", "課税8%(軽減)", "非課税", "対象外"];
+const EXPENSE_PAYMENT_METHOD_OPTIONS = ["小口", "会社クレジットカード", "立替(悟)", "立替(裕之)"];
 const EXPENSE_REIMBURSEMENT_STATUS_OPTIONS = ["未精算", "精算済み"];
 
 function ExpenseReimbursementBadge({ status }) {
@@ -5003,6 +5006,7 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
     amount_incl_tax: expense.amount_incl_tax != null ? String(expense.amount_incl_tax) : "",
     memo: expense.memo || "",
     receipt_file_url: expense.receipt_file_url || "",
+    _aiOrigin: !!expense._aiOrigin, // AIレシート読み込みからの下書きをそのまま登録した場合はtrue(entry_method判定用)
   });
   const [saving, setSaving] = useState(false);
   const [uploadingReceipt, setUploadingReceipt] = useState(false);
@@ -5275,7 +5279,7 @@ function ExpensesPage() {
 
   /* ---- AIレシート読み込みカードからの反映。id無しの新規下書きとしてフォームへ流し込む ---- */
   const handleExtracted = (mappedFields, uploadedUrl) => {
-    setFormExpense({ ...mappedFields, receipt_file_url: uploadedUrl });
+    setFormExpense({ ...mappedFields, receipt_file_url: uploadedUrl, _aiOrigin: true });
     setFormKey((k) => k + 1);
   };
 
@@ -5298,7 +5302,8 @@ function ExpensesPage() {
       const { error } = await supabase.from("expenses").update(patch).eq("id", form.id);
       if (error) { alert("更新に失敗しました"); return; }
     } else {
-      const { error } = await supabase.from("expenses").insert({ ...patch, entry_method: "手動" });
+      const entryMethod = form._aiOrigin ? "AI自動" : "手動";
+      const { error } = await supabase.from("expenses").insert({ ...patch, entry_method: entryMethod });
       if (error) { alert("登録に失敗しました"); return; }
     }
     resetForm();
