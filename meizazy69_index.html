@@ -2398,6 +2398,13 @@ const PRODUCT_STATUS_OPTIONS = ["未販売", "販売済み", "返品済み"];
    ・税務上サンプルは仕入時点で経費計上するため、stockへは転換しない(あくまでsampleのまま目的だけ変わる) */
 const SAMPLE_PURPOSE_OPTIONS = ["展示用", "処分用"];
 
+/* ---- 販売登録画面「展示用サンプルが売れました。再仕入れしますか?」用の引き継ぎデータ ----
+   ・「はい」を選んだ際、ProductsPageの新規登録モーダルへ事前入力データを渡すために使う
+   ・単純なモジュールスコープの変数(Reactのstateではない)。hashルーティングでSalesPage→
+     ProductsPageへページが切り替わる(コンポーネントがアンマウント/マウントされる)際にも
+     値を保持できるようにするための、最小限の実装。 */
+let pendingProductPrefill = null;
+
 /* ---- 画像リサイズ+JPEG圧縮(ブラウザ側、Canvas使用) ----
    ・Supabase Storageは無料枠の容量が限られるため、保存前に必ず圧縮する
    ・長辺 PRODUCT_IMAGE_MAX_DIMENSION px 以内 / JPEG品質 PRODUCT_IMAGE_JPEG_QUALITY に変換
@@ -2831,8 +2838,8 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
     return () => { cancelled = true; };
   }, [isNew, type]);
 
-  // 既に仕入れ確定済み(=ウォレット消化済み)かどうか。新規以外は原則コスト欄を編集不可にする。
-  const costLocked = !isNew;
+  // ★2026-07-10変更: 仕入代・送料・手数料は、編集時(既に消化済み)でも変更可能とする。
+  // 保存時にCNY金額が変わっていれば、旧消化を取り消して新金額で再消化する(ProductsPage側のhandleSaveProductで実施)。
 
   // 商品画像(アプリ上に表示する写真)のアップロード
   const handleProductImageFile = async (file) => {
@@ -2903,7 +2910,6 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
       purchase_amount_cny: purchaseAmountCny ? parseFloat(purchaseAmountCny) : 0,
       shipping_cny: shippingCny ? parseFloat(shippingCny) : 0,
       fee_cny: feeCny ? parseFloat(feeCny) : 0,
-      costLocked,
     });
     setSaving(false);
   };
@@ -3051,52 +3057,48 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
 
         <div className="pt-1" style={{ borderTop: "1px solid var(--mz-border)" }} />
 
-        {costLocked && (
-          <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#3a3220", color: "var(--mz-gold-soft)" }}>
-            仕入れ確定済み(ウォレット消化済み)のため、仕入代・送料・手数料は変更できません。
+        {!isNew && (
+          <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#2a2f3a", color: "#9fb8d6" }}>
+            仕入代・送料・手数料を変更して保存すると、この商品の既存のウォレット消化を取り消し、新しい金額で改めてFIFO消化します(サンプル登録時点では未定で、後から仕入れが確定するケースに対応)。
           </p>
         )}
 
         <div>
           <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入れ日</label>
-          <input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required disabled={costLocked}
-            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent disabled:opacity-50" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          <input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
         </div>
 
-        {!costLocked && (
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入れロット(任意、まとめ買いの場合)</label>
-            <select value={batchId} onChange={(e) => handleBatchChange(e.target.value)}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
-              <option value="">個別仕入れ(ロットなし)</option>
-              {batches.map((b) => <option key={b.id} value={b.id}>{b.purchase_date}({b.total_items}点)</option>)}
-            </select>
-          </div>
-        )}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入れロット(任意、まとめ買いの場合)</label>
+          <select value={batchId} onChange={(e) => handleBatchChange(e.target.value)}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+            <option value="">個別仕入れ(ロットなし)</option>
+            {batches.map((b) => <option key={b.id} value={b.id}>{b.purchase_date}({b.total_items}点)</option>)}
+          </select>
+        </div>
 
         <div className="grid grid-cols-3 gap-3">
           <div>
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入代(CNY)</label>
-            <input type="number" min="0" step="0.01" value={purchaseAmountCny} onChange={(e) => setPurchaseAmountCny(e.target.value)} disabled={costLocked} required
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent disabled:opacity-50" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+            <input type="number" min="0" step="0.01" value={purchaseAmountCny} onChange={(e) => setPurchaseAmountCny(e.target.value)} required
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
           </div>
           <div>
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>送料(CNY)</label>
-            <input type="number" min="0" step="0.01" value={shippingCny} onChange={(e) => setShippingCny(e.target.value)} disabled={costLocked}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent disabled:opacity-50" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+            <input type="number" min="0" step="0.01" value={shippingCny} onChange={(e) => setShippingCny(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
           </div>
           <div>
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>手数料(CNY)</label>
-            <input type="number" min="0" step="0.01" value={feeCny} onChange={(e) => setFeeCny(e.target.value)} disabled={costLocked}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent disabled:opacity-50" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+            <input type="number" min="0" step="0.01" value={feeCny} onChange={(e) => setFeeCny(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
           </div>
         </div>
 
-        {!costLocked && (
-          <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-            保存すると、上記CNY合計額がウォレット(チャージ残高)からFIFOで自動消化されます。
-          </p>
-        )}
+        <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+          保存すると、上記CNY合計額がウォレット(チャージ残高)からFIFOで自動消化されます。
+        </p>
 
         <div className="flex gap-2 pt-1">
           <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
@@ -3218,7 +3220,6 @@ function ProductsPage() {
   const [batches, setBatches] = useState([]);
   const [consumptions, setConsumptions] = useState([]);
   const [error, setError] = useState(null);
-  const [filterStatus, setFilterStatus] = useState("未販売");
   const [filterKind, setFilterKind] = useState("all"); // "all" | "sample_all" | "sample_display" | "sample_disposal" | "stock_normal" | "stock_returned"
   const [sortOrder, setSortOrder] = useState("desc"); // "desc"=登録日(仕入れ日)新しい順 / "asc"=古い順
   const [modalProduct, setModalProduct] = useState(null); // null=閉じる, {}=新規, obj=編集
@@ -3242,6 +3243,16 @@ function ProductsPage() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
+  // ★2026-07-10実装: 販売登録画面の「展示用サンプルが売れました。再仕入れしますか？」に
+  //   「はい」と回答した場合、その商品情報を事前入力した状態で新規登録モーダルを開く。
+  useEffect(() => {
+    if (pendingProductPrefill) {
+      setModalProduct(pendingProductPrefill);
+      pendingProductPrefill = null;
+    }
+  }, []);
+
+
   const consumedProductIds = useMemo(() => new Set((consumptions || []).map((c) => c.product_id)), [consumptions]);
 
   const usageCountByBatch = useMemo(() => {
@@ -3252,8 +3263,8 @@ function ProductsPage() {
 
   const filteredProducts = useMemo(() => {
     if (!products) return [];
-    let list = products;
-    if (filterStatus !== "all") list = list.filter((p) => p.status === filterStatus);
+    // 売れた商品(販売済み・返品済み)は一覧から常に除外し、未販売のみを表示する(状態フィルタのUIは廃止)。
+    let list = products.filter((p) => p.status === "未販売");
     if (filterKind === "sample_all") {
       list = list.filter((p) => p.type === "sample");
     } else if (filterKind === "sample_display") {
@@ -3272,14 +3283,37 @@ function ProductsPage() {
       return sortOrder === "asc" ? (a.id > b.id ? 1 : -1) : (a.id < b.id ? 1 : -1);
     });
     return sorted;
-  }, [products, filterStatus, filterKind, sortOrder]);
+  }, [products, filterKind, sortOrder]);
 
   /* 仕入れ確定(products登録)時のウォレット消化処理は共通ヘルパーに委譲 */
   const consumeAndFinalize = consumeAndFinalizeProductCost;
 
   const handleSaveProduct = async (form) => {
     if (form.id) {
-      // 編集: costLockedの場合はコスト系フィールドを送らない(モーダル側で既にdisabled)
+      // 編集: CNY金額(仕入代・送料・手数料)が変わっているかを、モーダルを開いた時点の元データ(modalProduct)と比較して判定する。
+      // ★2026-07-10変更: 仕入れ確定後でも編集可能にする(サンプル登録が先、仕入れ確定が後になるケースに対応)。
+      // 変更があれば「旧消化を取り消し→新金額で再消化」を行う。
+      const original = modalProduct || {};
+      const oldTotalCny = (Number(original.purchase_amount_cny) || 0) + (Number(original.shipping_cny) || 0) + (Number(original.fee_cny) || 0);
+      const newTotalCny = (Number(form.purchase_amount_cny) || 0) + (Number(form.shipping_cny) || 0) + (Number(form.fee_cny) || 0);
+      const costsChanged =
+        (Number(form.purchase_amount_cny) || 0) !== (Number(original.purchase_amount_cny) || 0) ||
+        (Number(form.shipping_cny) || 0) !== (Number(original.shipping_cny) || 0) ||
+        (Number(form.fee_cny) || 0) !== (Number(original.fee_cny) || 0);
+
+      if (costsChanged) {
+        // 旧消化を払い戻した想定の残高で、新金額を賄えるか事前確認する(不足時はDBに一切書き込まない)
+        const balance = await getWalletRemainingTotal();
+        if (!balance.ok) { alert("ウォレット残高の確認に失敗しました"); return; }
+        const projectedBalance = balance.total + oldTotalCny;
+        if (projectedBalance < newTotalCny) {
+          alert(`ウォレット残高が不足しています(必要額: ${newTotalCny.toFixed(2)} CNY / 旧消化分を払い戻した場合の残高: ${projectedBalance.toFixed(2)} CNY)。先にチャージを追加してから再度保存してください。`);
+          return;
+        }
+        const reverseRes = await reverseWalletConsumption(form.id);
+        if (!reverseRes.ok) { alert(reverseRes.message); return; }
+      }
+
       const patch = {
         type: form.type,
         status: form.status,
@@ -3292,16 +3326,26 @@ function ProductsPage() {
         size: form.size,
         size_options: form.size_options,
         selling_price_jpy: form.selling_price_jpy,
+        purchase_date: form.purchase_date,
+        batch_id: form.batch_id,
+        purchase_amount_cny: form.purchase_amount_cny,
+        shipping_cny: form.shipping_cny,
+        fee_cny: form.fee_cny,
       };
-      if (!form.costLocked) {
-        patch.purchase_date = form.purchase_date;
-        patch.batch_id = form.batch_id;
-        patch.purchase_amount_cny = form.purchase_amount_cny;
-        patch.shipping_cny = form.shipping_cny;
-        patch.fee_cny = form.fee_cny;
-      }
       const { error } = await supabase.from("products").update(patch).eq("id", form.id);
       if (error) { alert("更新に失敗しました"); return; }
+
+      if (costsChanged) {
+        const consumeRes = await consumeAndFinalize(form.id, {
+          purchaseCny: form.purchase_amount_cny,
+          shippingCny: form.shipping_cny,
+          feeCny: form.fee_cny,
+        });
+        if (!consumeRes.ok) {
+          alert(`商品情報は更新されましたが、ウォレット再消化処理でエラーが発生しました: ${consumeRes.message}\nチャージ台帳・商品情報をご確認ください。`);
+        }
+      }
+
       setModalProduct(null);
       loadAll();
       return;
@@ -3426,11 +3470,6 @@ function ProductsPage() {
 
         {view === "list" ? (
           <div className="flex items-center gap-2 flex-wrap">
-            <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}
-              className="rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
-              <option value="all">状態: すべて</option>
-              {PRODUCT_STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
             <select value={filterKind} onChange={(e) => setFilterKind(e.target.value)}
               className="rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
               <option value="all">区分: すべて</option>
@@ -3907,6 +3946,12 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
         product_name: si.products ? si.products.product_name : null,
         size: si.products ? si.products.size : null,
         product_code: si.products ? si.products.product_code : null,
+        type: si.products ? si.products.type : null,
+        sample_purpose: si.products ? si.products.sample_purpose : null,
+        category: si.products ? si.products.category : null,
+        product_image_url: si.products ? si.products.product_image_url : null,
+        product_url: si.products ? si.products.product_url : null,
+        size_options: si.products ? si.products.size_options : null,
         purchase_amount_jpy: si.products ? si.products.purchase_amount_jpy : 0,
         shipping_jpy: si.products ? si.products.shipping_jpy : 0,
         fee_jpy: si.products ? si.products.fee_jpy : 0,
@@ -3922,7 +3967,7 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
     let cancelled = false;
     supabase
       .from("products")
-      .select("id,product_name,category,size,product_code,selling_price_jpy,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .select("id,type,sample_purpose,product_name,category,size,product_code,product_image_url,product_url,size_options,selling_price_jpy,purchase_amount_jpy,shipping_jpy,fee_jpy")
       .eq("status", "未販売")
       .order("product_name")
       .then(({ data, error }) => {
@@ -4007,6 +4052,34 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
     });
     setSaving(false);
     if (!ok) return; // onSave側でエラー表示済み。モーダルは開いたままにして再試行可能にする
+
+    // ★2026-07-10実装: この保存で新たに「売れた」ことになった商品の中に、
+    //   展示用サンプル(type: "sample" かつ sample_purpose: "展示用")があれば、
+    //   再仕入れするかどうかを案内する。新規登録時は全明細が対象、編集時は
+    //   元々の明細(sale.sale_items)に無かった新規追加分のみを対象とする。
+    const previousProductIds = new Set((sale?.sale_items || []).map((si) => si.product_id));
+    const newlySoldItems = isEdit ? items.filter((it) => !previousProductIds.has(it.productId)) : items;
+    const reorderCandidates = newlySoldItems.filter(
+      (it) => it.product && it.product.type === "sample" && (it.product.sample_purpose || "展示用") === "展示用"
+    );
+    if (reorderCandidates.length > 0) {
+      const names = reorderCandidates.map((it) => it.product.product_name || "(名称未設定)").join("、");
+      const wantsReorder = window.confirm(`展示用サンプルが売れました: ${names}\n再仕入れしますか?`);
+      if (wantsReorder) {
+        // 複数該当する場合は先頭の1点分のみ事前入力する(商品登録モーダルは1商品ずつの登録のため)
+        const ref = reorderCandidates[0].product;
+        pendingProductPrefill = {
+          type: "sample",
+          sample_purpose: "展示用",
+          product_image_url: ref.product_image_url || "",
+          product_url: ref.product_url || "",
+          product_name: ref.product_name || "",
+          category: ref.category || "",
+          size_options: ref.size_options || "",
+        };
+        window.location.hash = "#/products";
+      }
+    }
   };
 
   return (
@@ -4333,7 +4406,7 @@ function SalesPage() {
     const [salesRes, clubsRes, batchesRes] = await Promise.all([
       supabase
         .from("sales")
-        .select("id,transaction_date,host_club_id,host_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,products(product_name,size,product_code,purchase_amount_jpy,shipping_jpy,fee_jpy))")
+        .select("id,transaction_date,host_club_id,host_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
       supabase.from("purchase_batches").select("id,purchase_date,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
