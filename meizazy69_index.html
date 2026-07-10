@@ -2398,6 +2398,17 @@ const PRODUCT_STATUS_OPTIONS = ["未販売", "販売済み", "返品済み"];
    ・税務上サンプルは仕入時点で経費計上するため、stockへは転換しない(あくまでsampleのまま目的だけ変わる) */
 const SAMPLE_PURPOSE_OPTIONS = ["展示用", "処分用"];
 
+/* 商品カテゴリの大分類(★2026-07-10実装。7択に固定。手動選択・AI自動抽出のいずれもこの7つ以外は選べない)
+   1. トップス: Tシャツ・カットソー、シャツ・ブラウス、ニット・セーター、スウェット・パーカー、カーディガン・ボレロ、ベスト・ジレ
+   2. ボトムス: パンツ、ショートパンツ・ハーフパンツ、スカート
+   3. セットアップ: サロペット・オールインワン、セットアップ、スーツ(上下)
+   4. アウター: コート、ジャケット・ブルゾン、ダウン・中綿アウター
+   5. シューズ: スニーカー、革靴、サンダル、ブーツ
+   6. バッグ: ハンドバッグ・トートバッグ、ショルダーバッグ・リュック、エコバッグ・ポーチ
+   7. ファッション雑貨: 帽子、マフラー・ストール・手袋、アクセサリー(ネックレス・ピアス等)、ネクタイ・蝶ネクタイ・カフス、時計、
+      靴下・レッグウェア、ベルト、その他小物 */
+const CATEGORY_OPTIONS = ["トップス", "ボトムス", "セットアップ", "アウター", "シューズ", "バッグ", "ファッション雑貨"];
+
 /* ---- 販売登録画面「展示用サンプルが売れました。再仕入れしますか?」用の引き継ぎデータ ----
    ・「はい」を選んだ際、ProductsPageの新規登録モーダルへ事前入力データを渡すために使う
    ・単純なモジュールスコープの変数(Reactのstateではない)。hashルーティングでSalesPage→
@@ -2794,11 +2805,13 @@ async function generateNextProductCode(type) {
 }
 
 /* ---- 商品登録・編集モーダル ---- */
-function ProductFormModal({ product, batches, onClose, onSave }) {
+function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) {
   const isNew = !product.id;
   const [type, setType] = useState(product.type || "sample");
   const [status, setStatus] = useState(product.status || "未販売");
   const [samplePurpose, setSamplePurpose] = useState(product.sample_purpose || "展示用");
+  const [extraBatches, setExtraBatches] = useState([]); // この画面内で新規作成したロット(親のbatches propに反映されるまでの一時保持)
+  const [batchModalOpen, setBatchModalOpen] = useState(false);
   const [imageUrl, setImageUrl] = useState(product.product_image_url || "");
   const [uploadingImage, setUploadingImage] = useState(false);
   const [extractImageUrl, setExtractImageUrl] = useState("");
@@ -2869,7 +2882,7 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
     try {
       const info = await extractProductInfoFromImage(target);
       if (info.product_name) setProductName(info.product_name);
-      if (info.category) setCategory(info.category);
+      if (info.category && CATEGORY_OPTIONS.includes(info.category)) setCategory(info.category);
       if (info.price_cny != null) setPurchaseAmountCny(String(info.price_cny));
       if (info.size_range) setSizeOptionsText(info.size_range);
     } catch (err) {
@@ -2878,14 +2891,31 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
     setExtracting(false);
   };
 
+  // 親(ProductsPage)のbatches propは非同期(loadAll)で更新されるため、この画面内で
+  // 新規作成したロットはextraBatchesに一時的に保持し、選択肢に反映する。
+  const allBatches = useMemo(() => {
+    const ids = new Set(batches.map((b) => b.id));
+    return [...batches, ...extraBatches.filter((b) => !ids.has(b.id))];
+  }, [batches, extraBatches]);
+
   const handleBatchChange = (id) => {
     setBatchId(id);
     if (!id) return;
-    const b = batches.find((x) => x.id === id);
+    const b = allBatches.find((x) => x.id === id);
     if (b) {
       setShippingCny(String(Number(b.per_item_shipping_cny).toFixed(2)));
       setFeeCny(String(Number(b.per_item_fee_cny).toFixed(2)));
     }
+  };
+
+  const handleBatchCreated = async (form) => {
+    const res = await onCreateBatch(form);
+    if (!res.ok) { alert(res.message || "ロットの登録に失敗しました"); return; }
+    setExtraBatches((prev) => [...prev, res.batch]);
+    setBatchModalOpen(false);
+    setBatchId(res.batch.id);
+    setShippingCny(String(Number(res.batch.per_item_shipping_cny).toFixed(2)));
+    setFeeCny(String(Number(res.batch.per_item_fee_cny).toFixed(2)));
   };
 
   const handleSubmit = async (e) => {
@@ -2953,23 +2983,15 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
           {visionError && <p className="text-xs mt-1" style={{ color: "#f2b8bd" }}>{visionError}</p>}
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>区分</label>
-            <select value={type} onChange={(e) => setType(e.target.value)}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
-              <option value="sample">サンプル</option>
-              <option value="stock">在庫(新規仕入対応)</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>状態</label>
-            <select value={status} onChange={(e) => setStatus(e.target.value)}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
-              {PRODUCT_STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </div>
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>区分</label>
+          <select value={type} onChange={(e) => setType(e.target.value)}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+            <option value="sample">サンプル</option>
+            <option value="stock">在庫(新規仕入対応)</option>
+          </select>
         </div>
+
 
         {type === "sample" && (
           <div>
@@ -2993,8 +3015,11 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>カテゴリ</label>
-            <input type="text" value={category} onChange={(e) => setCategory(e.target.value)}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+            <select value={category} onChange={(e) => setCategory(e.target.value)} required
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+              <option value="">選択してください</option>
+              {CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
           </div>
           <div>
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>サイズ展開</label>
@@ -3070,11 +3095,20 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
         </div>
 
         <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入れロット(任意、まとめ買いの場合)</label>
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <label className="block text-xs" style={{ color: "var(--mz-ink-muted)" }}>仕入れロット(任意、まとめ買いの場合)</label>
+            <button
+              type="button" onClick={() => setBatchModalOpen(true)}
+              className="text-xs px-2.5 py-1 rounded-lg whitespace-nowrap shrink-0"
+              style={{ border: "1px solid var(--mz-gold)", color: "var(--mz-gold-soft)" }}
+            >
+              + 新規ロット登録
+            </button>
+          </div>
           <select value={batchId} onChange={(e) => handleBatchChange(e.target.value)}
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
             <option value="">個別仕入れ(ロットなし)</option>
-            {batches.map((b) => <option key={b.id} value={b.id}>{b.purchase_date}({b.total_items}点)</option>)}
+            {allBatches.map((b) => <option key={b.id} value={b.id}>{b.purchase_date}({b.total_items}点)</option>)}
           </select>
         </div>
 
@@ -3109,6 +3143,10 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
           </button>
         </div>
       </form>
+
+      {batchModalOpen && (
+        <BatchFormModal onClose={() => setBatchModalOpen(false)} onSave={handleBatchCreated} />
+      )}
     </div>
   );
 }
@@ -3418,11 +3456,27 @@ function ProductsPage() {
     loadAll();
   };
 
+  // 仕入れロットのINSERT本体(「仕入れロット」タブからの登録・商品登録モーダルからの
+  // 「+ 新規ロット登録」の両方で共通利用する)。
+  const createBatch = async (form) => {
+    const { data, error } = await supabase.from("purchase_batches").insert(form).select().single();
+    if (error || !data) return { ok: false, message: "ロットの登録に失敗しました" };
+    return { ok: true, batch: data };
+  };
+
   const handleSaveBatch = async (form) => {
-    const { error } = await supabase.from("purchase_batches").insert(form);
-    if (error) { alert("ロットの登録に失敗しました"); return; }
+    const res = await createBatch(form);
+    if (!res.ok) { alert(res.message); return; }
     setModalBatch(false);
     loadAll();
+  };
+
+  // 商品登録モーダル内の「+ 新規ロット登録」から呼ばれる。一覧(batches state)はバックグラウンドで
+  // 更新しつつ、作成結果はモーダル側にもそのまま返して即座に選択・自動入力できるようにする。
+  const handleCreateBatchInline = async (form) => {
+    const res = await createBatch(form);
+    if (res.ok) loadAll();
+    return res;
   };
 
   const handleSaveReturn = async (form) => {
@@ -3522,7 +3576,7 @@ function ProductsPage() {
       )}
 
       {modalProduct && (
-        <ProductFormModal product={modalProduct} batches={batches} onClose={() => setModalProduct(null)} onSave={handleSaveProduct} />
+        <ProductFormModal product={modalProduct} batches={batches} onClose={() => setModalProduct(null)} onSave={handleSaveProduct} onCreateBatch={handleCreateBatchInline} />
       )}
       {modalBatch && (
         <BatchFormModal onClose={() => setModalBatch(false)} onSave={handleSaveBatch} />
@@ -3842,8 +3896,11 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>カテゴリ</label>
-            <input type="text" value={category} onChange={(e) => setCategory(e.target.value)}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+            <select value={category} onChange={(e) => setCategory(e.target.value)} required
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+              <option value="">選択してください</option>
+              {CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
           </div>
           <div>
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品番号</label>
