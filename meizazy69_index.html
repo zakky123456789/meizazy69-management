@@ -2392,6 +2392,11 @@ const PRODUCT_IMAGE_BUCKET = "product-images";
 const PRODUCT_IMAGE_MAX_DIMENSION = 1280; // 長辺の最大px(Storage無料枠節約のため)
 const PRODUCT_IMAGE_JPEG_QUALITY = 0.72;
 const PRODUCT_STATUS_OPTIONS = ["未販売", "販売済み", "返品済み"];
+/* サンプルの「目的」区分(type: "sample" のみ意味を持つ。stockはnull固定)
+   ・展示用: ホストに見せる目的で持参する通常のサンプル(デフォルト)
+   ・処分用: 取り扱い中止・売れ行き不振等で、現物をそのまま売ってしまいたいサンプル
+   ・税務上サンプルは仕入時点で経費計上するため、stockへは転換しない(あくまでsampleのまま目的だけ変わる) */
+const SAMPLE_PURPOSE_OPTIONS = ["展示用", "処分用"];
 
 /* ---- 画像リサイズ+JPEG圧縮(ブラウザ側、Canvas使用) ----
    ・Supabase Storageは無料枠の容量が限られるため、保存前に必ず圧縮する
@@ -2687,6 +2692,22 @@ function ProductStatusBadge({ status }) {
   return <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: s.bg, color: s.color }}>{status}</span>;
 }
 
+/* ---- サンプル目的バッジ(type: "sample" の商品のみ表示) ---- */
+function SamplePurposeBadge({ purpose }) {
+  const isDisposal = purpose === "処分用";
+  return (
+    <span
+      className="text-xs px-2 py-0.5 rounded-full shrink-0"
+      style={{
+        background: isDisposal ? "#3a2a1f" : "#2a2f3a",
+        color: isDisposal ? "#d6a98f" : "#9fb8d6",
+      }}
+    >
+      {purpose || "展示用"}
+    </span>
+  );
+}
+
 /* ---- 画像アップロード用ドロップゾーン(ドラッグ&ドロップ + クリック選択の両対応) ---- */
 function ImageDropZone({ label, previewUrl, uploading, onFile, helperText, accept = "image/*", dropText = "ドラッグ&ドロップ、またはクリックして画像を選択" }) {
   const [dragOver, setDragOver] = useState(false);
@@ -2770,6 +2791,7 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
   const isNew = !product.id;
   const [type, setType] = useState(product.type || "sample");
   const [status, setStatus] = useState(product.status || "未販売");
+  const [samplePurpose, setSamplePurpose] = useState(product.sample_purpose || "展示用");
   const [imageUrl, setImageUrl] = useState(product.product_image_url || "");
   const [uploadingImage, setUploadingImage] = useState(false);
   const [extractImageUrl, setExtractImageUrl] = useState("");
@@ -2867,6 +2889,7 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
       id: product.id || null,
       type,
       status,
+      sample_purpose: type === "sample" ? samplePurpose : null,
       product_image_url: imageUrl || null,
       product_url: productUrl.trim() || null,
       product_code: productCode.trim() || null,
@@ -2941,6 +2964,19 @@ function ProductFormModal({ product, batches, onClose, onSave }) {
             </select>
           </div>
         </div>
+
+        {type === "sample" && (
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>サンプルの目的</label>
+            <select value={samplePurpose} onChange={(e) => setSamplePurpose(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+              {SAMPLE_PURPOSE_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+            <p className="text-[11px] mt-1" style={{ color: "var(--mz-ink-muted)" }}>
+              展示用: ホストに見せる目的で持参 / 処分用: 取り扱い中止・売れ行き不振等で現物を売ってしまいたいサンプル(税務上は引き続きサンプル扱い)
+            </p>
+          </div>
+        )}
 
         <div>
           <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品名</label>
@@ -3115,8 +3151,10 @@ function ReturnFormModal({ sourceProduct, onClose, onSave }) {
 }
 
 /* ---- 商品カード ---- */
-function ProductCard({ product, onEdit, onReturn, onDelete }) {
+function ProductCard({ product, onEdit, onReturn, onDelete, onTogglePurpose }) {
   const costCny = (Number(product.purchase_amount_cny) || 0) + (Number(product.shipping_cny) || 0) + (Number(product.fee_cny) || 0);
+  const isSample = product.type === "sample";
+  const isReturnedStock = !isSample && !!product.return_source_product_id;
   return (
     <div className="rounded-xl p-3 flex gap-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
       {product.product_image_url ? (
@@ -3129,7 +3167,11 @@ function ProductCard({ product, onEdit, onReturn, onDelete }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap mb-1">
           <ProductStatusBadge status={product.status} />
-          <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{product.type === "sample" ? "サンプル" : "在庫"}</span>
+          <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{isSample ? "サンプル" : "在庫"}</span>
+          {isSample && <SamplePurposeBadge purpose={product.sample_purpose} />}
+          {isReturnedStock && (
+            <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: "#33301F", color: "var(--mz-ink-muted)" }}>返品在庫</span>
+          )}
           {product.product_code && <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>No. {product.product_code}</span>}
           {product.return_date && <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>返品: {product.return_date}</span>}
         </div>
@@ -3145,6 +3187,15 @@ function ProductCard({ product, onEdit, onReturn, onDelete }) {
       </div>
       <div className="flex flex-col gap-1.5 shrink-0 items-end">
         <button onClick={() => onEdit(product)} className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>編集</button>
+        {isSample && (
+          <button
+            onClick={() => onTogglePurpose(product)}
+            className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+          >
+            {product.sample_purpose === "処分用" ? "展示用に戻す" : "処分用に切替"}
+          </button>
+        )}
         {product.status !== "返品済み" && (
           <button onClick={() => onReturn(product)} className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>返品登録</button>
         )}
@@ -3176,7 +3227,7 @@ function ProductsPage() {
     setError(null);
     const [productsRes, batchesRes, consumptionsRes] = await Promise.all([
       supabase.from("products")
-        .select("id,type,status,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+        .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
         .order("purchase_date", { ascending: false }),
       supabase.from("purchase_batches").select("id,purchase_date,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
       supabase.from("agent_charge_consumptions").select("id,product_id"),
@@ -3212,6 +3263,7 @@ function ProductsPage() {
       const patch = {
         type: form.type,
         status: form.status,
+        sample_purpose: form.type === "sample" ? (form.sample_purpose || "展示用") : null,
         product_image_url: form.product_image_url,
         product_url: form.product_url,
         product_code: form.product_code,
@@ -3247,6 +3299,7 @@ function ProductsPage() {
     const { data: inserted, error } = await supabase.from("products").insert({
       type: form.type,
       status: form.status,
+      sample_purpose: form.type === "sample" ? (form.sample_purpose || "展示用") : null,
       product_image_url: form.product_image_url,
       product_url: form.product_url,
       product_code: form.product_code,
@@ -3291,6 +3344,13 @@ function ProductsPage() {
 
     const { error } = await supabase.from("products").delete().eq("id", product.id);
     if (error) { alert("削除に失敗しました"); return; }
+    loadAll();
+  };
+
+  const handleTogglePurpose = async (product) => {
+    const next = product.sample_purpose === "処分用" ? "展示用" : "処分用";
+    const { error } = await supabase.from("products").update({ sample_purpose: next }).eq("id", product.id);
+    if (error) { alert("目的区分の切替に失敗しました"); return; }
     loadAll();
   };
 
@@ -3377,6 +3437,7 @@ function ProductsPage() {
                 onEdit={(prod) => setModalProduct(prod)}
                 onReturn={(prod) => setReturnTarget(prod)}
                 onDelete={handleDeleteProduct}
+                onTogglePurpose={handleTogglePurpose}
               />
             ))}
           </div>
