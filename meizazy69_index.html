@@ -2834,6 +2834,15 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
   const [shippingCny, setShippingCny] = useState(product.shipping_cny != null ? String(product.shipping_cny) : "");
   const [feeCny, setFeeCny] = useState(product.fee_cny != null ? String(product.fee_cny) : "");
   const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState(null);
+
+  // ★2026-07-10実装: AI自動抽出でカラーバリエーションが検出された場合の一括登録用state。
+  //   colorOptions: 検出された色名の配列(例: ["黒","灰","白"])。isNewかつAI抽出時のみ使う。
+  //   checkedColors: どの色を実際に仕入れるか(チェックボックスの選択状態)。
+  //   colorCostInputs: 色ごとの仕入代・送料・手数料(CNY)。色によって金額が異なる場合があるため個別入力。
+  const [colorOptions, setColorOptions] = useState([]);
+  const [checkedColors, setCheckedColors] = useState({});
+  const [colorCostInputs, setColorCostInputs] = useState({});
 
   // 「サイズ展開」テキスト(例: "S/M/L/XL")を選択肢配列にパース。
   // 既存のsize(編集時)がリストに含まれていなければ先頭に追加しておく(選択が消えないように)。
@@ -2888,6 +2897,14 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
       if (info.category && CATEGORY_OPTIONS.includes(info.category)) setCategory(info.category);
       if (info.price_cny != null) setPurchaseAmountCny(String(info.price_cny));
       if (info.size_range) setSizeOptionsText(info.size_range);
+      // ★2026-07-10実装: カラーバリエーションが検出された場合、選択式の一括登録UIを表示する
+      if (Array.isArray(info.colors) && info.colors.length > 0) {
+        setColorOptions(info.colors);
+        setCheckedColors({});
+        setColorCostInputs({});
+      } else {
+        setColorOptions([]);
+      }
     } catch (err) {
       setVisionError(err.message || "AI自動抽出に失敗しました");
     }
@@ -2921,9 +2938,61 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
     setFeeCny(String(Number(res.batch.per_item_fee_cny).toFixed(2)));
   };
 
+  // ★2026-07-10実装: カラーバリエーション一括登録用のチェック切り替え・金額入力ハンドラ
+  const toggleColor = (color) => {
+    setCheckedColors((prev) => ({ ...prev, [color]: !prev[color] }));
+    setColorCostInputs((prev) => (prev[color] ? prev : { ...prev, [color]: { purchaseAmountCny: "", shippingCny: "", feeCny: "" } }));
+  };
+
+  const updateColorCost = (color, field, value) => {
+    setColorCostInputs((prev) => ({ ...prev, [color]: { ...(prev[color] || {}), [field]: value } }));
+  };
+
+  const activeColors = colorOptions.filter((c) => checkedColors[c]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setFormError(null);
     if (!productName.trim() || !purchaseDate) return;
+
+    // ★2026-07-10実装: カラーバリエーションが1色以上選択されている場合は一括登録モード
+    if (activeColors.length > 0) {
+      for (const c of activeColors) {
+        const costs = colorCostInputs[c] || {};
+        if (costs.purchaseAmountCny === undefined || costs.purchaseAmountCny === "" || isNaN(parseFloat(costs.purchaseAmountCny))) {
+          setFormError(`「${c}」の仕入代を入力してください`);
+          return;
+        }
+      }
+      setSaving(true);
+      const multiItems = [];
+      for (const c of activeColors) {
+        const code = await generateNextProductCode(type);
+        const costs = colorCostInputs[c] || {};
+        multiItems.push({
+          type,
+          status,
+          sample_purpose: type === "sample" ? samplePurpose : null,
+          product_image_url: imageUrl || null,
+          product_url: productUrl.trim() || null,
+          product_code: code,
+          product_name: `${productName.trim()}(${c})`,
+          category: category || null,
+          size: size.trim() || null,
+          size_options: sizeOptionsText.trim() || null,
+          selling_price_jpy: sellingPriceJpy ? parseFloat(sellingPriceJpy) : null,
+          purchase_date: purchaseDate,
+          batch_id: batchId || null,
+          purchase_amount_cny: costs.purchaseAmountCny ? parseFloat(costs.purchaseAmountCny) : 0,
+          shipping_cny: costs.shippingCny ? parseFloat(costs.shippingCny) : 0,
+          fee_cny: costs.feeCny ? parseFloat(costs.feeCny) : 0,
+        });
+      }
+      await onSave({ multiItems });
+      setSaving(false);
+      return;
+    }
+
     setSaving(true);
     await onSave({
       id: product.id || null,
@@ -2985,6 +3054,44 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           )}
           {visionError && <p className="text-xs mt-1" style={{ color: "#f2b8bd" }}>{visionError}</p>}
         </div>
+
+        {colorOptions.length > 0 && (
+          <div className="rounded-lg p-3 space-y-2" style={{ background: "var(--mz-surface-hover)", border: "1px solid var(--mz-border)" }}>
+            <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+              カラーバリエーションが検出されました。仕入れる色にチェックを入れ、色ごとの仕入代・送料・手数料を入力してください(チェックした色の数だけ商品が一括登録されます。商品名の末尾に色が自動で付きます)。
+            </p>
+            {colorOptions.map((c) => (
+              <div key={c} className="rounded-lg p-2" style={{ border: "1px solid var(--mz-border)" }}>
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input type="checkbox" checked={!!checkedColors[c]} onChange={() => toggleColor(c)} />
+                  <span>{c}</span>
+                </label>
+                {checkedColors[c] && (
+                  <div className="grid grid-cols-3 gap-2 mt-2">
+                    <input
+                      type="number" min="0" step="0.01" placeholder="仕入代(CNY)"
+                      value={(colorCostInputs[c] && colorCostInputs[c].purchaseAmountCny) || ""}
+                      onChange={(e) => updateColorCost(c, "purchaseAmountCny", e.target.value)}
+                      className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                    />
+                    <input
+                      type="number" min="0" step="0.01" placeholder="送料(CNY)"
+                      value={(colorCostInputs[c] && colorCostInputs[c].shippingCny) || ""}
+                      onChange={(e) => updateColorCost(c, "shippingCny", e.target.value)}
+                      className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                    />
+                    <input
+                      type="number" min="0" step="0.01" placeholder="手数料(CNY)"
+                      value={(colorCostInputs[c] && colorCostInputs[c].feeCny) || ""}
+                      onChange={(e) => updateColorCost(c, "feeCny", e.target.value)}
+                      className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                    />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
         <div>
           <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>区分</label>
@@ -3063,13 +3170,15 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
 
 
         <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>
-              商品番号{type === "sample" && isNew ? "(サンプルは自動採番、編集可)" : "(任意)"}
-            </label>
-            <input type="text" value={productCode} onChange={(e) => setProductCode(e.target.value)}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
-          </div>
+          {activeColors.length === 0 && (
+            <div>
+              <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+                商品番号{type === "sample" && isNew ? "(サンプルは自動採番、編集可)" : "(任意)"}
+              </label>
+              <input type="text" value={productCode} onChange={(e) => setProductCode(e.target.value)}
+                className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+            </div>
+          )}
           <div>
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>参考販売価格(JPY)</label>
             <input type="number" min="0" step="1" value={sellingPriceJpy} onChange={(e) => setSellingPriceJpy(e.target.value)}
@@ -3115,34 +3224,48 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           </select>
         </div>
 
-        <div className="grid grid-cols-3 gap-3">
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入代(CNY)</label>
-            <input type="number" min="0" step="0.01" value={purchaseAmountCny} onChange={(e) => setPurchaseAmountCny(e.target.value)} required
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
-          </div>
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>送料(CNY)</label>
-            <input type="number" min="0" step="0.01" value={shippingCny} onChange={(e) => setShippingCny(e.target.value)}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
-          </div>
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>手数料(CNY)</label>
-            <input type="number" min="0" step="0.01" value={feeCny} onChange={(e) => setFeeCny(e.target.value)}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
-          </div>
-        </div>
+        {activeColors.length === 0 && (
+          <>
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入代(CNY)</label>
+                <input type="number" min="0" step="0.01" value={purchaseAmountCny} onChange={(e) => setPurchaseAmountCny(e.target.value)} required
+                  className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+              </div>
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>送料(CNY)</label>
+                <input type="number" min="0" step="0.01" value={shippingCny} onChange={(e) => setShippingCny(e.target.value)}
+                  className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+              </div>
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>手数料(CNY)</label>
+                <input type="number" min="0" step="0.01" value={feeCny} onChange={(e) => setFeeCny(e.target.value)}
+                  className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+              </div>
+            </div>
 
-        <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-          保存すると、上記CNY合計額がウォレット(チャージ残高)からFIFOで自動消化されます。
-        </p>
+            <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+              保存すると、上記CNY合計額がウォレット(チャージ残高)からFIFOで自動消化されます。
+            </p>
+          </>
+        )}
+
+        {activeColors.length > 0 && (
+          <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+            カラーバリエーション一括登録モードです。上のカラー一覧で入力した色ごとの金額で、それぞれウォレット(チャージ残高)からFIFOで自動消化されます。
+          </p>
+        )}
+
+        {formError && (
+          <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{formError}</p>
+        )}
 
         <div className="flex gap-2 pt-1">
           <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
             キャンセル
           </button>
           <button type="submit" disabled={saving || uploadingImage || uploadingExtractImage} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
-            {saving ? "保存中..." : "保存"}
+            {saving ? "保存中..." : (activeColors.length > 0 ? `${activeColors.length}点を一括登録` : "保存")}
           </button>
         </div>
       </form>
@@ -3329,7 +3452,63 @@ function ProductsPage() {
   /* 仕入れ確定(products登録)時のウォレット消化処理は共通ヘルパーに委譲 */
   const consumeAndFinalize = consumeAndFinalizeProductCost;
 
+  // 新規商品1点分の登録処理(ウォレット残高事前チェック→insert→FIFO消化確定)を共通化。
+  // 単品の新規登録・カラーバリエーション一括登録(2.22参照)の両方から呼び出す。
+  const insertNewProductCore = async (item) => {
+    const totalNeeded = (item.purchase_amount_cny || 0) + (item.shipping_cny || 0) + (item.fee_cny || 0);
+    const balance = await getWalletRemainingTotal();
+    if (!balance.ok) return { ok: false, message: "ウォレット残高の確認に失敗しました" };
+    if (balance.total < totalNeeded) {
+      return { ok: false, message: `ウォレット残高が不足しています(必要額: ${totalNeeded.toFixed(2)} CNY / 残高: ${balance.total.toFixed(2)} CNY)。先にチャージを追加してください。` };
+    }
+
+    const { data: inserted, error } = await supabase.from("products").insert({
+      type: item.type,
+      status: item.status,
+      sample_purpose: item.type === "sample" ? (item.sample_purpose || "展示用") : null,
+      product_image_url: item.product_image_url,
+      product_url: item.product_url,
+      product_code: item.product_code,
+      product_name: item.product_name,
+      category: item.category,
+      size: item.size,
+      size_options: item.size_options,
+      selling_price_jpy: item.selling_price_jpy,
+      purchase_date: item.purchase_date,
+      batch_id: item.batch_id,
+      purchase_amount_cny: item.purchase_amount_cny,
+      shipping_cny: item.shipping_cny,
+      fee_cny: item.fee_cny,
+    }).select("id").single();
+
+    if (error || !inserted) return { ok: false, message: `${item.product_name}: 登録に失敗しました` };
+
+    const consumeRes = await consumeAndFinalize(inserted.id, {
+      purchaseCny: item.purchase_amount_cny,
+      shippingCny: item.shipping_cny,
+      feeCny: item.fee_cny,
+    });
+    if (!consumeRes.ok) {
+      return { ok: true, warning: `${item.product_name}: 登録は完了しましたが、ウォレット消化処理でエラーが発生しました(${consumeRes.message})。チャージ台帳・商品情報をご確認ください。` };
+    }
+    return { ok: true };
+  };
+
   const handleSaveProduct = async (form) => {
+    // ★2026-07-10実装: カラーバリエーション一括登録(ProductFormModalでAI検出した色を複数選択した場合)
+    if (form.multiItems) {
+      const messages = [];
+      for (const item of form.multiItems) {
+        const res = await insertNewProductCore(item);
+        if (!res.ok) messages.push(res.message);
+        else if (res.warning) messages.push(res.warning);
+      }
+      if (messages.length > 0) alert(messages.join("\n"));
+      setModalProduct(null);
+      loadAll();
+      return;
+    }
+
     if (form.id) {
       // 編集: CNY金額(仕入代・送料・手数料)が変わっているかを、モーダルを開いた時点の元データ(modalProduct)と比較して判定する。
       // ★2026-07-10変更: 仕入れ確定後でも編集可能にする(サンプル登録が先、仕入れ確定が後になるケースに対応)。
@@ -3392,44 +3571,10 @@ function ProductsPage() {
       return;
     }
 
-    // 新規登録: 事前にウォレット残高を確認してから登録する(部分消化を避けるため)
-    const totalNeeded = (form.purchase_amount_cny || 0) + (form.shipping_cny || 0) + (form.fee_cny || 0);
-    const balance = await getWalletRemainingTotal();
-    if (!balance.ok) { alert("ウォレット残高の確認に失敗しました"); return; }
-    if (balance.total < totalNeeded) {
-      alert(`ウォレット残高が不足しています(必要額: ${totalNeeded.toFixed(2)} CNY / 残高: ${balance.total.toFixed(2)} CNY)。先にチャージを追加してください。`);
-      return;
-    }
-
-    const { data: inserted, error } = await supabase.from("products").insert({
-      type: form.type,
-      status: form.status,
-      sample_purpose: form.type === "sample" ? (form.sample_purpose || "展示用") : null,
-      product_image_url: form.product_image_url,
-      product_url: form.product_url,
-      product_code: form.product_code,
-      product_name: form.product_name,
-      category: form.category,
-      size: form.size,
-      size_options: form.size_options,
-      selling_price_jpy: form.selling_price_jpy,
-      purchase_date: form.purchase_date,
-      batch_id: form.batch_id,
-      purchase_amount_cny: form.purchase_amount_cny,
-      shipping_cny: form.shipping_cny,
-      fee_cny: form.fee_cny,
-    }).select("id").single();
-
-    if (error || !inserted) { alert("登録に失敗しました"); return; }
-
-    const consumeRes = await consumeAndFinalize(inserted.id, {
-      purchaseCny: form.purchase_amount_cny,
-      shippingCny: form.shipping_cny,
-      feeCny: form.fee_cny,
-    });
-    if (!consumeRes.ok) {
-      alert(`商品は登録されましたが、ウォレット消化処理でエラーが発生しました: ${consumeRes.message}\nチャージ台帳・商品情報をご確認ください。`);
-    }
+    // 通常の単品新規登録
+    const res = await insertNewProductCore(form);
+    if (!res.ok) { alert(res.message); return; }
+    if (res.warning) alert(res.warning);
 
     setModalProduct(null);
     loadAll();
