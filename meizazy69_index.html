@@ -2840,9 +2840,12 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
   //   colorOptions: 検出された色名の配列(例: ["黒","灰","白"])。isNewかつAI抽出時のみ使う。
   //   checkedColors: どの色を実際に仕入れるか(チェックボックスの選択状態)。
   //   colorCostInputs: 色ごとの仕入代・送料・手数料(CNY)。色によって金額が異なる場合があるため個別入力。
+  //   colorImages / uploadingColorImage: 色ごとの商品画像(未指定の場合は共通の商品画像を使う)。
   const [colorOptions, setColorOptions] = useState([]);
   const [checkedColors, setCheckedColors] = useState({});
   const [colorCostInputs, setColorCostInputs] = useState({});
+  const [colorImages, setColorImages] = useState({});
+  const [uploadingColorImage, setUploadingColorImage] = useState({});
 
   // 「サイズ展開」テキスト(例: "S/M/L/XL")を選択肢配列にパース。
   // 既存のsize(編集時)がリストに含まれていなければ先頭に追加しておく(選択が消えないように)。
@@ -2948,6 +2951,15 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
     setColorCostInputs((prev) => ({ ...prev, [color]: { ...(prev[color] || {}), [field]: value } }));
   };
 
+  // 色ごとの商品画像アップロード。未指定の色は共通の商品画像(imageUrl)をそのまま使う。
+  const handleColorImageFile = async (color, file) => {
+    setUploadingColorImage((prev) => ({ ...prev, [color]: true }));
+    const res = await uploadProductImage(file);
+    setUploadingColorImage((prev) => ({ ...prev, [color]: false }));
+    if (!res.ok) { alert(res.message); return; }
+    setColorImages((prev) => ({ ...prev, [color]: res.url }));
+  };
+
   const activeColors = colorOptions.filter((c) => checkedColors[c]);
 
   const handleSubmit = async (e) => {
@@ -2973,7 +2985,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           type,
           status,
           sample_purpose: type === "sample" ? samplePurpose : null,
-          product_image_url: imageUrl || null,
+          product_image_url: colorImages[c] || imageUrl || null,
           product_url: productUrl.trim() || null,
           product_code: code,
           product_name: `${productName.trim()}(${c})`,
@@ -3067,25 +3079,34 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
                   <span>{c}</span>
                 </label>
                 {checkedColors[c] && (
-                  <div className="grid grid-cols-3 gap-2 mt-2">
-                    <input
-                      type="number" min="0" step="0.01" placeholder="仕入代(CNY)"
-                      value={(colorCostInputs[c] && colorCostInputs[c].purchaseAmountCny) || ""}
-                      onChange={(e) => updateColorCost(c, "purchaseAmountCny", e.target.value)}
-                      className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                  <div className="mt-2 space-y-2">
+                    <ImageDropZone
+                      label="この色の商品画像(未指定の場合は上の共通画像を使用)"
+                      previewUrl={colorImages[c] || imageUrl}
+                      uploading={!!uploadingColorImage[c]}
+                      onFile={(file) => handleColorImageFile(c, file)}
+                      helperText="ドラッグ&ドロップ、またはクリックして画像を選択"
                     />
-                    <input
-                      type="number" min="0" step="0.01" placeholder="送料(CNY)"
-                      value={(colorCostInputs[c] && colorCostInputs[c].shippingCny) || ""}
-                      onChange={(e) => updateColorCost(c, "shippingCny", e.target.value)}
-                      className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-                    />
-                    <input
-                      type="number" min="0" step="0.01" placeholder="手数料(CNY)"
-                      value={(colorCostInputs[c] && colorCostInputs[c].feeCny) || ""}
-                      onChange={(e) => updateColorCost(c, "feeCny", e.target.value)}
-                      className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-                    />
+                    <div className="grid grid-cols-3 gap-2">
+                      <input
+                        type="number" min="0" step="0.01" placeholder="仕入代(CNY)"
+                        value={(colorCostInputs[c] && colorCostInputs[c].purchaseAmountCny) || ""}
+                        onChange={(e) => updateColorCost(c, "purchaseAmountCny", e.target.value)}
+                        className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                      />
+                      <input
+                        type="number" min="0" step="0.01" placeholder="送料(CNY)"
+                        value={(colorCostInputs[c] && colorCostInputs[c].shippingCny) || ""}
+                        onChange={(e) => updateColorCost(c, "shippingCny", e.target.value)}
+                        className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                      />
+                      <input
+                        type="number" min="0" step="0.01" placeholder="手数料(CNY)"
+                        value={(colorCostInputs[c] && colorCostInputs[c].feeCny) || ""}
+                        onChange={(e) => updateColorCost(c, "feeCny", e.target.value)}
+                        className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                      />
+                    </div>
                   </div>
                 )}
               </div>
