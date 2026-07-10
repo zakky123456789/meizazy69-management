@@ -2944,7 +2944,8 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
   // ★2026-07-10実装: カラーバリエーション一括登録用のチェック切り替え・金額入力ハンドラ
   const toggleColor = (color) => {
     setCheckedColors((prev) => ({ ...prev, [color]: !prev[color] }));
-    setColorCostInputs((prev) => (prev[color] ? prev : { ...prev, [color]: { purchaseAmountCny: "", shippingCny: "", feeCny: "" } }));
+    // 初めてチェックした色は、共通欄(AI自動抽出で入った仕入代等)の現在値をデフォルトとして引き継ぐ
+    setColorCostInputs((prev) => (prev[color] ? prev : { ...prev, [color]: { purchaseAmountCny: purchaseAmountCny || "", shippingCny: shippingCny || "", feeCny: feeCny || "" } }));
   };
 
   const updateColorCost = (color, field, value) => {
@@ -2978,8 +2979,17 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
       }
       setSaving(true);
       const multiItems = [];
+      // ★2026-07-10バグ修正: generateNextProductCodeをループ内で毎回awaitすると、
+      //   この時点ではまだどの色もDBにinsertされていないため、全色が同じ「DB上の最大値+1」を
+      //   返してしまい商品番号が重複していた。そのため最初の1回だけDBから採番し、
+      //   以降はローカルの連番でインクリメントする。
+      const firstCode = await generateNextProductCode(type);
+      const codePrefix = type === "sample" ? "S" : "P";
+      const firstCodeMatch = /^[A-Z]-(\d+)$/.exec(firstCode);
+      let nextCodeNum = firstCodeMatch ? parseInt(firstCodeMatch[1], 10) : 1;
       for (const c of activeColors) {
-        const code = await generateNextProductCode(type);
+        const code = `${codePrefix}-${String(nextCodeNum).padStart(4, "0")}`;
+        nextCodeNum += 1;
         const costs = colorCostInputs[c] || {};
         multiItems.push({
           type,
