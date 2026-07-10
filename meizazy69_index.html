@@ -3219,6 +3219,8 @@ function ProductsPage() {
   const [consumptions, setConsumptions] = useState([]);
   const [error, setError] = useState(null);
   const [filterStatus, setFilterStatus] = useState("未販売");
+  const [filterKind, setFilterKind] = useState("all"); // "all" | "sample_all" | "sample_display" | "sample_disposal" | "stock_normal" | "stock_returned"
+  const [sortOrder, setSortOrder] = useState("desc"); // "desc"=登録日(仕入れ日)新しい順 / "asc"=古い順
   const [modalProduct, setModalProduct] = useState(null); // null=閉じる, {}=新規, obj=編集
   const [modalBatch, setModalBatch] = useState(false);
   const [returnTarget, setReturnTarget] = useState(null);
@@ -3227,8 +3229,8 @@ function ProductsPage() {
     setError(null);
     const [productsRes, batchesRes, consumptionsRes] = await Promise.all([
       supabase.from("products")
-        .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
-        .order("purchase_date", { ascending: false }),
+        .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+        .order("created_at", { ascending: false }),
       supabase.from("purchase_batches").select("id,purchase_date,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
       supabase.from("agent_charge_consumptions").select("id,product_id"),
     ]);
@@ -3250,9 +3252,27 @@ function ProductsPage() {
 
   const filteredProducts = useMemo(() => {
     if (!products) return [];
-    if (filterStatus === "all") return products;
-    return products.filter((p) => p.status === filterStatus);
-  }, [products, filterStatus]);
+    let list = products;
+    if (filterStatus !== "all") list = list.filter((p) => p.status === filterStatus);
+    if (filterKind === "sample_all") {
+      list = list.filter((p) => p.type === "sample");
+    } else if (filterKind === "sample_display") {
+      list = list.filter((p) => p.type === "sample" && (p.sample_purpose || "展示用") === "展示用");
+    } else if (filterKind === "sample_disposal") {
+      list = list.filter((p) => p.type === "sample" && p.sample_purpose === "処分用");
+    } else if (filterKind === "stock_normal") {
+      list = list.filter((p) => p.type === "stock" && !p.return_source_product_id);
+    } else if (filterKind === "stock_returned") {
+      list = list.filter((p) => p.type === "stock" && !!p.return_source_product_id);
+    }
+    // 登録日(created_at)で並べ替え。同時刻の場合はidで安定ソート。
+    const sorted = [...list].sort((a, b) => {
+      const dateCompare = (a.created_at || "").localeCompare(b.created_at || "");
+      if (dateCompare !== 0) return sortOrder === "asc" ? dateCompare : -dateCompare;
+      return sortOrder === "asc" ? (a.id > b.id ? 1 : -1) : (a.id < b.id ? 1 : -1);
+    });
+    return sorted;
+  }, [products, filterStatus, filterKind, sortOrder]);
 
   /* 仕入れ確定(products登録)時のウォレット消化処理は共通ヘルパーに委譲 */
   const consumeAndFinalize = consumeAndFinalizeProductCost;
@@ -3410,6 +3430,20 @@ function ProductsPage() {
               className="rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
               <option value="all">状態: すべて</option>
               {PRODUCT_STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select value={filterKind} onChange={(e) => setFilterKind(e.target.value)}
+              className="rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+              <option value="all">区分: すべて</option>
+              <option value="sample_all">サンプル: すべて</option>
+              <option value="sample_display">サンプル: 展示用</option>
+              <option value="sample_disposal">サンプル: 処分用</option>
+              <option value="stock_normal">在庫</option>
+              <option value="stock_returned">在庫: 返品在庫</option>
+            </select>
+            <select value={sortOrder} onChange={(e) => setSortOrder(e.target.value)}
+              className="rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+              <option value="desc">登録日: 新しい順</option>
+              <option value="asc">登録日: 古い順</option>
             </select>
             <button onClick={() => setModalProduct({})} className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
               + 新規仕入れ登録
