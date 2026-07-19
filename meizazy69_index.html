@@ -6675,16 +6675,28 @@ function AppShell({ staffName, onSwitchStaff, onSignOut }) {
    catalogs/products テーブルへの直接アクセスは行わない。
    ============================================================ */
 function PublicCatalogItemCard({ item }) {
+  // ★2026-07-12実装: 処分用サンプルは「その1点しかない現品」であり、サイズ展開(選べる範囲)を
+  //   見せると誤解を招くため、登録された実サイズのみを表示し、「現品限り」の注記を添える。
+  const isDisposal = item.sample_purpose === "処分用";
+
   return (
     <div
       className="rounded-xl overflow-hidden flex flex-col"
       style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
     >
-      <div className="aspect-square w-full flex items-center justify-center" style={{ background: "var(--mz-surface-hover)" }}>
+      <div className="relative aspect-square w-full flex items-center justify-center" style={{ background: "var(--mz-surface-hover)" }}>
         {item.product_image_url ? (
           <img src={item.product_image_url} alt={item.product_name || ""} className="w-full h-full object-cover" />
         ) : (
           <Icon name="tag" className="w-8 h-8" style={{ color: "var(--mz-ink-muted)" }} />
+        )}
+        {isDisposal && (
+          <span
+            className="absolute top-2 left-2 text-[10px] px-2 py-0.5 rounded-full"
+            style={{ background: "#3a2a1f", color: "#d6a98f", border: "1px solid rgba(0,0,0,0.3)" }}
+          >
+            現品限り
+          </span>
         )}
       </div>
       <div className="p-3 space-y-1">
@@ -6695,8 +6707,14 @@ function PublicCatalogItemCard({ item }) {
             <span className="font-medium shrink-0" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(item.selling_price_jpy)}</span>
           )}
         </div>
-        {item.size_options && (
-          <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>サイズ展開: {item.size_options}</p>
+        {isDisposal ? (
+          item.size && (
+            <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>サイズ: {item.size}(現品限り)</p>
+          )
+        ) : (
+          item.size_options && (
+            <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>サイズ展開: {item.size_options}</p>
+          )
         )}
         {item.category && (
           <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>{item.category}</p>
