@@ -4946,14 +4946,14 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
 
   const [allProducts, setAllProducts] = useState(null); // null = 読み込み中
   const [productSearch, setProductSearch] = useState("");
-  const [selectedProducts, setSelectedProducts] = useState(initialItems || []); // [{id,product_name,size,product_code,selling_price_jpy}]
+  const [selectedProducts, setSelectedProducts] = useState(initialItems || []); // [{id,product_name,size,product_code,selling_price_jpy,product_image_url}]
 
   useEffect(() => {
     let cancelled = false;
     supabase
       .from("products")
-      .select("id,product_name,size,product_code,selling_price_jpy,size_options")
-      .order("product_name")
+      .select("id,product_name,size,product_code,selling_price_jpy,size_options,product_image_url,created_at")
+      .order("created_at", { ascending: false })
       .then(({ data, error }) => {
         if (cancelled) return;
         setAllProducts(error ? [] : (data || []));
@@ -4963,14 +4963,16 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
 
   const selectedIds = useMemo(() => new Set(selectedProducts.map((p) => p.id)), [selectedProducts]);
 
+  // ★2026-07-12実装(2026-07-12 上限撤廃): 検索未入力時も登録日の新しい順に画像グリッドで一覧表示する(候補を出さない旧仕様を廃止。2.24参照)。
+  //   件数上限は設けず、該当する商品を常に全件表示する。
   const candidates = useMemo(() => {
     if (!allProducts) return [];
     const q = productSearch.trim().toLowerCase();
     return allProducts.filter((p) => {
       if (selectedIds.has(p.id)) return false;
-      if (!q) return false; // 未入力時は候補を出さない(一覧が長くなりすぎるため)
+      if (!q) return true;
       return (p.product_name || "").toLowerCase().includes(q) || (p.product_code || "").toLowerCase().includes(q);
-    }).slice(0, 20);
+    });
   }, [allProducts, selectedIds, productSearch]);
 
   const addProduct = (p) => { setSelectedProducts((prev) => [...prev, p]); setProductSearch(""); };
@@ -5026,6 +5028,11 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
                   className="flex items-center gap-2 text-xs px-2.5 py-1.5 rounded-lg"
                   style={{ background: "var(--mz-surface-hover)", color: "var(--mz-ink)" }}
                 >
+                  {p.product_image_url ? (
+                    <img src={p.product_image_url} alt="" className="w-8 h-8 rounded-md object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
+                  ) : (
+                    <div className="w-8 h-8 rounded-md shrink-0 flex items-center justify-center text-[8px] text-center" style={{ background: "var(--mz-bg)", color: "var(--mz-ink-muted)" }}>No Image</div>
+                  )}
                   <span className="flex-1 min-w-0 truncate">{productLabel(p)}</span>
                   <button type="button" onClick={() => moveProduct(idx, -1)} disabled={idx === 0} className="disabled:opacity-30" style={{ color: "var(--mz-ink-muted)" }}>↑</button>
                   <button type="button" onClick={() => moveProduct(idx, 1)} disabled={idx === selectedProducts.length - 1} className="disabled:opacity-30" style={{ color: "var(--mz-ink-muted)" }}>↓</button>
@@ -5043,24 +5050,35 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
 
           <input
             type="text" value={productSearch} onChange={(e) => setProductSearch(e.target.value)}
-            placeholder="商品名・商品番号で検索して追加...(ステータス問わず)"
+            placeholder="商品名・商品番号で絞り込み(未入力時は登録日の新しい順に一覧表示・ステータス問わず)"
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           />
 
           {allProducts === null ? (
             <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
-          ) : productSearch.trim() && candidates.length === 0 ? (
+          ) : candidates.length === 0 ? (
             <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>該当する商品がありません</p>
-          ) : candidates.length > 0 && (
-            <div className="mt-1.5 rounded-lg max-h-40 overflow-y-auto" style={{ border: "1px solid var(--mz-border)" }}>
+          ) : (
+            <div
+              className="mt-1.5 grid grid-cols-3 sm:grid-cols-4 gap-2 max-h-64 overflow-y-auto p-1.5 rounded-lg"
+              style={{ border: "1px solid var(--mz-border)" }}
+            >
               {candidates.map((p) => (
                 <button
                   key={p.id} type="button" onClick={() => addProduct(p)}
-                  className="w-full text-left px-3 py-2 text-xs truncate"
-                  style={{ borderBottom: "1px solid var(--mz-border)" }}
+                  className="flex flex-col items-center gap-1 rounded-lg p-1.5 hover:bg-white/5 text-left"
+                  style={{ border: "1px solid var(--mz-border)" }}
                 >
-                  {productLabel(p)}{p.selling_price_jpy != null ? ` / ${fmtJPY(p.selling_price_jpy)}` : ""}
+                  {p.product_image_url ? (
+                    <img src={p.product_image_url} alt="" className="w-full aspect-square rounded-md object-cover" />
+                  ) : (
+                    <div className="w-full aspect-square rounded-md flex items-center justify-center text-[9px] text-center" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" }}>No Image</div>
+                  )}
+                  <span className="text-[10px] w-full truncate text-center">{productLabel(p)}</span>
+                  {p.selling_price_jpy != null && (
+                    <span className="text-[9px]" style={{ color: "var(--mz-ink-muted)" }}>{fmtJPY(p.selling_price_jpy)}</span>
+                  )}
                 </button>
               ))}
             </div>
