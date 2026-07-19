@@ -4970,7 +4970,7 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
     let cancelled = false;
     supabase
       .from("products")
-      .select("id,type,sample_purpose,product_name,size,product_code,selling_price_jpy,size_options,product_image_url,created_at")
+      .select("id,type,sample_purpose,product_name,category,size,product_code,selling_price_jpy,size_options,product_image_url,created_at")
       .order("created_at", { ascending: false })
       .then(({ data, error }) => {
         if (cancelled) return;
@@ -5004,6 +5004,21 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
       return next;
     });
   };
+  // ★2026-07-19実装: 掲載商品をCATEGORY_OPTIONS(トップス→ボトムス→…)の順に並べ替える。
+  //   同カテゴリ内は元の並び順(手動並べ替え・追加順)を維持する安定ソート。
+  //   カテゴリ未設定・7分類に一致しない商品は末尾にまとめる。
+  const sortSelectedByCategory = () => {
+    setSelectedProducts((prev) => {
+      const rank = (p) => {
+        const idx = CATEGORY_OPTIONS.indexOf(p.category);
+        return idx === -1 ? CATEGORY_OPTIONS.length : idx;
+      };
+      return prev
+        .map((p, i) => ({ p, i }))
+        .sort((a, b) => rank(a.p) - rank(b.p) || a.i - b.i)
+        .map(({ p }) => p);
+    });
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -5034,9 +5049,20 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
         </div>
 
         <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>
-            掲載商品{selectedProducts.length > 0 ? `(${selectedProducts.length}点)` : ""}
-          </label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="block text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+              掲載商品{selectedProducts.length > 0 ? `(${selectedProducts.length}点)` : ""}
+            </label>
+            {selectedProducts.length > 1 && (
+              <button
+                type="button" onClick={sortSelectedByCategory}
+                className="text-[11px] px-2 py-1 rounded-md shrink-0"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+              >
+                カテゴリ順に並べ替え
+              </button>
+            )}
+          </div>
 
           {selectedProducts.length > 0 && (
             <div className="space-y-1 mb-2">
@@ -5208,7 +5234,7 @@ function CatalogsPage() {
   const openEdit = async (catalog) => {
     const { data, error } = await supabase
       .from("catalog_items")
-      .select("sort_order,products(id,product_name,size,product_code,selling_price_jpy,size_options)")
+      .select("sort_order,products(id,type,sample_purpose,product_name,category,size,product_code,selling_price_jpy,size_options,product_image_url)")
       .eq("catalog_id", catalog.id)
       .order("sort_order");
     if (error) { alert("掲載商品の取得に失敗しました"); return; }
