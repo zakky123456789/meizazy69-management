@@ -175,7 +175,6 @@ function useHashRoute() {
    ・匿名認証ユーザーも Postgres 上は authenticated ロールになるため
      既存のRLSポリシー(to authenticated)がそのまま適用される
    ============================================================ */
-const PASSCODE = "12251225";
 const STAFF_STORAGE_KEY = "meizazy69_staff";
 
 /* ============================================================
@@ -192,11 +191,30 @@ function useAuth() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
+  // ★2026-07-12実装: 合言葉のクライアント側平文比較 + 無条件の signInAnonymously() を廃止。
+  //   合言葉の照合はサーバー側(Edge Function: verify-passcode)で行い、
+  //   一致した場合のみ専用システムユーザーとしてのセッション(トークン)を受け取って設定する。
+  //   デプロイ必要: supabase/functions/verify-passcode
   const submitPasscode = useCallback(async (input) => {
-    if (input !== PASSCODE) {
+    let resp;
+    try {
+      resp = await fetch(`${SUPABASE_URL}/functions/v1/verify-passcode`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          apikey: SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ passcode: input }),
+      });
+    } catch {
+      return { ok: false, message: "通信に失敗しました。時間をおいて再度お試しください。" };
+    }
+    if (!resp.ok) {
       return { ok: false, message: "合言葉が違います" };
     }
-    const { error } = await supabase.auth.signInAnonymously();
+    const { access_token, refresh_token } = await resp.json();
+    const { error } = await supabase.auth.setSession({ access_token, refresh_token });
     if (error) {
       return { ok: false, message: "サインインに失敗しました。時間をおいて再度お試しください。" };
     }
