@@ -6727,12 +6727,12 @@ function PublicCatalogItemCard({ item }) {
         </div>
         {isDisposal ? (
           item.size && (
-            <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>サイズ: {item.size}(現品限り)</p>
+            <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>サンプルサイズ: {item.size}(現品限り)</p>
           )
         ) : (
           <>
             {item.size && (
-              <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>サイズ: {item.size}</p>
+              <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>サンプルサイズ: {item.size}</p>
             )}
             {item.size_options && (
               <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>サイズ展開: {item.size_options}</p>
