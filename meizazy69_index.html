@@ -4026,7 +4026,7 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
     // 確定後の商品情報(原価JPY確定額込み)を取得し、そのまま販売明細へ追加する
     const { data: finalProduct, error: fetchErr } = await supabase
       .from("products")
-      .select("id,product_name,category,size,product_code,selling_price_jpy,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .select("id,product_name,category,size,product_code,product_image_url,product_url,selling_price_jpy,purchase_amount_jpy,shipping_jpy,fee_jpy")
       .eq("id", inserted.id)
       .single();
 
@@ -4260,18 +4260,20 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
     }).slice(0, 20);
   }, [unsoldProducts, selectedIds, searchText]);
 
-  const addItem = (product) => {
+  const addItem = (product, isNewPurchase = false) => {
     setItems((prev) => [...prev, {
       productId: product.id,
       product,
       unitPrice: product.selling_price_jpy != null ? String(product.selling_price_jpy) : "",
+      isNewPurchase,
     }]);
     setSearchText("");
   };
 
   // 新規仕入対応モーダルで商品が仕入れ確定された時: そのままこの販売の明細に追加する
+  // ★2026-07-19実装: 発注リマインド表示のため isNewPurchase: true でタグ付けする
   const handleProductCreated = (product) => {
-    addItem(product);
+    addItem(product, true);
     setNewPurchaseOpen(false);
   };
   const removeItem = (productId) => setItems((prev) => prev.filter((it) => it.productId !== productId));
@@ -4294,6 +4296,21 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
     const host = hosts.find((h) => h.id === hostId);
     const recipientName = host ? host.name : (club ? club.name : "");
 
+    // ★2026-07-19実装: 「新規仕入で追加」した明細(=このセッションでその場で仕入確定した商品)を
+    //   「発注が必要な商品」として親に渡す。仕入原価の記帳は済んでいるが、仕入先への実際の
+    //   発注はまだのため、保存後に一覧パネルで案内する(2.28参照)。
+    const newlyOrderedProducts = items
+      .filter((it) => it.isNewPurchase)
+      .map((it) => ({
+        id: it.productId,
+        product_name: it.product.product_name,
+        category: it.product.category,
+        size: it.product.size,
+        product_code: it.product.product_code,
+        product_image_url: it.product.product_image_url,
+        product_url: it.product.product_url,
+      }));
+
     setSaving(true);
     const ok = await onSave({
       id: sale ? sale.id : null,
@@ -4306,6 +4323,7 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
         unit_price_jpy: parseFloat(it.unitPrice),
         cost_jpy: productCostJpy(it.product),
       })),
+      newlyOrderedProducts,
     });
     setSaving(false);
     if (!ok) return; // onSave側でエラー表示済み。モーダルは開いたままにして再試行可能にする
@@ -4509,24 +4527,40 @@ function saleItemLabel(item) {
    ------------------------------------------------------------ */
 function ReceiptPreviewModal({ sale, onClose }) {
   const [receipt, setReceipt] = useState(null); // null=読込中, false=見つからない
+  const [mergedItems, setMergedItems] = useState(null); // まとめ領収書の場合のみセット(複数sale分の明細)
   const [error, setError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
-    supabase
-      .from("receipts")
-      .select("id,receipt_number,issue_date,recipient_name,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info")
-      .eq("sale_id", sale.id)
-      .maybeSingle()
-      .then(({ data, error }) => {
-        if (cancelled) return;
-        if (error || !data) { setError("領収書の取得に失敗しました"); setReceipt(false); return; }
-        setReceipt(data);
-      });
-    return () => { cancelled = true; };
-  }, [sale.id]);
+    (async () => {
+      // ★2026-07-19実装: 個別発行・まとめ発行のどちらにも対応するため、まず sale.receipt_id から領収書を取得する
+      //   (旧データ互換のため receipt_id が無い場合のみ sale_id での逆引きにフォールバック)
+      const receiptQuery = sale.receipt_id
+        ? supabase.from("receipts").select("id,receipt_number,issue_date,recipient_name,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info").eq("id", sale.receipt_id).maybeSingle()
+        : supabase.from("receipts").select("id,receipt_number,issue_date,recipient_name,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info").eq("sale_id", sale.id).maybeSingle();
 
-  const items = sale.sale_items || [];
+      const { data, error } = await receiptQuery;
+      if (cancelled) return;
+      if (error || !data) { setError("領収書の取得に失敗しました"); setReceipt(false); return; }
+      setReceipt(data);
+
+      // この領収書が複数の販売記録(まとめ発行)に紐づいているか確認する
+      const { data: links, error: linksErr } = await supabase.from("receipt_sales").select("sale_id").eq("receipt_id", data.id);
+      if (cancelled) return;
+      if (!linksErr && links && links.length > 1) {
+        const saleIds = links.map((l) => l.sale_id);
+        const { data: allItems, error: itemsErr } = await supabase
+          .from("sale_items")
+          .select("id,unit_price_jpy,products(product_name,size,product_code)")
+          .in("sale_id", saleIds);
+        if (cancelled) return;
+        setMergedItems(itemsErr ? [] : (allItems || []));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [sale.id, sale.receipt_id]);
+
+  const items = mergedItems !== null ? mergedItems : (sale.sale_items || []);
   const clubName = sale.host_clubs ? sale.host_clubs.name : "-";
 
   return (
@@ -4672,6 +4706,260 @@ function SaleCard({ sale, onDelete, onEdit, onViewReceipt }) {
 }
 
 /* ---- 販売登録ページ本体 ---- */
+/* ============================================================
+   発注リマインドパネル(OrderReminderModal) ★2026-07-19実装
+   ・販売登録の保存後、その販売で「新規仕入で追加」した商品(=その場で仕入確定したが
+     仕入先への実際の発注はまだの商品)を一覧表示し、発注漏れを防ぐための案内パネル。
+   ・仕入原価(CNY)の記帳・ウォレット消化は登録時点で完了済みだが、
+     実際に仕入先(代行/工場)へ発注する作業自体は別途必要なため、
+     このパネルで対象商品を明示する(2.28参照)。
+   ============================================================ */
+function OrderReminderModal({ products, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <div
+        className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[85vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <div className="flex items-center gap-2">
+          <span
+            className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
+            style={{ background: "#3a2a1f", color: "var(--mz-gold)" }}
+          >
+            <Icon name="tag" className="w-4 h-4" />
+          </span>
+          <div>
+            <h2 className="font-display text-base leading-tight">発注が必要な商品</h2>
+            <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
+              {products.length}点、仕入先への発注をお忘れなく
+            </p>
+          </div>
+        </div>
+
+        <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+          今回の販売で「新規仕入で追加」した商品です。原価の記帳は完了していますが、仕入先(代行・工場)への実際の発注はまだ済んでいません。
+        </p>
+
+        <div className="rounded-lg divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+          {products.map((p) => (
+            <div key={p.id} className="flex items-center gap-3 px-3 py-2.5">
+              {p.product_image_url ? (
+                <img src={p.product_image_url} alt="" className="w-12 h-12 rounded-md object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
+              ) : (
+                <div className="w-12 h-12 rounded-md flex items-center justify-center shrink-0" style={{ background: "var(--mz-surface-hover)" }}>
+                  <Icon name="tag" className="w-5 h-5" style={{ color: "var(--mz-ink-muted)" }} />
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-sm truncate">{p.product_name || "(名称未設定)"}</p>
+                <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                  {[p.category, p.size, p.product_code ? `No.${p.product_code}` : ""].filter(Boolean).join(" / ")}
+                </p>
+              </div>
+              {p.product_url && (
+                <a
+                  href={p.product_url} target="_blank" rel="noopener noreferrer"
+                  className="text-xs px-2.5 py-1.5 rounded-lg shrink-0"
+                  style={{ border: "1px solid var(--mz-border)", color: "var(--mz-gold-soft)" }}
+                >
+                  仕入先を開く
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <button
+          type="button" onClick={onClose}
+          className="w-full rounded-lg py-2.5 text-sm font-medium"
+          style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+        >
+          発注しました・確認しました
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   まとめ領収書発行(MergeReceiptTab) ★2026-07-19実装
+   ・複数のホストが個別に注文した販売記録を横断的に選択し、
+     1枚の領収書(宛名は自由入力・通常はお店名)にまとめて発行するための機能。
+   ・各販売記録は個別発行のまま(sales.receipt_id ⇔ receipts.sale_id の1:1)残しておくのが原則だが、
+     まとめ発行した場合は、対象の販売記録のreceipt_idを新しい領収書に付け替え、
+     receipt_sales に紐付けを記録する。元の個別領収書は、他のどの販売記録からも
+     参照されなくなった時点で削除する(2.29参照)。
+   ============================================================ */
+function MergeReceiptTab({ sales, clubs, onIssued }) {
+  const [clubFilter, setClubFilter] = useState("");
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [recipientName, setRecipientName] = useState("");
+  const [issuing, setIssuing] = useState(false);
+  const [error, setError] = useState(null);
+
+  const filteredSales = useMemo(() => {
+    if (!clubFilter) return sales;
+    return sales.filter((s) => s.host_club_id === clubFilter);
+  }, [sales, clubFilter]);
+
+  const selectedSales = useMemo(() => sales.filter((s) => selectedIds.has(s.id)), [sales, selectedIds]);
+
+  const toggleSelect = (saleId) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(saleId)) next.delete(saleId); else next.add(saleId);
+      return next;
+    });
+  };
+
+  // 選択が変わったら宛名の初期値を提案する(最初に選んだ注文のホストクラブ名)。
+  // 既に手入力されている場合は上書きしない。
+  useEffect(() => {
+    if (recipientName.trim()) return;
+    if (selectedSales.length === 0) return;
+    const club = clubs.find((c) => c.id === selectedSales[0].host_club_id);
+    if (club) setRecipientName(club.name);
+    // eslint-disable-next-line
+  }, [selectedSales.length]);
+
+  const allItems = useMemo(() => selectedSales.flatMap((s) => s.sale_items || []), [selectedSales]);
+  const totalInclJpy = allItems.reduce((sum, it) => sum + (Number(it.unit_price_jpy) || 0), 0);
+  const totals = calcReceiptTotals(totalInclJpy);
+
+  const handleIssue = async () => {
+    setError(null);
+    if (selectedSales.length < 2) { setError("2件以上の注文を選択してください"); return; }
+    if (!recipientName.trim()) { setError("宛名を入力してください"); return; }
+    if (!window.confirm(`${selectedSales.length}件の注文をまとめ、「${recipientName.trim()} 様」宛の領収書(合計${fmtJPY(totals.total)})を発行します。元の個別領収書は無効化されます。よろしいですか?`)) return;
+
+    setIssuing(true);
+
+    // 付け替え前に、選択した各注文が現在持っている領収書idを控えておく(後で不要になった分を削除するため)
+    const oldReceiptIds = [...new Set(selectedSales.map((s) => s.receipt_id).filter(Boolean))];
+
+    const issueDate = todayISO();
+    const receiptNumber = await generateReceiptNumber(issueDate);
+
+    const { data: newReceipt, error: receiptErr } = await supabase
+      .from("receipts")
+      .insert({
+        receipt_number: receiptNumber,
+        sale_id: null, // まとめ領収書は特定の1販売に紐付かないためnull(receipt_salesで管理)
+        issue_date: issueDate,
+        recipient_name: recipientName.trim(),
+        memo: "衣装代",
+        subtotal_jpy: totals.subtotal,
+        tax_jpy: totals.tax,
+        total_jpy: totals.total,
+        issuer_info: ISSUER_INFO_DEFAULT,
+      })
+      .select("id")
+      .single();
+
+    if (receiptErr || !newReceipt) {
+      setError("まとめ領収書の作成に失敗しました");
+      setIssuing(false);
+      return;
+    }
+
+    const saleIds = selectedSales.map((s) => s.id);
+    const { error: updErr } = await supabase.from("sales").update({ receipt_id: newReceipt.id }).in("id", saleIds);
+    if (updErr) {
+      setError("販売記録への領収書の紐付けに失敗しました(領収書自体は作成済みです。手動でご確認ください)");
+      setIssuing(false);
+      return;
+    }
+
+    const linkRows = saleIds.map((id) => ({ receipt_id: newReceipt.id, sale_id: id }));
+    const { error: linkErr } = await supabase.from("receipt_sales").insert(linkRows);
+    if (linkErr) {
+      setError("まとめ発行の紐付け記録に失敗しました(領収書・販売記録は更新済みです)");
+    }
+
+    // 元の個別領収書のうち、他のどの販売記録からも参照されなくなったものだけを削除する
+    for (const oldId of oldReceiptIds) {
+      if (oldId === newReceipt.id) continue;
+      const { data: stillUsed } = await supabase.from("sales").select("id").eq("receipt_id", oldId).limit(1);
+      if (!stillUsed || stillUsed.length === 0) {
+        await supabase.from("receipts").delete().eq("id", oldId);
+      }
+    }
+
+    setIssuing(false);
+    const previewSale = { ...selectedSales[0], receipt_id: newReceipt.id };
+    setSelectedIds(new Set());
+    setRecipientName("");
+    onIssued(previewSale);
+  };
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+        複数の注文(個別に登録された販売記録)を選択し、宛名を1つ決めて領収書1枚にまとめて発行します。発行すると、選択した注文の元の個別領収書は無効化(削除)されます。
+      </p>
+
+      <select
+        value={clubFilter} onChange={(e) => setClubFilter(e.target.value)}
+        className="rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+      >
+        <option value="">すべてのホストクラブ</option>
+        {clubs.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+      </select>
+
+      {filteredSales.length === 0 ? (
+        <p className="text-sm text-center py-6" style={{ color: "var(--mz-ink-muted)" }}>対象の注文がありません</p>
+      ) : (
+        <div className="rounded-lg divide-y max-h-96 overflow-y-auto" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+          {filteredSales.map((s) => {
+            const clubName = s.host_clubs ? s.host_clubs.name : "-";
+            const hostName = s.hosts ? s.hosts.name : null;
+            const checked = selectedIds.has(s.id);
+            return (
+              <label key={s.id} className="flex items-center gap-3 px-3 py-2.5 cursor-pointer" style={checked ? { background: "var(--mz-surface-hover)" } : {}}>
+                <input type="checkbox" checked={checked} onChange={() => toggleSelect(s.id)} className="shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm truncate">{clubName}{hostName ? ` / ${hostName}` : ""}</p>
+                  <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{s.transaction_date} ・ {(s.sale_items || []).length}点</p>
+                </div>
+                <span className="text-sm shrink-0" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(s.total_amount_jpy)}</span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+
+      {selectedSales.length > 0 && (
+        <div className="rounded-lg p-3 space-y-3" style={{ background: "var(--mz-surface-hover)" }}>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>宛名</label>
+            <input
+              type="text" value={recipientName} onChange={(e) => setRecipientName(e.target.value)}
+              placeholder="例: ○○クラブ"
+              className="w-full rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+          </div>
+          <div className="text-xs space-y-1">
+            <div className="flex justify-between"><span style={{ color: "var(--mz-ink-muted)" }}>選択中</span><span>{selectedSales.length}件・{allItems.length}点</span></div>
+            <div className="flex justify-between"><span style={{ color: "var(--mz-ink-muted)" }}>小計(税抜)</span><span>{fmtJPY(totals.subtotal)}</span></div>
+            <div className="flex justify-between"><span style={{ color: "var(--mz-ink-muted)" }}>消費税(10%)</span><span>{fmtJPY(totals.tax)}</span></div>
+            <div className="flex justify-between font-medium"><span>合計(税込)</span><span style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(totals.total)}</span></div>
+          </div>
+        </div>
+      )}
+
+      {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
+
+      <button
+        type="button" onClick={handleIssue} disabled={issuing || selectedSales.length < 2}
+        className="w-full rounded-lg py-2.5 text-sm font-medium disabled:opacity-50"
+        style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+      >
+        {issuing ? "発行中..." : `選択した${selectedSales.length}件をまとめて発行`}
+      </button>
+    </div>
+  );
+}
+
 function SalesPage() {
   const [sales, setSales] = useState(null); // null = 読み込み中
   const [clubs, setClubs] = useState([]);
@@ -4680,13 +4968,17 @@ function SalesPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingSale, setEditingSale] = useState(null); // null=新規登録モード, obj=編集対象
   const [receiptSale, setReceiptSale] = useState(null); // 領収書プレビュー対象のsale(nullなら非表示)
+  // ★2026-07-19実装: 保存直後に表示する「発注が必要な商品」一覧(2.28参照)。nullなら非表示
+  const [orderReminder, setOrderReminder] = useState(null);
+  // ★2026-07-19実装: 「販売一覧」と「領収書発行(まとめ発行)」のタブ切り替え(2.29参照)
+  const [activeTab, setActiveTab] = useState("list");
 
   const loadAll = useCallback(async () => {
     setError(null);
     const [salesRes, clubsRes, batchesRes] = await Promise.all([
       supabase
         .from("sales")
-        .select("id,transaction_date,host_club_id,host_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
+        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
       supabase.from("purchase_batches").select("id,purchase_date,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
@@ -4769,6 +5061,7 @@ function SalesPage() {
 
       setModalOpen(false);
       setEditingSale(null);
+      if (form.newlyOrderedProducts && form.newlyOrderedProducts.length > 0) setOrderReminder(form.newlyOrderedProducts);
       loadAll();
       return true;
     }
@@ -4826,6 +5119,7 @@ function SalesPage() {
     if (receiptErr || !receiptRow) {
       alert("領収書の作成に失敗しました(販売記録・明細は登録済みです)");
       setModalOpen(false);
+      if (form.newlyOrderedProducts && form.newlyOrderedProducts.length > 0) setOrderReminder(form.newlyOrderedProducts);
       loadAll();
       return true;
     }
@@ -4833,6 +5127,7 @@ function SalesPage() {
     await supabase.from("sales").update({ receipt_id: receiptRow.id }).eq("id", saleId);
 
     setModalOpen(false);
+    if (form.newlyOrderedProducts && form.newlyOrderedProducts.length > 0) setOrderReminder(form.newlyOrderedProducts);
     loadAll();
     return true;
   };
@@ -4866,15 +5161,35 @@ function SalesPage() {
     <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-5">
       <div className="flex items-center justify-between gap-3">
         <h2 className="font-display text-lg">販売登録</h2>
-        <button onClick={() => setModalOpen(true)} className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
-          + 新規販売登録
+        {activeTab === "list" && (
+          <button onClick={() => setModalOpen(true)} className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+            + 新規販売登録
+          </button>
+        )}
+      </div>
+
+      {/* ★2026-07-19実装: 販売一覧 / 領収書発行(まとめ発行)タブ */}
+      <div className="flex gap-1.5 p-1 rounded-lg" style={{ background: "var(--mz-surface-hover)", width: "fit-content" }}>
+        <button
+          type="button" onClick={() => setActiveTab("list")}
+          className="text-xs px-3 py-1.5 rounded-md"
+          style={activeTab === "list" ? { background: "var(--mz-gold)", color: "#1a1710" } : { color: "var(--mz-ink-muted)" }}
+        >
+          販売一覧
+        </button>
+        <button
+          type="button" onClick={() => setActiveTab("merge")}
+          className="text-xs px-3 py-1.5 rounded-md"
+          style={activeTab === "merge" ? { background: "var(--mz-gold)", color: "#1a1710" } : { color: "var(--mz-ink-muted)" }}
+        >
+          領収書発行
         </button>
       </div>
 
       {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
       {sales === null && !error && <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>}
 
-      {sales !== null && (
+      {activeTab === "list" && sales !== null && (
         sales.length === 0 ? (
           <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>販売記録がありません</p>
         ) : (
@@ -4884,12 +5199,20 @@ function SalesPage() {
         )
       )}
 
+      {activeTab === "merge" && sales !== null && (
+        <MergeReceiptTab sales={sales} clubs={clubs} onIssued={(sale) => { loadAll(); setReceiptSale(sale); }} />
+      )}
+
       {modalOpen && (
         <SaleFormModal clubs={clubs} batches={batches} sale={editingSale} onClose={closeModal} onSave={handleSaveSale} />
       )}
 
       {receiptSale && (
         <ReceiptPreviewModal sale={receiptSale} onClose={() => setReceiptSale(null)} />
+      )}
+
+      {orderReminder && (
+        <OrderReminderModal products={orderReminder} onClose={() => setOrderReminder(null)} />
       )}
     </div>
   );
