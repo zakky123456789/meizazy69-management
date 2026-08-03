@@ -4296,21 +4296,6 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
     const host = hosts.find((h) => h.id === hostId);
     const recipientName = host ? host.name : (club ? club.name : "");
 
-    // ★2026-07-19実装: 「新規仕入で追加」した明細(=このセッションでその場で仕入確定した商品)を
-    //   「発注が必要な商品」として親に渡す。仕入原価の記帳は済んでいるが、仕入先への実際の
-    //   発注はまだのため、保存後に一覧パネルで案内する(2.28参照)。
-    const newlyOrderedProducts = items
-      .filter((it) => it.isNewPurchase)
-      .map((it) => ({
-        id: it.productId,
-        product_name: it.product.product_name,
-        category: it.product.category,
-        size: it.product.size,
-        product_code: it.product.product_code,
-        product_image_url: it.product.product_image_url,
-        product_url: it.product.product_url,
-      }));
-
     setSaving(true);
     const ok = await onSave({
       id: sale ? sale.id : null,
@@ -4322,8 +4307,8 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
         product_id: it.productId,
         unit_price_jpy: parseFloat(it.unitPrice),
         cost_jpy: productCostJpy(it.product),
+        is_new_purchase: !!it.isNewPurchase,
       })),
-      newlyOrderedProducts,
     });
     setSaving(false);
     if (!ok) return; // onSave側でエラー表示済み。モーダルは開いたままにして再試行可能にする
@@ -4650,12 +4635,14 @@ function ReceiptPreviewModal({ sale, onClose }) {
   );
 }
 
-function SaleCard({ sale, onDelete, onEdit, onViewReceipt }) {
+function SaleCard({ sale, onDelete, onEdit, onViewReceipt, onConfirmOrder }) {
   const [expanded, setExpanded] = useState(false);
   const clubName = sale.host_clubs ? sale.host_clubs.name : "-";
   const hostName = sale.hosts ? sale.hosts.name : null;
   const receiptNumber = sale.receipts ? sale.receipts.receipt_number : null;
   const items = sale.sale_items || [];
+  // ★2026-07-19実装: 「新規仕入で追加」かつ未確認の明細があれば「発注未確認」バッジを表示する(2.29参照)
+  const unconfirmedItems = items.filter((it) => it.is_new_purchase && !it.order_confirmed);
   return (
     <div className="rounded-xl p-4 space-y-2" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
       <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -4669,6 +4656,16 @@ function SaleCard({ sale, onDelete, onEdit, onViewReceipt }) {
                 style={{ background: "var(--mz-surface-hover)", color: "var(--mz-gold-soft)" }}
               >
                 No.{receiptNumber} ・領収書を見る
+              </button>
+            )}
+            {unconfirmedItems.length > 0 && (
+              <button
+                onClick={() => onConfirmOrder(sale, unconfirmedItems)}
+                className="text-xs px-2 py-0.5 rounded-full"
+                style={{ background: "#3a2a1f", color: "var(--mz-gold)" }}
+                title="クリックで発注確認済みにする"
+              >
+                発注未確認({unconfirmedItems.length})
               </button>
             )}
           </div>
@@ -4693,7 +4690,12 @@ function SaleCard({ sale, onDelete, onEdit, onViewReceipt }) {
             <div className="mt-2 space-y-1.5 pt-2" style={{ borderTop: "1px solid var(--mz-border)" }}>
               {items.map((it) => (
                 <div key={it.id} className="flex items-center justify-between gap-2 text-xs">
-                  <span className="truncate" style={{ color: "var(--mz-ink)" }}>{saleItemLabel(it)}</span>
+                  <span className="truncate" style={{ color: "var(--mz-ink)" }}>
+                    {saleItemLabel(it)}
+                    {it.is_new_purchase && !it.order_confirmed && (
+                      <span className="ml-1.5" style={{ color: "var(--mz-gold-soft)" }}>(発注未確認)</span>
+                    )}
+                  </span>
                   <span className="shrink-0" style={{ color: "var(--mz-ink-muted)" }}>{fmtJPY(it.unit_price_jpy)}</span>
                 </div>
               ))}
@@ -4714,7 +4716,20 @@ function SaleCard({ sale, onDelete, onEdit, onViewReceipt }) {
      実際に仕入先(代行/工場)へ発注する作業自体は別途必要なため、
      このパネルで対象商品を明示する(2.28参照)。
    ============================================================ */
-function OrderReminderModal({ products, onClose }) {
+function OrderReminderModal({ products, onClose, onConfirmed }) {
+  const [saving, setSaving] = useState(false);
+
+  // ★2026-07-19実装: 「発注しました」を押した時点でsale_items.order_confirmedをtrueにし、
+  //   販売一覧の「発注未確認」バッジからも外れるようにする(2.29参照)
+  const handleConfirm = async () => {
+    setSaving(true);
+    const ids = products.map((p) => p.id);
+    const { error } = await supabase.from("sale_items").update({ order_confirmed: true }).in("id", ids);
+    setSaving(false);
+    if (error) { alert("発注確認済みへの更新に失敗しました。お手数ですが販売一覧のバッジから再度お試しください。"); }
+    onConfirmed();
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
       <div
@@ -4769,13 +4784,22 @@ function OrderReminderModal({ products, onClose }) {
           ))}
         </div>
 
-        <button
-          type="button" onClick={onClose}
-          className="w-full rounded-lg py-2.5 text-sm font-medium"
-          style={{ background: "var(--mz-gold)", color: "#1a1710" }}
-        >
-          発注しました・確認しました
-        </button>
+        <div className="flex gap-2">
+          <button
+            type="button" onClick={onClose}
+            className="shrink-0 rounded-lg px-4 py-2.5 text-sm"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+          >
+            あとで確認する
+          </button>
+          <button
+            type="button" onClick={handleConfirm} disabled={saving}
+            className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-50"
+            style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+          >
+            {saving ? "更新中..." : "発注しました・確認しました"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -4978,7 +5002,7 @@ function SalesPage() {
     const [salesRes, clubsRes, batchesRes] = await Promise.all([
       supabase
         .from("sales")
-        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
+        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
       supabase.from("purchase_batches").select("id,purchase_date,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
@@ -5030,12 +5054,22 @@ function SalesPage() {
         unit_price_jpy: it.unit_price_jpy,
         subtotal_jpy: it.unit_price_jpy,
         profit_jpy: itemPretaxJpy(it.unit_price_jpy) - it.cost_jpy,
+        is_new_purchase: !!it.is_new_purchase,
       }));
-      const { error: itemsErr } = await supabase.from("sale_items").insert(itemRows);
+      // ★2026-07-19実装: 挿入結果(実際のsale_items.id)を取得し、「新規仕入で追加」した明細のみを
+      //   発注リマインドパネルの対象にする。sale_item.idがあることで、後から「発注確認済み」に
+      //   更新できる(2.28/2.29参照)
+      const { data: insertedItems, error: itemsErr } = await supabase
+        .from("sale_items")
+        .insert(itemRows)
+        .select("id,is_new_purchase,products(product_name,category,size,product_code,product_image_url,product_url)");
       if (itemsErr) {
         alert("販売明細の再登録に失敗しました(sales行は更新済みです。手動でご確認ください)");
         return false;
       }
+      const newlyOrderedProducts = (insertedItems || [])
+        .filter((row) => row.is_new_purchase)
+        .map((row) => ({ id: row.id, ...row.products }));
 
       // 商品ステータスは差分のみ反映(明細から外れた商品→未販売に復元、新たに加わった商品→販売済みに)
       const toRestore = [...oldProductIds].filter((id) => !newProductIds.has(id));
@@ -5061,7 +5095,7 @@ function SalesPage() {
 
       setModalOpen(false);
       setEditingSale(null);
-      if (form.newlyOrderedProducts && form.newlyOrderedProducts.length > 0) setOrderReminder(form.newlyOrderedProducts);
+      if (newlyOrderedProducts.length > 0) setOrderReminder(newlyOrderedProducts);
       loadAll();
       return true;
     }
@@ -5087,12 +5121,19 @@ function SalesPage() {
       unit_price_jpy: it.unit_price_jpy,
       subtotal_jpy: it.unit_price_jpy,
       profit_jpy: itemPretaxJpy(it.unit_price_jpy) - it.cost_jpy,
+      is_new_purchase: !!it.is_new_purchase,
     }));
-    const { error: itemsErr } = await supabase.from("sale_items").insert(itemRows);
+    const { data: insertedItems, error: itemsErr } = await supabase
+      .from("sale_items")
+      .insert(itemRows)
+      .select("id,is_new_purchase,products(product_name,category,size,product_code,product_image_url,product_url)");
     if (itemsErr) {
       alert("販売明細の登録に失敗しました(sales行は作成済みです。手動でご確認・削除をお願いします)");
       return false;
     }
+    const newlyOrderedProducts = (insertedItems || [])
+      .filter((row) => row.is_new_purchase)
+      .map((row) => ({ id: row.id, ...row.products }));
 
     const productIds = form.items.map((it) => it.product_id);
     const { error: statusErr } = await supabase.from("products").update({ status: "販売済み" }).in("id", productIds);
@@ -5119,7 +5160,7 @@ function SalesPage() {
     if (receiptErr || !receiptRow) {
       alert("領収書の作成に失敗しました(販売記録・明細は登録済みです)");
       setModalOpen(false);
-      if (form.newlyOrderedProducts && form.newlyOrderedProducts.length > 0) setOrderReminder(form.newlyOrderedProducts);
+      if (newlyOrderedProducts.length > 0) setOrderReminder(newlyOrderedProducts);
       loadAll();
       return true;
     }
@@ -5127,7 +5168,7 @@ function SalesPage() {
     await supabase.from("sales").update({ receipt_id: receiptRow.id }).eq("id", saleId);
 
     setModalOpen(false);
-    if (form.newlyOrderedProducts && form.newlyOrderedProducts.length > 0) setOrderReminder(form.newlyOrderedProducts);
+    if (newlyOrderedProducts.length > 0) setOrderReminder(newlyOrderedProducts);
     loadAll();
     return true;
   };
@@ -5155,6 +5196,15 @@ function SalesPage() {
   const closeModal = () => {
     setModalOpen(false);
     setEditingSale(null);
+  };
+
+  // ★2026-07-19実装: 販売一覧の「発注未確認」バッジから、その場で発注確認済みに更新する(2.29参照)
+  const handleConfirmOrder = async (sale, unconfirmedItems) => {
+    if (!window.confirm(`${unconfirmedItems.length}点を発注確認済みにしますか?`)) return;
+    const ids = unconfirmedItems.map((it) => it.id);
+    const { error } = await supabase.from("sale_items").update({ order_confirmed: true }).in("id", ids);
+    if (error) { alert("更新に失敗しました"); return; }
+    loadAll();
   };
 
   return (
@@ -5194,7 +5244,7 @@ function SalesPage() {
           <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>販売記録がありません</p>
         ) : (
           <div className="space-y-2">
-            {sales.map((s) => <SaleCard key={s.id} sale={s} onDelete={handleDeleteSale} onEdit={openEdit} onViewReceipt={setReceiptSale} />)}
+            {sales.map((s) => <SaleCard key={s.id} sale={s} onDelete={handleDeleteSale} onEdit={openEdit} onViewReceipt={setReceiptSale} onConfirmOrder={handleConfirmOrder} />)}
           </div>
         )
       )}
@@ -5212,7 +5262,11 @@ function SalesPage() {
       )}
 
       {orderReminder && (
-        <OrderReminderModal products={orderReminder} onClose={() => setOrderReminder(null)} />
+        <OrderReminderModal
+          products={orderReminder}
+          onClose={() => setOrderReminder(null)}
+          onConfirmed={() => { setOrderReminder(null); loadAll(); }}
+        />
       )}
     </div>
   );
