@@ -3206,7 +3206,10 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           <select value={type} onChange={(e) => setType(e.target.value)}
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
             <option value="sample">サンプル</option>
-            <option value="stock">在庫(新規仕入対応)</option>
+            {/* ★2026-08-04実装: typeの値("stock")自体は税務上の扱いに直結するため変更しないが、
+                「新規仕入で追加」由来(created_via_sale=true)の商品は実態が「在庫」ではなく
+                「受注確定分」なので、表示ラベルのみドロップシッピングの実態に合わせる(2.30参照) */}
+            <option value="stock">{product.created_via_sale ? "受注(新規仕入対応)" : "在庫(新規仕入対応)"}</option>
           </select>
         </div>
 
@@ -4281,7 +4284,7 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
   );
 }
 
-function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
+function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }) {
   const isEdit = !!sale;
   const [transactionDate, setTransactionDate] = useState(sale ? sale.transaction_date : todayISO());
   const [hostClubId, setHostClubId] = useState(sale ? sale.host_club_id : "");
@@ -4290,29 +4293,42 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
   const [unsoldProducts, setUnsoldProducts] = useState(null); // null = 読み込み中
   const [searchText, setSearchText] = useState("");
   const [items, setItems] = useState(() => {
-    if (!sale) return [];
-    return (sale.sale_items || []).map((si) => ({
-      productId: si.product_id,
-      product: {
-        id: si.product_id,
-        product_name: si.products ? si.products.product_name : null,
-        size: si.products ? si.products.size : null,
-        product_code: si.products ? si.products.product_code : null,
-        type: si.products ? si.products.type : null,
-        sample_purpose: si.products ? si.products.sample_purpose : null,
-        category: si.products ? si.products.category : null,
-        product_image_url: si.products ? si.products.product_image_url : null,
-        product_url: si.products ? si.products.product_url : null,
-        size_options: si.products ? si.products.size_options : null,
-        purchase_amount_jpy: si.products ? si.products.purchase_amount_jpy : 0,
-        shipping_jpy: si.products ? si.products.shipping_jpy : 0,
-        fee_jpy: si.products ? si.products.fee_jpy : 0,
-      },
-      unitPrice: String(si.unit_price_jpy),
-      // ★2026-07-19実装: 編集時に既存明細の発注確認状態を引き継ぐ(保存の都度リセットされる不具合の修正)
-      isNewPurchase: !!si.is_new_purchase,
-      orderConfirmed: !!si.order_confirmed,
-    }));
+    if (sale) {
+      return (sale.sale_items || []).map((si) => ({
+        productId: si.product_id,
+        product: {
+          id: si.product_id,
+          product_name: si.products ? si.products.product_name : null,
+          size: si.products ? si.products.size : null,
+          product_code: si.products ? si.products.product_code : null,
+          type: si.products ? si.products.type : null,
+          sample_purpose: si.products ? si.products.sample_purpose : null,
+          category: si.products ? si.products.category : null,
+          product_image_url: si.products ? si.products.product_image_url : null,
+          product_url: si.products ? si.products.product_url : null,
+          size_options: si.products ? si.products.size_options : null,
+          purchase_amount_jpy: si.products ? si.products.purchase_amount_jpy : 0,
+          shipping_jpy: si.products ? si.products.shipping_jpy : 0,
+          fee_jpy: si.products ? si.products.fee_jpy : 0,
+        },
+        unitPrice: String(si.unit_price_jpy),
+        // ★2026-07-19実装: 編集時に既存明細の発注確認状態を引き継ぐ(保存の都度リセットされる不具合の修正)
+        isNewPurchase: !!si.is_new_purchase,
+        orderConfirmed: !!si.order_confirmed,
+      }));
+    }
+    // ★2026-08-04実装: 「仕入れ商品」タブの「この商品で販売登録する」から開いた場合、
+    //   その商品(受注確定済みだが未紐付けだったもの)をあらかじめ明細に入れておく(2.30参照)
+    if (initialProduct) {
+      return [{
+        productId: initialProduct.id,
+        product: initialProduct,
+        unitPrice: initialProduct.selling_price_jpy != null ? String(initialProduct.selling_price_jpy) : "",
+        isNewPurchase: true,
+        orderConfirmed: false,
+      }];
+    }
+    return [];
   }); // [{ productId, product, unitPrice, isNewPurchase, orderConfirmed }]
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -5185,9 +5201,12 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
    ・その商品が既にどの販売に紐づいているか(sale_items経由)を併せて表示し、
      万が一「販売登録を保存し忘れて迷子になった商品」もここで確認・拾い直せるようにする。
    ============================================================ */
-function PendingPurchasesTab({ batches, onCreateBatch }) {
+function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
   const [products, setProducts] = useState(null); // null=読込中
   const [modalProduct, setModalProduct] = useState(null);
+  // ★2026-08-04実装: 「この商品で販売登録する」用。紐付いていない商品を選ぶと、
+  //   その商品があらかじめ明細に入った状態でSaleFormModal(新規販売登録)を開く(2.30参照)
+  const [linkingProduct, setLinkingProduct] = useState(null);
 
   const loadAll = useCallback(async () => {
     const { data: productsData, error } = await supabase
@@ -5232,6 +5251,13 @@ function PendingPurchasesTab({ batches, onCreateBatch }) {
     loadAll();
   };
 
+  // ★2026-08-04実装: 販売登録(SaleFormModal)の保存後、この商品もあわせて一覧を再読み込みする
+  const handleSaveLinkingSale = async (form) => {
+    const ok = await onSaveSale(form);
+    if (ok) { setLinkingProduct(null); loadAll(); }
+    return ok;
+  };
+
   if (products === null) return <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>;
 
   return (
@@ -5268,13 +5294,24 @@ function PendingPurchasesTab({ batches, onCreateBatch }) {
                   <p className="text-xs mt-0.5" style={{ color: "#f2b8bd" }}>⚠️ どの販売にも紐付いていません(保存し忘れの可能性)</p>
                 )}
               </div>
-              <button
-                onClick={() => setModalProduct(p)}
-                className="text-xs px-2.5 py-1.5 rounded-lg shrink-0"
-                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
-              >
-                編集
-              </button>
+              <div className="flex flex-col gap-1.5 shrink-0 items-end">
+                <button
+                  onClick={() => setModalProduct(p)}
+                  className="text-xs px-2.5 py-1.5 rounded-lg"
+                  style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+                >
+                  編集
+                </button>
+                {!p.linkedSale && (
+                  <button
+                    onClick={() => setLinkingProduct(p)}
+                    className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+                    style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+                  >
+                    この商品で販売登録する
+                  </button>
+                )}
+              </div>
             </div>
           ))}
         </div>
@@ -5282,6 +5319,10 @@ function PendingPurchasesTab({ batches, onCreateBatch }) {
 
       {modalProduct && (
         <ProductFormModal product={modalProduct} batches={batches} onClose={() => setModalProduct(null)} onSave={handleSaveProduct} onCreateBatch={onCreateBatch} />
+      )}
+
+      {linkingProduct && (
+        <SaleFormModal clubs={clubs} batches={batches} sale={null} initialProduct={linkingProduct} onClose={() => setLinkingProduct(null)} onSave={handleSaveLinkingSale} />
       )}
     </div>
   );
@@ -5584,7 +5625,7 @@ function SalesPage() {
       )}
 
       {activeTab === "pending" && (
-        <PendingPurchasesTab batches={batches} onCreateBatch={handleCreateBatchInlineSales} />
+        <PendingPurchasesTab batches={batches} clubs={clubs} onCreateBatch={handleCreateBatchInlineSales} onSaveSale={handleSaveSale} />
       )}
 
       {modalOpen && (
