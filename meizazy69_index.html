@@ -1967,6 +1967,40 @@ function fmtJPY(n) {
   const v = Math.round(Number(n) || 0);
   return `¥${v.toLocaleString("ja-JP")}`;
 }
+// ★2026-08-04実装: ロットの1点あたり金額(割り切れない場合が多い)を商品の入力欄へ自動セットする際、
+//   toFixed(2)で丸めて保存すると、点数が多いロットほど「商品ごとの丸め誤差 × 点数」が積み重なり、
+//   ロットの合計金額(total_shipping_cny/total_fee_cny)と実際に商品へ保存された金額の合計がズレる
+//   (例: 56.68÷6=9.446666...を9.45で保存×6点 → 合計が0.02円ズレる)。
+//   小数点4桁までは保持することで、この積み上げ誤差を実務上無視できるレベル(1/100円未満)に抑える。
+function preciseCny(n) {
+  return Math.round((Number(n) || 0) * 10000) / 10000;
+}
+
+/* ★2026-08-04実装: ロットの送料・手数料を商品へ配分する際、「最後の1点」に端数をすべて吸収させることで、
+   ロットに紐づく全商品の合計が、常にロットの合計金額(total_shipping_cny/total_fee_cny)と完全に一致するようにする。
+   ・まだロットの登録済み点数が総点数(total_items)未満なら、通常通り1点あたりの金額(preciseCny)を返す。
+   ・今回の登録で登録済み点数が総点数に達する(=最後の1点)場合は、
+     「ロット合計 − すでに登録済みの商品に保存されている実際の合計」を差額として返す。
+   excludeProductId: 編集時に自分自身をカウントから除外するため(任意) */
+async function computeBatchItemAmounts(batch, excludeProductId) {
+  const fallback = { shipping: preciseCny(batch.per_item_shipping_cny), fee: preciseCny(batch.per_item_fee_cny) };
+  if (!batch.total_items) return fallback; // total_itemsが無い(古いデータ等)場合は従来通り
+
+  let query = supabase.from("products").select("shipping_cny,fee_cny").eq("batch_id", batch.id);
+  if (excludeProductId) query = query.neq("id", excludeProductId);
+  const { data, error } = await query;
+  if (error || !data) return fallback;
+
+  const usedCount = data.length;
+  if (usedCount + 1 < batch.total_items) return fallback; // まだ最後の1点ではない
+
+  const usedShipping = data.reduce((sum, p) => sum + (Number(p.shipping_cny) || 0), 0);
+  const usedFee = data.reduce((sum, p) => sum + (Number(p.fee_cny) || 0), 0);
+  return {
+    shipping: preciseCny((Number(batch.total_shipping_cny) || 0) - usedShipping),
+    fee: preciseCny((Number(batch.total_fee_cny) || 0) - usedFee),
+  };
+}
 
 /* ---- FIFO消化ヘルパー(products実装時にここから呼び出す想定) ----
    使い方(将来のproducts登録処理からのイメージ):
@@ -2939,13 +2973,14 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
     return [...batches, ...extraBatches.filter((b) => !ids.has(b.id))];
   }, [batches, extraBatches]);
 
-  const handleBatchChange = (id) => {
+  const handleBatchChange = async (id) => {
     setBatchId(id);
     if (!id) return;
     const b = allBatches.find((x) => x.id === id);
     if (b) {
-      setShippingCny(String(Number(b.per_item_shipping_cny).toFixed(2)));
-      setFeeCny(String(Number(b.per_item_fee_cny).toFixed(2)));
+      const amounts = await computeBatchItemAmounts(b, product.id || null);
+      setShippingCny(String(amounts.shipping));
+      setFeeCny(String(amounts.fee));
     }
   };
 
@@ -2955,8 +2990,9 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
     setExtraBatches((prev) => [...prev, res.batch]);
     setBatchModalOpen(false);
     setBatchId(res.batch.id);
-    setShippingCny(String(Number(res.batch.per_item_shipping_cny).toFixed(2)));
-    setFeeCny(String(Number(res.batch.per_item_fee_cny).toFixed(2)));
+    const amounts = await computeBatchItemAmounts(res.batch, product.id || null);
+    setShippingCny(String(amounts.shipping));
+    setFeeCny(String(amounts.fee));
   };
 
   // ★2026-07-10実装: カラーバリエーション一括登録用のチェック切り替え・金額入力ハンドラ
@@ -3974,13 +4010,14 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
     setSize("");
   };
 
-  const handleBatchChange = (id) => {
+  const handleBatchChange = async (id) => {
     setBatchId(id);
     if (!id) return;
     const b = batches.find((x) => x.id === id);
     if (b) {
-      setShippingCny(String(Number(b.per_item_shipping_cny).toFixed(2)));
-      setFeeCny(String(Number(b.per_item_fee_cny).toFixed(2)));
+      const amounts = await computeBatchItemAmounts(b, null);
+      setShippingCny(String(amounts.shipping));
+      setFeeCny(String(amounts.fee));
     }
   };
 
@@ -5112,7 +5149,7 @@ function SalesPage() {
         .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
-      supabase.from("purchase_batches").select("id,purchase_date,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
+      supabase.from("purchase_batches").select("id,purchase_date,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
     ]);
     // sales取得が失敗しても、同時に取得できたクラブ・ロットは反映する(販売登録モーダルを使えなくしないため)
     setClubs(clubsRes.data || []);
