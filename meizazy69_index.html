@@ -2657,11 +2657,13 @@ async function consumeAndFinalizeProductCost(productId, { purchaseCny, shippingC
 }
 
 /* ---- 仕入れロット 登録モーダル ---- */
-function BatchFormModal({ onClose, onSave }) {
-  const [purchaseDate, setPurchaseDate] = useState(todayISO());
-  const [totalItems, setTotalItems] = useState("");
-  const [totalShippingCny, setTotalShippingCny] = useState("");
-  const [totalFeeCny, setTotalFeeCny] = useState("");
+function BatchFormModal({ batch, onClose, onSave }) {
+  const isEdit = !!batch;
+  const [name, setName] = useState(batch ? (batch.name || "") : "");
+  const [purchaseDate, setPurchaseDate] = useState(batch ? batch.purchase_date : todayISO());
+  const [totalItems, setTotalItems] = useState(batch ? String(batch.total_items) : "");
+  const [totalShippingCny, setTotalShippingCny] = useState(batch ? String(batch.total_shipping_cny) : "");
+  const [totalFeeCny, setTotalFeeCny] = useState(batch ? String(batch.total_fee_cny) : "");
   const [saving, setSaving] = useState(false);
 
   const items = parseInt(totalItems, 10) || 0;
@@ -2675,6 +2677,8 @@ function BatchFormModal({ onClose, onSave }) {
     if (!purchaseDate || items <= 0) return;
     setSaving(true);
     await onSave({
+      id: isEdit ? batch.id : undefined,
+      name: name.trim() || null,
       purchase_date: purchaseDate,
       total_items: items,
       total_shipping_cny: shipping,
@@ -2692,7 +2696,16 @@ function BatchFormModal({ onClose, onSave }) {
         className="w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl p-5 space-y-4"
         style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
       >
-        <h2 className="font-display text-lg">新規仕入れロット</h2>
+        <h2 className="font-display text-lg">{isEdit ? "仕入れロットを編集" : "新規仕入れロット"}</h2>
+        {/* ★2026-08-04実装: ロット編集機能を追加。総点数・合計金額を編集すると、まだ登録していない
+            商品への今後の自動按分(1点あたり金額)に反映される。既に登録済みの商品自体の金額は
+            自動では変わらないため、必要であれば個別に編集し直す(computeBatchItemAmountsの
+            「最終品吸収方式」で以後の登録は正しく揃う) */}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>ロット名(任意)</label>
+          <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="例: 7月 BuckyDrop 6点分"
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+        </div>
         <div>
           <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入れ日</label>
           <input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required
@@ -2721,7 +2734,7 @@ function BatchFormModal({ onClose, onSave }) {
         <div className="flex gap-2 pt-1">
           <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>キャンセル</button>
           <button type="submit" disabled={saving} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
-            {saving ? "保存中..." : "作成"}
+            {saving ? "保存中..." : (isEdit ? "変更を保存" : "作成")}
           </button>
         </div>
       </form>
@@ -2730,7 +2743,7 @@ function BatchFormModal({ onClose, onSave }) {
 }
 
 /* ---- 仕入れロット一覧 ---- */
-function BatchList({ batches, usageCountByBatch }) {
+function BatchList({ batches, usageCountByBatch, onEdit }) {
   if (batches.length === 0) {
     return <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>仕入れロットがありません</p>;
   }
@@ -2739,10 +2752,19 @@ function BatchList({ batches, usageCountByBatch }) {
       {batches.map((b) => (
         <div key={b.id} className="rounded-xl p-4" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
           <div className="flex items-center justify-between flex-wrap gap-2">
-            <p className="text-sm font-medium">{b.purchase_date}</p>
-            <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-              使用済み: {usageCountByBatch[b.id] || 0} / {b.total_items} 点
-            </span>
+            <p className="text-sm font-medium">{b.name ? `${b.name}(${b.purchase_date})` : b.purchase_date}</p>
+            <div className="flex items-center gap-2">
+              <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                使用済み: {usageCountByBatch[b.id] || 0} / {b.total_items} 点
+              </span>
+              <button
+                onClick={() => onEdit(b)}
+                className="text-xs px-2.5 py-1 rounded-lg"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+              >
+                編集
+              </button>
+            </div>
           </div>
           <div className="text-xs mt-1.5 flex flex-wrap gap-x-4 gap-y-1" style={{ color: "var(--mz-ink-muted)" }}>
             <span>送料合計: {b.total_shipping_cny} CNY(1点 {Number(b.per_item_shipping_cny).toFixed(2)})</span>
@@ -3305,7 +3327,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           <select value={batchId} onChange={(e) => handleBatchChange(e.target.value)}
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
             <option value="">個別仕入れ(ロットなし)</option>
-            {allBatches.map((b) => <option key={b.id} value={b.id}>{b.purchase_date}({b.total_items}点)</option>)}
+            {allBatches.map((b) => <option key={b.id} value={b.id}>{b.name ? `${b.name}(${b.purchase_date}・${b.total_items}点)` : `${b.purchase_date}(${b.total_items}点)`}</option>)}
           </select>
         </div>
 
@@ -3486,6 +3508,8 @@ function ProductsPage() {
   const [sortOrder, setSortOrder] = useState("desc"); // "desc"=登録日(仕入れ日)新しい順 / "asc"=古い順
   const [modalProduct, setModalProduct] = useState(null); // null=閉じる, {}=新規, obj=編集
   const [modalBatch, setModalBatch] = useState(false);
+  // ★2026-08-04実装: 仕入れロット編集用。nullなら非表示、ロットオブジェクトがセットされていれば編集モーダルを開く
+  const [editingBatch, setEditingBatch] = useState(null);
   const [returnTarget, setReturnTarget] = useState(null);
 
   const loadAll = useCallback(async () => {
@@ -3494,7 +3518,7 @@ function ProductsPage() {
       supabase.from("products")
         .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
         .order("created_at", { ascending: false }),
-      supabase.from("purchase_batches").select("id,purchase_date,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
+      supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
       supabase.from("agent_charge_consumptions").select("id,product_id"),
     ]);
     if (productsRes.error) { setError("商品情報の取得に失敗しました"); setProducts([]); return; }
@@ -3717,6 +3741,16 @@ function ProductsPage() {
     loadAll();
   };
 
+  // ★2026-08-04実装: 既存の仕入れロットを編集する。総点数・合計金額を編集すると、
+  //   以後まだ登録していない商品への自動按分(1点あたり金額)に反映される。
+  const handleUpdateBatch = async (form) => {
+    const { id, ...patch } = form;
+    const { error } = await supabase.from("purchase_batches").update(patch).eq("id", id);
+    if (error) { alert("ロットの更新に失敗しました"); return; }
+    setEditingBatch(null);
+    loadAll();
+  };
+
   // 商品登録モーダル内の「+ 新規ロット登録」から呼ばれる。一覧(batches state)はバックグラウンドで
   // 更新しつつ、作成結果はモーダル側にもそのまま返して即座に選択・自動入力できるようにする。
   const handleCreateBatchInline = async (form) => {
@@ -3818,7 +3852,7 @@ function ProductsPage() {
       )}
 
       {products !== null && view === "batches" && (
-        <BatchList batches={batches} usageCountByBatch={usageCountByBatch} />
+        <BatchList batches={batches} usageCountByBatch={usageCountByBatch} onEdit={setEditingBatch} />
       )}
 
       {modalProduct && (
@@ -3826,6 +3860,9 @@ function ProductsPage() {
       )}
       {modalBatch && (
         <BatchFormModal onClose={() => setModalBatch(false)} onSave={handleSaveBatch} />
+      )}
+      {editingBatch && (
+        <BatchFormModal batch={editingBatch} onClose={() => setEditingBatch(null)} onSave={handleUpdateBatch} />
       )}
       {returnTarget && (
         <ReturnFormModal sourceProduct={returnTarget} onClose={() => setReturnTarget(null)} onSave={handleSaveReturn} />
@@ -4189,7 +4226,7 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
             <select value={batchId} onChange={(e) => handleBatchChange(e.target.value)}
               className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
               <option value="">なし(単独仕入れ)</option>
-              {batches.map((b) => <option key={b.id} value={b.id}>{b.purchase_date}</option>)}
+              {batches.map((b) => <option key={b.id} value={b.id}>{b.name ? `${b.name}(${b.purchase_date})` : b.purchase_date}</option>)}
             </select>
           </div>
         </div>
@@ -5149,7 +5186,7 @@ function SalesPage() {
         .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
-      supabase.from("purchase_batches").select("id,purchase_date,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
+      supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
     ]);
     // sales取得が失敗しても、同時に取得できたクラブ・ロットは反映する(販売登録モーダルを使えなくしないため)
     setClubs(clubsRes.data || []);
