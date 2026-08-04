@@ -4262,6 +4262,9 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
                   {p.product_code && (
                     <span className="text-[9px]" style={{ color: "var(--mz-ink-muted)" }}>No.{p.product_code}</span>
                   )}
+                  {p.selling_price_jpy != null && (
+                    <span className="text-[9px]" style={{ color: "var(--mz-ink-muted)" }}>{fmtJPY(p.selling_price_jpy)}</span>
+                  )}
                 </button>
               ))}
             </div>
@@ -4682,7 +4685,10 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
                           </span>
                         )}
                       </div>
-                      <span className="text-[10px] w-full truncate text-center">{productLabel(p)}</span>
+                      <span className="text-[10px] w-full truncate text-center">{p.product_name || "(名称未設定)"}{p.size ? ` - ${p.size}` : ""}</span>
+                      {p.product_code && (
+                        <span className="text-[9px]" style={{ color: "var(--mz-ink-muted)" }}>No.{p.product_code}</span>
+                      )}
                       {p.selling_price_jpy != null && (
                         <span className="text-[9px]" style={{ color: "var(--mz-ink-muted)" }}>{fmtJPY(p.selling_price_jpy)}</span>
                       )}
