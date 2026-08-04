@@ -4477,7 +4477,7 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
       if (!searchText.trim()) return true;
       const q = searchText.trim().toLowerCase();
       return (p.product_name || "").toLowerCase().includes(q) || (p.product_code || "").toLowerCase().includes(q);
-    }).slice(0, 20);
+    });
   }, [unsoldProducts, selectedIds, searchText]);
 
   const addItem = (product, isNewPurchase = false) => {
@@ -4632,21 +4632,35 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
               ) : candidates.length === 0 ? (
                 <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>該当する未販売商品がありません</p>
               ) : (
-                <div className="rounded-lg max-h-56 overflow-y-auto divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+                // ★2026-08-04実装: カタログの商品選択と同じ画像グリッド方式に変更(件数上限も撤廃・2.30参照)
+                <div
+                  className="grid grid-cols-3 sm:grid-cols-4 gap-2 max-h-72 overflow-y-auto p-1.5 rounded-lg"
+                  style={{ border: "1px solid var(--mz-border)" }}
+                >
                   {candidates.map((p) => (
                     <button
-                      type="button" key={p.id} onClick={() => addItem(p)}
-                      className="w-full text-left px-3 py-2 text-xs flex items-center gap-2 hover:bg-white/5"
-                      style={{ color: "var(--mz-ink)" }}
+                      key={p.id} type="button" onClick={() => addItem(p)}
+                      className="flex flex-col items-center gap-1 rounded-lg p-1.5 hover:bg-white/5 text-left"
+                      style={{ border: "1px solid var(--mz-border)" }}
                     >
-                      {p.product_image_url ? (
-                        <img src={p.product_image_url} alt="" className="w-10 h-10 rounded-md object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
-                      ) : (
-                        <div className="w-10 h-10 rounded-md shrink-0 flex items-center justify-center text-[9px] text-center" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" }}>No Image</div>
-                      )}
-                      <span className="flex-1 min-w-0 truncate">{productLabel(p)}</span>
+                      <div className="relative w-full">
+                        {p.product_image_url ? (
+                          <img src={p.product_image_url} alt="" className="w-full aspect-square rounded-md object-cover" />
+                        ) : (
+                          <div className="w-full aspect-square rounded-md flex items-center justify-center text-[9px] text-center" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" }}>No Image</div>
+                        )}
+                        {p.type === "sample" && p.sample_purpose === "処分用" && (
+                          <span
+                            className="absolute top-1 left-1 text-[9px] px-1.5 py-0.5 rounded-full shrink-0"
+                            style={{ background: "#3a2a1f", color: "#d6a98f", border: "1px solid rgba(0,0,0,0.3)" }}
+                          >
+                            処分用
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[10px] w-full truncate text-center">{productLabel(p)}</span>
                       {p.selling_price_jpy != null && (
-                        <span className="shrink-0" style={{ color: "var(--mz-ink-muted)" }}>{fmtJPY(p.selling_price_jpy)}</span>
+                        <span className="text-[9px]" style={{ color: "var(--mz-ink-muted)" }}>{fmtJPY(p.selling_price_jpy)}</span>
                       )}
                     </button>
                   ))}
