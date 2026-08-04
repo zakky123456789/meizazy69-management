@@ -4094,7 +4094,7 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
     return references.filter((p) => {
       if (!q) return true;
       return (p.product_name || "").toLowerCase().includes(q) || (p.product_code || "").toLowerCase().includes(q);
-    }).slice(0, 20);
+    });
   }, [references, referenceSearch]);
 
   const sizeOptionsList = useMemo(() => {
@@ -4229,15 +4229,39 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
           ) : referenceCandidates.length === 0 ? (
             <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>該当するサンプルがありません</p>
           ) : (
-            <div className="rounded-lg max-h-32 overflow-y-auto divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+            // ★2026-08-04実装: 「在庫から追加」・カタログ商品選択と同じ画像グリッド方式に変更。
+            //   商品番号を明示的に表示(件数上限も撤廃・2.30参照)
+            <div
+              className="grid grid-cols-3 sm:grid-cols-4 gap-2 max-h-56 overflow-y-auto p-1.5 rounded-lg"
+              style={{ border: "1px solid var(--mz-border)" }}
+            >
               {referenceCandidates.map((p) => (
                 <button
                   type="button" key={p.id} onClick={() => handleSelectReference(p)}
-                  className="w-full text-left px-3 py-2 text-xs flex items-center justify-between gap-2 hover:bg-white/5"
-                  style={{ color: p.id === selectedRefId ? "var(--mz-gold-soft)" : "var(--mz-ink)" }}
+                  className="flex flex-col items-center gap-1 rounded-lg p-1.5 hover:bg-white/5 text-left"
+                  style={{ border: p.id === selectedRefId ? "1px solid var(--mz-gold)" : "1px solid var(--mz-border)" }}
                 >
-                  <span className="truncate">{productLabel(p)}</span>
-                  {p.id === selectedRefId && <span className="shrink-0 text-[11px]">選択中</span>}
+                  <div className="relative w-full">
+                    {p.product_image_url ? (
+                      <img src={p.product_image_url} alt="" className="w-full aspect-square rounded-md object-cover" />
+                    ) : (
+                      <div className="w-full aspect-square rounded-md flex items-center justify-center text-[9px] text-center" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" }}>No Image</div>
+                    )}
+                    {p.id === selectedRefId && (
+                      <span
+                        className="absolute top-1 right-1 text-[9px] px-1.5 py-0.5 rounded-full shrink-0"
+                        style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+                      >
+                        選択中
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[10px] w-full truncate text-center" style={{ color: p.id === selectedRefId ? "var(--mz-gold-soft)" : "var(--mz-ink)" }}>
+                    {p.product_name || "(名称未設定)"}
+                  </span>
+                  {p.product_code && (
+                    <span className="text-[9px]" style={{ color: "var(--mz-ink-muted)" }}>No.{p.product_code}</span>
+                  )}
                 </button>
               ))}
             </div>
@@ -6300,7 +6324,7 @@ const EXPENSE_ACCOUNT_CATEGORY_OPTIONS = [
   "支払手数料", "荷造運賃(送料)", "地代家賃", "水道光熱費", "租税公課", "外注費", "仕入高", "雑費", "その他",
 ];
 const EXPENSE_TAX_CATEGORY_OPTIONS = ["課税10%", "課税8%(軽減)", "非課税", "対象外"];
-const EXPENSE_PAYMENT_METHOD_OPTIONS = ["小口", "会社クレジットカード", "立替(悟)", "立替(裕之)"];
+const EXPENSE_PAYMENT_METHOD_OPTIONS = ["立替(悟)", "小口", "法人銀行口座", "法人クレジットカード", "立替(公洋)", "立替(裕之)"];
 const EXPENSE_REIMBURSEMENT_STATUS_OPTIONS = ["未精算", "精算済み"];
 
 function ExpenseReimbursementBadge({ status }) {
