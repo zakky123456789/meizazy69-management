@@ -5201,11 +5201,23 @@ function PendingPurchasesTab({ batches, onCreateBatch }) {
     const ids = (productsData || []).map((p) => p.id);
     let linkMap = {};
     if (ids.length > 0) {
-      const { data: linkData } = await supabase
+      // ★2026-08-04実装(バグ修正): sale_itemsから直接sales(...)を埋め込むクエリが失敗しても
+      //   エラーを握りつぶしていたため、実際は紐付いているのに「未紐付け」と誤表示していた。
+      //   product_id→sale_id→sales情報の2段階取得に分け、確実に紐付け状況を反映する。
+      const { data: linkRows, error: linkErr } = await supabase
         .from("sale_items")
-        .select("product_id,sales(transaction_date,host_clubs(name),hosts(name))")
+        .select("product_id,sale_id")
         .in("product_id", ids);
-      (linkData || []).forEach((row) => { linkMap[row.product_id] = row.sales; });
+      if (!linkErr && linkRows && linkRows.length > 0) {
+        const saleIds = [...new Set(linkRows.map((r) => r.sale_id))];
+        const { data: salesData } = await supabase
+          .from("sales")
+          .select("id,transaction_date,host_clubs(name),hosts(name)")
+          .in("id", saleIds);
+        const saleById = {};
+        (salesData || []).forEach((s) => { saleById[s.id] = s; });
+        linkRows.forEach((r) => { linkMap[r.product_id] = saleById[r.sale_id] || null; });
+      }
     }
     setProducts((productsData || []).map((p) => ({ ...p, linkedSale: linkMap[p.id] || null })));
   }, []);
