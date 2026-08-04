@@ -1447,6 +1447,7 @@ function VisitFormModal({ visit, initialSamples, onClose, onSave }) {
       .from("products")
       .select("id,product_name,size,product_code")
       .eq("status", "未販売")
+      .eq("created_via_sale", false) // ★2026-08-04実装: 販売登録からの新規仕入は持参サンプル候補から除外(2.30参照)
       .order("product_name")
       .then(({ data, error }) => {
         if (cancelled) return;
@@ -3498,6 +3499,63 @@ function ProductCard({ product, onEdit, onReturn, onDelete, onTogglePurpose }) {
 }
 
 /* ---- 商品・サンプル在庫ページ本体 ---- */
+/* ★2026-08-04実装: 商品編集(既存商品のCNY金額変更を含む)の保存処理を共通関数として切り出し。
+   ProductsPageの編集画面だけでなく、販売登録ページの「仕入れ商品」タブからの編集でも再利用する(2.30参照)。
+   original: モーダルを開いた時点の元データ(CNY金額の変更検知に使用) */
+async function updateProductCore(form, original) {
+  const orig = original || {};
+  const oldTotalCny = (Number(orig.purchase_amount_cny) || 0) + (Number(orig.shipping_cny) || 0) + (Number(orig.fee_cny) || 0);
+  const newTotalCny = (Number(form.purchase_amount_cny) || 0) + (Number(form.shipping_cny) || 0) + (Number(form.fee_cny) || 0);
+  const costsChanged =
+    (Number(form.purchase_amount_cny) || 0) !== (Number(orig.purchase_amount_cny) || 0) ||
+    (Number(form.shipping_cny) || 0) !== (Number(orig.shipping_cny) || 0) ||
+    (Number(form.fee_cny) || 0) !== (Number(orig.fee_cny) || 0);
+
+  if (costsChanged) {
+    const balance = await getWalletRemainingTotal();
+    if (!balance.ok) return { ok: false, message: "ウォレット残高の確認に失敗しました" };
+    const projectedBalance = balance.total + oldTotalCny;
+    if (projectedBalance < newTotalCny) {
+      return { ok: false, message: `ウォレット残高が不足しています(必要額: ${newTotalCny.toFixed(2)} CNY / 旧消化分を払い戻した場合の残高: ${projectedBalance.toFixed(2)} CNY)。先にチャージを追加してから再度保存してください。` };
+    }
+    const reverseRes = await reverseWalletConsumption(form.id);
+    if (!reverseRes.ok) return { ok: false, message: reverseRes.message };
+  }
+
+  const patch = {
+    type: form.type,
+    status: form.status,
+    sample_purpose: form.type === "sample" ? (form.sample_purpose || "展示用") : null,
+    product_image_url: form.product_image_url,
+    product_url: form.product_url,
+    product_code: form.product_code,
+    product_name: form.product_name,
+    category: form.category,
+    size: form.size,
+    size_options: form.size_options,
+    selling_price_jpy: form.selling_price_jpy,
+    purchase_date: form.purchase_date,
+    batch_id: form.batch_id,
+    purchase_amount_cny: form.purchase_amount_cny,
+    shipping_cny: form.shipping_cny,
+    fee_cny: form.fee_cny,
+  };
+  const { error } = await supabase.from("products").update(patch).eq("id", form.id);
+  if (error) return { ok: false, message: "更新に失敗しました" };
+
+  if (costsChanged) {
+    const consumeRes = await consumeAndFinalizeProductCost(form.id, {
+      purchaseCny: form.purchase_amount_cny,
+      shippingCny: form.shipping_cny,
+      feeCny: form.fee_cny,
+    });
+    if (!consumeRes.ok) {
+      return { ok: true, warning: `商品情報は更新されましたが、ウォレット再消化処理でエラーが発生しました: ${consumeRes.message}\nチャージ台帳・商品情報をご確認ください。` };
+    }
+  }
+  return { ok: true };
+}
+
 function ProductsPage() {
   const [view, setView] = useState("list"); // "list" | "batches"
   const [products, setProducts] = useState(null); // null = 読み込み中
@@ -3517,6 +3575,7 @@ function ProductsPage() {
     const [productsRes, batchesRes, consumptionsRes] = await Promise.all([
       supabase.from("products")
         .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+        .eq("created_via_sale", false) // ★2026-08-04実装: 販売登録からの新規仕入はサンプル・在庫の一覧から除外(2.30参照)
         .order("created_at", { ascending: false }),
       supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
       supabase.from("agent_charge_consumptions").select("id,product_id"),
@@ -3632,62 +3691,10 @@ function ProductsPage() {
     }
 
     if (form.id) {
-      // 編集: CNY金額(仕入代・送料・手数料)が変わっているかを、モーダルを開いた時点の元データ(modalProduct)と比較して判定する。
-      // ★2026-07-10変更: 仕入れ確定後でも編集可能にする(サンプル登録が先、仕入れ確定が後になるケースに対応)。
-      // 変更があれば「旧消化を取り消し→新金額で再消化」を行う。
-      const original = modalProduct || {};
-      const oldTotalCny = (Number(original.purchase_amount_cny) || 0) + (Number(original.shipping_cny) || 0) + (Number(original.fee_cny) || 0);
-      const newTotalCny = (Number(form.purchase_amount_cny) || 0) + (Number(form.shipping_cny) || 0) + (Number(form.fee_cny) || 0);
-      const costsChanged =
-        (Number(form.purchase_amount_cny) || 0) !== (Number(original.purchase_amount_cny) || 0) ||
-        (Number(form.shipping_cny) || 0) !== (Number(original.shipping_cny) || 0) ||
-        (Number(form.fee_cny) || 0) !== (Number(original.fee_cny) || 0);
-
-      if (costsChanged) {
-        // 旧消化を払い戻した想定の残高で、新金額を賄えるか事前確認する(不足時はDBに一切書き込まない)
-        const balance = await getWalletRemainingTotal();
-        if (!balance.ok) { alert("ウォレット残高の確認に失敗しました"); return; }
-        const projectedBalance = balance.total + oldTotalCny;
-        if (projectedBalance < newTotalCny) {
-          alert(`ウォレット残高が不足しています(必要額: ${newTotalCny.toFixed(2)} CNY / 旧消化分を払い戻した場合の残高: ${projectedBalance.toFixed(2)} CNY)。先にチャージを追加してから再度保存してください。`);
-          return;
-        }
-        const reverseRes = await reverseWalletConsumption(form.id);
-        if (!reverseRes.ok) { alert(reverseRes.message); return; }
-      }
-
-      const patch = {
-        type: form.type,
-        status: form.status,
-        sample_purpose: form.type === "sample" ? (form.sample_purpose || "展示用") : null,
-        product_image_url: form.product_image_url,
-        product_url: form.product_url,
-        product_code: form.product_code,
-        product_name: form.product_name,
-        category: form.category,
-        size: form.size,
-        size_options: form.size_options,
-        selling_price_jpy: form.selling_price_jpy,
-        purchase_date: form.purchase_date,
-        batch_id: form.batch_id,
-        purchase_amount_cny: form.purchase_amount_cny,
-        shipping_cny: form.shipping_cny,
-        fee_cny: form.fee_cny,
-      };
-      const { error } = await supabase.from("products").update(patch).eq("id", form.id);
-      if (error) { alert("更新に失敗しました"); return; }
-
-      if (costsChanged) {
-        const consumeRes = await consumeAndFinalize(form.id, {
-          purchaseCny: form.purchase_amount_cny,
-          shippingCny: form.shipping_cny,
-          feeCny: form.fee_cny,
-        });
-        if (!consumeRes.ok) {
-          alert(`商品情報は更新されましたが、ウォレット再消化処理でエラーが発生しました: ${consumeRes.message}\nチャージ台帳・商品情報をご確認ください。`);
-        }
-      }
-
+      // 編集: 共通関数(updateProductCore)に委譲。CNY金額の変更検知・ウォレット再消化はそちら側で行う。
+      const res = await updateProductCore(form, modalProduct);
+      if (!res.ok) { alert(res.message); return; }
+      if (res.warning) alert(res.warning);
       setModalProduct(null);
       loadAll();
       return;
@@ -4084,6 +4091,10 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
     const { data: inserted, error: insertErr } = await supabase.from("products").insert({
       type: "stock",
       status: "未販売",
+      // ★2026-08-04実装: 販売登録からの「新規仕入で追加」由来の商品であることを示すフラグ。
+      //   サンプル・在庫の一覧や「在庫から追加」検索候補から除外し、代わりに販売登録ページの
+      //   「仕入れ商品」タブで管理する(2.30参照)
+      created_via_sale: true,
       product_image_url: productImageUrl || null,
       product_url: productUrl.trim() || null,
       product_code: productCode.trim() || null,
@@ -4316,6 +4327,7 @@ function SaleFormModal({ clubs, batches, sale, onClose, onSave }) {
       .from("products")
       .select("id,type,sample_purpose,product_name,category,size,product_code,product_image_url,product_url,size_options,selling_price_jpy,purchase_amount_jpy,shipping_jpy,fee_jpy")
       .eq("status", "未販売")
+      .eq("created_via_sale", false) // ★2026-08-04実装: 販売登録からの新規仕入は「在庫から追加」候補から除外(2.30参照)
       .order("product_name")
       .then(({ data, error }) => {
         if (cancelled) return;
@@ -5165,6 +5177,104 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
   );
 }
 
+/* ============================================================
+   仕入れ商品(PendingPurchasesTab) ★2026-08-04実装
+   ・「新規仕入で追加」(created_via_sale=true)で登録された商品は、サンプル・在庫の一覧や
+     「在庫から追加」検索候補からは常に除外される(2.30参照)。この専用タブが唯一の
+     受け皿となり、金額(仕入れロットの選択・返金確定後のCNY修正等)を編集できる。
+   ・その商品が既にどの販売に紐づいているか(sale_items経由)を併せて表示し、
+     万が一「販売登録を保存し忘れて迷子になった商品」もここで確認・拾い直せるようにする。
+   ============================================================ */
+function PendingPurchasesTab({ batches, onCreateBatch }) {
+  const [products, setProducts] = useState(null); // null=読込中
+  const [modalProduct, setModalProduct] = useState(null);
+
+  const loadAll = useCallback(async () => {
+    const { data: productsData, error } = await supabase
+      .from("products")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .eq("created_via_sale", true)
+      .eq("status", "未販売")
+      .order("created_at", { ascending: false });
+    if (error) { setProducts([]); return; }
+
+    const ids = (productsData || []).map((p) => p.id);
+    let linkMap = {};
+    if (ids.length > 0) {
+      const { data: linkData } = await supabase
+        .from("sale_items")
+        .select("product_id,sales(transaction_date,host_clubs(name),hosts(name))")
+        .in("product_id", ids);
+      (linkData || []).forEach((row) => { linkMap[row.product_id] = row.sales; });
+    }
+    setProducts((productsData || []).map((p) => ({ ...p, linkedSale: linkMap[p.id] || null })));
+  }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  const handleSaveProduct = async (form) => {
+    const res = await updateProductCore(form, modalProduct);
+    if (!res.ok) { alert(res.message); return; }
+    if (res.warning) alert(res.warning);
+    setModalProduct(null);
+    loadAll();
+  };
+
+  if (products === null) return <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>;
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+        販売登録の「新規仕入で追加」で登録した商品(未販売分)の一覧です。仕入れロットの選択や、返金確定後の正しいCNY金額への修正はここから行えます。
+        サンプル・在庫の一覧や他の販売登録の「在庫から追加」候補には出てきません。
+      </p>
+
+      {products.length === 0 ? (
+        <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>該当する商品はありません</p>
+      ) : (
+        <div className="rounded-lg divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+          {products.map((p) => (
+            <div key={p.id} className="flex items-center gap-3 px-3 py-3">
+              {p.product_image_url ? (
+                <img src={p.product_image_url} alt="" className="w-12 h-12 rounded-md object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
+              ) : (
+                <div className="w-12 h-12 rounded-md flex items-center justify-center shrink-0" style={{ background: "var(--mz-surface-hover)" }}>
+                  <Icon name="tag" className="w-5 h-5" style={{ color: "var(--mz-ink-muted)" }} />
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-sm truncate">{p.product_name || "(名称未設定)"}</p>
+                <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                  {[p.category, p.size, p.product_code ? `No.${p.product_code}` : ""].filter(Boolean).join(" / ")}
+                </p>
+                {p.linkedSale ? (
+                  <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
+                    紐付け先: {p.linkedSale.transaction_date} ・ {p.linkedSale.host_clubs ? p.linkedSale.host_clubs.name : "-"}
+                    {p.linkedSale.hosts ? ` / ${p.linkedSale.hosts.name}` : ""}
+                  </p>
+                ) : (
+                  <p className="text-xs mt-0.5" style={{ color: "#f2b8bd" }}>⚠️ どの販売にも紐付いていません(保存し忘れの可能性)</p>
+                )}
+              </div>
+              <button
+                onClick={() => setModalProduct(p)}
+                className="text-xs px-2.5 py-1.5 rounded-lg shrink-0"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+              >
+                編集
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {modalProduct && (
+        <ProductFormModal product={modalProduct} batches={batches} onClose={() => setModalProduct(null)} onSave={handleSaveProduct} onCreateBatch={onCreateBatch} />
+      )}
+    </div>
+  );
+}
+
 function SalesPage() {
   const [sales, setSales] = useState(null); // null = 読み込み中
   const [clubs, setClubs] = useState([]);
@@ -5389,6 +5499,14 @@ function SalesPage() {
     loadAll();
   };
 
+  // ★2026-08-04実装: 「仕入れ商品」タブ内のProductFormModalから「+ 新規ロット登録」した場合のロット作成(2.30参照)
+  const handleCreateBatchInlineSales = async (form) => {
+    const { data, error } = await supabase.from("purchase_batches").insert(form).select().single();
+    if (error || !data) return { ok: false, message: "ロットの登録に失敗しました" };
+    loadAll();
+    return { ok: true, batch: data };
+  };
+
   return (
     <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-5">
       <div className="flex items-center justify-between gap-3">
@@ -5423,6 +5541,13 @@ function SalesPage() {
         >
           未発注リスト
         </button>
+        <button
+          type="button" onClick={() => setActiveTab("pending")}
+          className="text-xs px-3 py-1.5 rounded-md"
+          style={activeTab === "pending" ? { background: "var(--mz-gold)", color: "#1a1710" } : { color: "var(--mz-ink-muted)" }}
+        >
+          仕入れ商品
+        </button>
       </div>
 
       {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
@@ -5444,6 +5569,10 @@ function SalesPage() {
 
       {activeTab === "unordered" && sales !== null && (
         <UnorderedListTab sales={sales} onConfirmOrder={handleConfirmOrder} />
+      )}
+
+      {activeTab === "pending" && (
+        <PendingPurchasesTab batches={batches} onCreateBatch={handleCreateBatchInlineSales} />
       )}
 
       {modalOpen && (
