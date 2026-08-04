@@ -4408,6 +4408,9 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
         // ★2026-07-19実装: 編集時に既存明細の発注確認状態を引き継ぐ(保存の都度リセットされる不具合の修正)
         isNewPurchase: !!si.is_new_purchase,
         orderConfirmed: !!si.order_confirmed,
+        // ★2026-08-04実装: 編集時に既存明細の再仕入れ検討状態を引き継ぐ(2.31参照)
+        isReorderCandidate: !!si.reorder_candidate,
+        reorderDecided: !!si.reorder_decided,
       }));
     }
     // ★2026-08-04実装: 「仕入れ商品」タブの「この商品で販売登録する」から開いた場合、
@@ -4508,11 +4511,16 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
   }, [unsoldProducts, selectedIds, searchText]);
 
   const addItem = (product, isNewPurchase = false) => {
+    // ★2026-08-04実装: 「在庫から追加」で売れた展示用サンプル(処分用は対象外)は、
+    //   後で再仕入れするかどうかを「再仕入れ検討」タブで判断できるようタグ付けする(2.31参照)
+    const isReorderCandidate = !isNewPurchase && product.type === "sample" && (product.sample_purpose || "展示用") === "展示用";
     setItems((prev) => [...prev, {
       productId: product.id,
       product,
       unitPrice: product.selling_price_jpy != null ? String(product.selling_price_jpy) : "",
       isNewPurchase,
+      isReorderCandidate,
+      reorderDecided: false,
     }]);
     setSearchText("");
   };
@@ -4556,38 +4564,12 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
         cost_jpy: productCostJpy(it.product),
         is_new_purchase: !!it.isNewPurchase,
         order_confirmed: !!it.orderConfirmed,
+        reorder_candidate: !!it.isReorderCandidate,
+        reorder_decided: !!it.reorderDecided,
       })),
     });
     setSaving(false);
     if (!ok) return; // onSave側でエラー表示済み。モーダルは開いたままにして再試行可能にする
-
-    // ★2026-07-10実装: この保存で新たに「売れた」ことになった商品の中に、
-    //   展示用サンプル(type: "sample" かつ sample_purpose: "展示用")があれば、
-    //   再仕入れするかどうかを案内する。新規登録時は全明細が対象、編集時は
-    //   元々の明細(sale.sale_items)に無かった新規追加分のみを対象とする。
-    const previousProductIds = new Set((sale?.sale_items || []).map((si) => si.product_id));
-    const newlySoldItems = isEdit ? items.filter((it) => !previousProductIds.has(it.productId)) : items;
-    const reorderCandidates = newlySoldItems.filter(
-      (it) => it.product && it.product.type === "sample" && (it.product.sample_purpose || "展示用") === "展示用"
-    );
-    if (reorderCandidates.length > 0) {
-      const names = reorderCandidates.map((it) => it.product.product_name || "(名称未設定)").join("、");
-      const wantsReorder = window.confirm(`展示用サンプルが売れました: ${names}\n再仕入れしますか?`);
-      if (wantsReorder) {
-        // 複数該当する場合は先頭の1点分のみ事前入力する(商品登録モーダルは1商品ずつの登録のため)
-        const ref = reorderCandidates[0].product;
-        pendingProductPrefill = {
-          type: "sample",
-          sample_purpose: "展示用",
-          product_image_url: ref.product_image_url || "",
-          product_url: ref.product_url || "",
-          product_name: ref.product_name || "",
-          category: ref.category || "",
-          size_options: ref.size_options || "",
-        };
-        window.location.hash = "#/products";
-      }
-    }
   };
 
   return (
@@ -5199,6 +5181,101 @@ function UnorderedListTab({ sales, onConfirmOrder }) {
 }
 
 /* ============================================================
+   再仕入れ検討(ReorderReviewTab) ★2026-08-04実装
+   ・「在庫から追加」で売れた展示用サンプル(処分用は対象外)を全ての販売記録から横断して一覧表示し、
+     その場でブラウザconfirm()に即答させるのではなく、あとでまとめて「再仕入れする/しない」を
+     判断できるようにする(2.31参照)
+   ============================================================ */
+function ReorderReviewTab({ sales, onDecide }) {
+  const candidates = useMemo(() => {
+    const rows = [];
+    for (const s of sales) {
+      for (const it of (s.sale_items || [])) {
+        if (it.reorder_candidate && !it.reorder_decided) {
+          rows.push({
+            id: it.id,
+            saleId: s.id,
+            transactionDate: s.transaction_date,
+            clubName: s.host_clubs ? s.host_clubs.name : "-",
+            hostName: s.hosts ? s.hosts.name : null,
+            product: it.products || {},
+          });
+        }
+      }
+    }
+    rows.sort((a, b) => (a.transactionDate || "").localeCompare(b.transactionDate || ""));
+    return rows;
+  }, [sales]);
+
+  const handleReorder = (row) => {
+    // ★2026-08-04実装: 「再仕入れする」を選ぶと、商品名・URL・カテゴリ等を引き継いだ状態で
+    //   サンプル・在庫の新規登録画面を開く(既存のpendingProductPrefillの仕組みを再利用)
+    pendingProductPrefill = {
+      type: "sample",
+      sample_purpose: "展示用",
+      product_image_url: row.product.product_image_url || "",
+      product_url: row.product.product_url || "",
+      product_name: row.product.product_name || "",
+      category: row.product.category || "",
+      size_options: row.product.size_options || "",
+    };
+    onDecide(row.id);
+    window.location.hash = "#/products";
+  };
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+        「在庫から追加」で売れた展示用サンプルのうち、再仕入れするかまだ判断していないものを全ての販売記録から横断して一覧表示します({candidates.length}点)。
+      </p>
+
+      {candidates.length === 0 ? (
+        <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>該当する商品はありません</p>
+      ) : (
+        <div className="rounded-lg divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+          {candidates.map((row) => (
+            <div key={row.id} className="flex items-center gap-3 px-3 py-3">
+              {row.product.product_image_url ? (
+                <img src={row.product.product_image_url} alt="" className="w-14 h-14 rounded-md object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
+              ) : (
+                <div className="w-14 h-14 rounded-md flex items-center justify-center shrink-0" style={{ background: "var(--mz-surface-hover)" }}>
+                  <Icon name="tag" className="w-5 h-5" style={{ color: "var(--mz-ink-muted)" }} />
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-sm truncate">{row.product.product_name || "(名称未設定)"}</p>
+                <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                  {[row.product.category, row.product.size, row.product.product_code ? `No.${row.product.product_code}` : ""].filter(Boolean).join(" / ")}
+                </p>
+                <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
+                  {row.transactionDate} ・ {row.clubName}{row.hostName ? ` / ${row.hostName}` : ""}
+                </p>
+              </div>
+              <div className="flex flex-col items-end gap-1.5 shrink-0">
+                <button
+                  type="button" onClick={() => handleReorder(row)}
+                  className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+                  style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+                >
+                  再仕入れする
+                </button>
+                <button
+                  type="button" onClick={() => onDecide(row.id)}
+                  className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+                  style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+                >
+                  再仕入れ不要
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
    まとめ領収書発行(MergeReceiptTab) ★2026-07-19実装
    ・複数のホストが個別に注文した販売記録を横断的に選択し、
      1枚の領収書(宛名は自由入力・通常はお店名)にまとめて発行するための機能。
@@ -5593,7 +5670,7 @@ function SalesPage() {
     const [salesRes, clubsRes, batchesRes] = await Promise.all([
       supabase
         .from("sales")
-        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
+        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
       supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
@@ -5647,6 +5724,8 @@ function SalesPage() {
         profit_jpy: itemPretaxJpy(it.unit_price_jpy) - it.cost_jpy,
         is_new_purchase: !!it.is_new_purchase,
         order_confirmed: !!it.order_confirmed,
+        reorder_candidate: !!it.reorder_candidate,
+        reorder_decided: !!it.reorder_decided,
       }));
       // ★2026-07-19実装: 挿入結果(実際のsale_items.id)を取得し、「新規仕入で追加」した明細のみを
       //   発注リマインドパネルの対象にする。sale_item.idがあることで、後から「発注確認済み」に
@@ -5714,6 +5793,8 @@ function SalesPage() {
       subtotal_jpy: it.unit_price_jpy,
       profit_jpy: itemPretaxJpy(it.unit_price_jpy) - it.cost_jpy,
       is_new_purchase: !!it.is_new_purchase,
+      reorder_candidate: !!it.reorder_candidate,
+      reorder_decided: !!it.reorder_decided,
     }));
     const { data: insertedItems, error: itemsErr } = await supabase
       .from("sale_items")
@@ -5799,6 +5880,13 @@ function SalesPage() {
     loadAll();
   };
 
+  // ★2026-08-04実装: 「再仕入れ検討」タブから、判断済み(再仕入れする/しない、どちらも)にする(2.31参照)
+  const handleDecideReorder = async (itemId) => {
+    const { error } = await supabase.from("sale_items").update({ reorder_decided: true }).eq("id", itemId);
+    if (error) { alert("更新に失敗しました"); return; }
+    loadAll();
+  };
+
   // ★2026-08-04実装: 「仕入れ商品」タブ内のProductFormModalから「+ 新規ロット登録」した場合のロット作成(2.30参照)
   const handleCreateBatchInlineSales = async (form) => {
     const { data, error } = await supabase.from("purchase_batches").insert(form).select().single();
@@ -5848,6 +5936,13 @@ function SalesPage() {
         >
           仕入れ商品
         </button>
+        <button
+          type="button" onClick={() => setActiveTab("reorder")}
+          className="text-xs px-3 py-1.5 rounded-md"
+          style={activeTab === "reorder" ? { background: "var(--mz-gold)", color: "#1a1710" } : { color: "var(--mz-ink-muted)" }}
+        >
+          再仕入れ検討
+        </button>
       </div>
 
       {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
@@ -5873,6 +5968,10 @@ function SalesPage() {
 
       {activeTab === "pending" && (
         <PendingPurchasesTab batches={batches} clubs={clubs} onCreateBatch={handleCreateBatchInlineSales} onSaveSale={handleSaveSale} />
+      )}
+
+      {activeTab === "reorder" && sales !== null && (
+        <ReorderReviewTab sales={sales} onDecide={handleDecideReorder} />
       )}
 
       {modalOpen && (
