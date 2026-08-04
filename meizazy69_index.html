@@ -3436,45 +3436,57 @@ function ProductCard({ product, onEdit, onReturn, onDelete, onTogglePurpose }) {
   const costJpy = purchaseJpy + feeJpyTotal;
   const isSample = product.type === "sample";
   const isReturnedStock = !isSample && !!product.return_source_product_id;
+  // ★2026-08-04実装: 受注を受ける際にサイト側の在庫有無を目視確認できるよう、
+  //   カードをクリックすると仕入先URLを新しいタブで開けるようにする(自動取得はサイト側の
+  //   API未提供・規約上の制約から不可のため、手動確認の導線として用意する)
+  const CardWrapper = product.product_url ? "a" : "div";
+  const wrapperProps = product.product_url
+    ? { href: product.product_url, target: "_blank", rel: "noopener noreferrer", title: "クリックで仕入先を開く" }
+    : {};
   return (
     <div className="rounded-xl p-3 flex gap-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
-      {product.product_image_url ? (
-        <img src={product.product_image_url} alt="" className="w-16 h-16 rounded-lg object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
-      ) : (
-        <div className="w-16 h-16 rounded-lg shrink-0 flex items-center justify-center" style={{ background: "var(--mz-surface-hover)" }}>
-          <Icon name="tag" className="w-6 h-6" style={{ color: "var(--mz-ink-muted)" }} />
-        </div>
-      )}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 flex-wrap mb-1">
-          <ProductStatusBadge status={product.status} />
-          <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{isSample ? "サンプル" : "在庫"}</span>
-          {isSample && <SamplePurposeBadge purpose={product.sample_purpose} />}
-          {isReturnedStock && (
-            <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: "#33301F", color: "var(--mz-ink-muted)" }}>返品在庫</span>
-          )}
-          {product.product_code && <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>No. {product.product_code}</span>}
-          {product.return_date && <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>返品: {product.return_date}</span>}
-        </div>
-        <p className="text-sm font-medium truncate">{product.product_name}</p>
-        <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>
-          {product.category || "カテゴリ未設定"}{product.size ? ` ・ ${product.size}` : ""}
-          {product.size_options && ` (展開: ${product.size_options})`}
-        </p>
-        <div className="text-xs mt-1 flex flex-wrap gap-x-3" style={{ color: "var(--mz-ink-muted)" }}>
-          {product.selling_price_jpy != null && <span>参考価格: {fmtJPY(product.selling_price_jpy)}</span>}
-          <span>原価合計: {costCny.toFixed(2)} CNY</span>
-        </div>
-        {/* ★2026-08-04実装: ウォレット消化で確定したJPY原価を、商品本体代と手数料(送料+その他手数料)に分けて表示。
-            未消化(まだ0円)の場合は表示しない */}
-        {costJpy > 0 && (
-          <div className="text-xs mt-0.5 flex flex-wrap gap-x-3" style={{ color: "var(--mz-gold-soft)" }}>
-            <span>本体: {fmtJPY(purchaseJpy)}</span>
-            <span>手数料: {fmtJPY(feeJpyTotal)}</span>
-            <span>原価合計(JPY): {fmtJPY(costJpy)}</span>
+      <CardWrapper {...wrapperProps} className="flex gap-3 flex-1 min-w-0" style={{ cursor: product.product_url ? "pointer" : "default" }}>
+        {product.product_image_url ? (
+          <img src={product.product_image_url} alt="" className="w-16 h-16 rounded-lg object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
+        ) : (
+          <div className="w-16 h-16 rounded-lg shrink-0 flex items-center justify-center" style={{ background: "var(--mz-surface-hover)" }}>
+            <Icon name="tag" className="w-6 h-6" style={{ color: "var(--mz-ink-muted)" }} />
           </div>
         )}
-      </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap mb-1">
+            <ProductStatusBadge status={product.status} />
+            <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{isSample ? "サンプル" : "在庫"}</span>
+            {isSample && <SamplePurposeBadge purpose={product.sample_purpose} />}
+            {isReturnedStock && (
+              <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: "#33301F", color: "var(--mz-ink-muted)" }}>返品在庫</span>
+            )}
+            {product.product_code && <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>No. {product.product_code}</span>}
+            {product.return_date && <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>返品: {product.return_date}</span>}
+          </div>
+          <p className="text-sm font-medium truncate">
+            {product.product_name}
+            {product.product_url && <span className="ml-1.5 text-xs" style={{ color: "var(--mz-gold-soft)" }}>🔗</span>}
+          </p>
+          <p className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>
+            {product.category || "カテゴリ未設定"}{product.size ? ` ・ ${product.size}` : ""}
+            {product.size_options && ` (展開: ${product.size_options})`}
+          </p>
+          <div className="text-xs mt-1 flex flex-wrap gap-x-3" style={{ color: "var(--mz-ink-muted)" }}>
+            {product.selling_price_jpy != null && <span>参考価格: {fmtJPY(product.selling_price_jpy)}</span>}
+            <span>原価合計: {costCny.toFixed(2)} CNY</span>
+          </div>
+          {/* ★2026-08-04実装: ウォレット消化で確定したJPY原価を、商品本体代と手数料(送料+その他手数料)に分けて表示。
+              未消化(まだ0円)の場合は表示しない */}
+          {costJpy > 0 && (
+            <div className="text-xs mt-0.5 flex flex-wrap gap-x-3" style={{ color: "var(--mz-gold-soft)" }}>
+              <span>本体: {fmtJPY(purchaseJpy)}</span>
+              <span>手数料: {fmtJPY(feeJpyTotal)}</span>
+              <span>原価合計(JPY): {fmtJPY(costJpy)}</span>
+            </div>
+          )}
+        </div>
+      </CardWrapper>
       <div className="flex flex-col gap-1.5 shrink-0 items-end">
         <button onClick={() => onEdit(product)} className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>編集</button>
         {isSample && (
