@@ -4885,6 +4885,14 @@ function SaleCard({ sale, onDelete, onEdit, onViewReceipt, onConfirmOrder }) {
   const items = sale.sale_items || [];
   // ★2026-07-19実装: 「新規仕入で追加」かつ未確認の明細があれば「発注未確認」バッジを表示する(2.29参照)
   const unconfirmedItems = items.filter((it) => it.is_new_purchase && !it.order_confirmed);
+  // ★2026-08-04実装: 仕入額(JPY)・利益(JPY)を、商品の現在の確定原価から都度計算して表示する
+  //   (保存済みのsale_items.profit_jpyに頼らず、常に最新の原価と連動させるため。2.30参照)
+  const itemsWithProfit = items.map((it) => {
+    const costJpy = it.products ? productCostJpy(it.products) : 0;
+    const profitJpy = itemPretaxJpy(it.unit_price_jpy) - costJpy;
+    return { ...it, costJpy, profitJpy };
+  });
+  const totalProfitJpy = itemsWithProfit.reduce((sum, it) => sum + it.profitJpy, 0);
   return (
     <div className="rounded-xl p-4 space-y-2" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
       <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -4914,7 +4922,10 @@ function SaleCard({ sale, onDelete, onEdit, onViewReceipt, onConfirmOrder }) {
           <p className="text-sm font-medium truncate">{clubName}{hostName ? ` / ${hostName}` : ""}</p>
         </div>
         <div className="flex items-center gap-3 shrink-0">
-          <span className="font-display text-base" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(sale.total_amount_jpy)}</span>
+          <div className="text-right">
+            <span className="font-display text-base block" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(sale.total_amount_jpy)}</span>
+            <span className="text-[11px] block" style={{ color: totalProfitJpy >= 0 ? "var(--mz-ink-muted)" : "#f2b8bd" }}>利益 {fmtJPY(totalProfitJpy)}</span>
+          </div>
           <button onClick={() => onEdit(sale)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>編集</button>
           <button onClick={() => onDelete(sale)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}>削除</button>
         </div>
@@ -4929,16 +4940,22 @@ function SaleCard({ sale, onDelete, onEdit, onViewReceipt, onConfirmOrder }) {
             {expanded ? "▲ 明細を閉じる" : `▼ 明細を見る(${items.length}点)`}
           </button>
           {expanded && (
-            <div className="mt-2 space-y-1.5 pt-2" style={{ borderTop: "1px solid var(--mz-border)" }}>
-              {items.map((it) => (
-                <div key={it.id} className="flex items-center justify-between gap-2 text-xs">
-                  <span className="truncate" style={{ color: "var(--mz-ink)" }}>
-                    {saleItemLabel(it)}
-                    {it.is_new_purchase && !it.order_confirmed && (
-                      <span className="ml-1.5" style={{ color: "var(--mz-gold-soft)" }}>(発注未確認)</span>
-                    )}
-                  </span>
-                  <span className="shrink-0" style={{ color: "var(--mz-ink-muted)" }}>{fmtJPY(it.unit_price_jpy)}</span>
+            <div className="mt-2 space-y-2 pt-2" style={{ borderTop: "1px solid var(--mz-border)" }}>
+              {itemsWithProfit.map((it) => (
+                <div key={it.id} className="text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate" style={{ color: "var(--mz-ink)" }}>
+                      {saleItemLabel(it)}
+                      {it.is_new_purchase && !it.order_confirmed && (
+                        <span className="ml-1.5" style={{ color: "var(--mz-gold-soft)" }}>(発注未確認)</span>
+                      )}
+                    </span>
+                    <span className="shrink-0" style={{ color: "var(--mz-ink-muted)" }}>{fmtJPY(it.unit_price_jpy)}</span>
+                  </div>
+                  <div className="flex items-center justify-end gap-3 mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
+                    <span>仕入 {fmtJPY(it.costJpy)}</span>
+                    <span style={{ color: it.profitJpy >= 0 ? "var(--mz-gold-soft)" : "#f2b8bd" }}>利益 {fmtJPY(it.profitJpy)}</span>
+                  </div>
                 </div>
               ))}
             </div>
