@@ -3572,6 +3572,24 @@ function ProductsPage() {
   // ★2026-08-04実装: 仕入れロット編集用。nullなら非表示、ロットオブジェクトがセットされていれば編集モーダルを開く
   const [editingBatch, setEditingBatch] = useState(null);
   const [returnTarget, setReturnTarget] = useState(null);
+  // ★2026-08-04実装: 商品番号で直接検索して編集する機能。販売済み(=通常の一覧には出ない)商品でも、
+  //   仕入原価が未登録・修正が必要な場合にここから編集できるようにする(2.30参照)
+  const [codeSearchText, setCodeSearchText] = useState("");
+  const [codeSearchResult, setCodeSearchResult] = useState(null); // null=未検索, []=該当なし, [obj,...]=結果
+  const [codeSearching, setCodeSearching] = useState(false);
+
+  const handleCodeSearch = async () => {
+    const code = codeSearchText.trim();
+    if (!code) { setCodeSearchResult(null); return; }
+    setCodeSearching(true);
+    const { data, error } = await supabase
+      .from("products")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .ilike("product_code", `%${code}%`);
+    setCodeSearching(false);
+    setCodeSearchResult(error ? [] : (data || []));
+  };
+
 
   const loadAll = useCallback(async () => {
     setError(null);
@@ -3700,6 +3718,7 @@ function ProductsPage() {
       if (res.warning) alert(res.warning);
       setModalProduct(null);
       loadAll();
+      if (codeSearchResult !== null) handleCodeSearch(); // 商品番号検索経由で開いていた場合、検索結果も更新
       return;
     }
 
@@ -3841,6 +3860,53 @@ function ProductsPage() {
 
       {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
       {products === null && !error && <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>}
+
+      {/* ★2026-08-04実装: 商品番号で直接検索して編集する機能。販売済み・返品済みなど、通常の一覧に
+          出てこない商品でも、ここから見つけて仕入原価を後から登録・修正できる(2.30参照) */}
+      {view === "list" && (
+        <div className="rounded-xl p-4 space-y-2" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+          <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+            商品番号で検索(販売済み・返品済みなど、下の一覧に出ない商品も含めて編集できます)
+          </p>
+          <div className="flex gap-2">
+            <input
+              type="text" value={codeSearchText}
+              onChange={(e) => setCodeSearchText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleCodeSearch(); }}
+              placeholder="例: S-0104"
+              className="flex-1 rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+            <button onClick={handleCodeSearch} disabled={codeSearching} className="rounded-lg px-4 py-2 text-sm shrink-0" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+              {codeSearching ? "検索中..." : "検索"}
+            </button>
+          </div>
+          {codeSearchResult !== null && (
+            codeSearchResult.length === 0 ? (
+              <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>該当する商品が見つかりませんでした</p>
+            ) : (
+              <div className="rounded-lg divide-y mt-1" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+                {codeSearchResult.map((p) => (
+                  <div key={p.id} className="flex items-center gap-3 px-3 py-2.5">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm truncate">{p.product_name || "(名称未設定)"} {p.size ? `- ${p.size}` : ""}</p>
+                      <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                        No.{p.product_code} ・ {p.status}{p.type === "sample" ? "・サンプル" : (p.created_via_sale ? "・受注(新規仕入対応)" : "・在庫")}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setModalProduct(p)}
+                      className="text-xs px-2.5 py-1.5 rounded-lg shrink-0"
+                      style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+                    >
+                      編集
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )
+          )}
+        </div>
+      )}
 
       {products !== null && view === "list" && (
         filteredProducts.length === 0 ? (
@@ -4332,6 +4398,42 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
   }); // [{ productId, product, unitPrice, isNewPurchase, orderConfirmed }]
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  // ★2026-08-04実装: 販売登録の明細から、その商品の仕入金額・仕入れロットを直接編集できるようにする(2.30参照)
+  const [costEditProduct, setCostEditProduct] = useState(null); // null=非表示, obj=編集対象
+  const [costEditLoading, setCostEditLoading] = useState(false);
+
+  const openCostEdit = async (productId) => {
+    setCostEditLoading(true);
+    const { data, error: fetchErr } = await supabase
+      .from("products")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .eq("id", productId)
+      .single();
+    setCostEditLoading(false);
+    if (fetchErr || !data) { alert("商品情報の取得に失敗しました"); return; }
+    setCostEditProduct(data);
+  };
+
+  const handleSaveCostEdit = async (form) => {
+    const res = await updateProductCore(form, costEditProduct);
+    if (!res.ok) { alert(res.message); return; }
+    if (res.warning) alert(res.warning);
+    setCostEditProduct(null);
+    // 商品を再取得し、明細内のこの商品の原価表示(JPY確定額)を最新化する
+    const { data: refreshed } = await supabase
+      .from("products")
+      .select("id,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .eq("id", form.id)
+      .single();
+    if (refreshed) {
+      setItems((prev) => prev.map((it) => (
+        it.productId === form.id
+          ? { ...it, product: { ...it.product, purchase_amount_jpy: refreshed.purchase_amount_jpy, shipping_jpy: refreshed.shipping_jpy, fee_jpy: refreshed.fee_jpy } }
+          : it
+      )));
+    }
+  };
+
   const [newPurchaseOpen, setNewPurchaseOpen] = useState(false);
   // ★2026-07-12実装: 商品追加は「新規仕入」をデフォルトの動線とし、
   //   既存在庫からの検索追加はこのフラグで開閉するサブの動線とする(2.23参照)
@@ -4574,6 +4676,13 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
                   className="w-24 rounded-lg px-2 py-1.5 text-xs bg-transparent shrink-0"
                   style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
                 />
+                {/* ★2026-08-04実装: この商品の仕入金額・仕入れロットを直接編集できるようにする(2.30参照) */}
+                <button
+                  type="button" onClick={() => openCostEdit(it.productId)} disabled={costEditLoading}
+                  className="text-xs shrink-0" style={{ color: "var(--mz-gold-soft)" }}
+                >
+                  仕入編集
+                </button>
                 <button type="button" onClick={() => removeItem(it.productId)} className="text-xs shrink-0" style={{ color: "#f2b8bd" }}>削除</button>
               </div>
             ))
@@ -4606,6 +4715,20 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
           batches={batches}
           onClose={() => setNewPurchaseOpen(false)}
           onCreated={handleProductCreated}
+        />
+      )}
+
+      {costEditProduct && (
+        <ProductFormModal
+          product={costEditProduct}
+          batches={batches}
+          onClose={() => setCostEditProduct(null)}
+          onSave={handleSaveCostEdit}
+          onCreateBatch={async (form) => {
+            const { data, error: batchErr } = await supabase.from("purchase_batches").insert(form).select().single();
+            if (batchErr || !data) return { ok: false, message: "ロットの登録に失敗しました" };
+            return { ok: true, batch: data };
+          }}
         />
       )}
     </div>
@@ -5207,6 +5330,23 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
   // ★2026-08-04実装: 「この商品で販売登録する」用。紐付いていない商品を選ぶと、
   //   その商品があらかじめ明細に入った状態でSaleFormModal(新規販売登録)を開く(2.30参照)
   const [linkingProduct, setLinkingProduct] = useState(null);
+  // ★2026-08-04実装: 「受注(新規仕入対応)」の商品で、既に販売済みになったもの(=このタブの
+  //   通常一覧には出てこない)も、商品番号で検索すれば状態を問わず編集できるようにする(2.30参照)
+  const [codeSearchText, setCodeSearchText] = useState("");
+  const [codeSearchResult, setCodeSearchResult] = useState(null);
+  const [codeSearching, setCodeSearching] = useState(false);
+
+  const handleCodeSearch = async () => {
+    const code = codeSearchText.trim();
+    if (!code) { setCodeSearchResult(null); return; }
+    setCodeSearching(true);
+    const { data, error } = await supabase
+      .from("products")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .ilike("product_code", `%${code}%`);
+    setCodeSearching(false);
+    setCodeSearchResult(error ? [] : (data || []));
+  };
 
   const loadAll = useCallback(async () => {
     const { data: productsData, error } = await supabase
@@ -5249,6 +5389,7 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
     if (res.warning) alert(res.warning);
     setModalProduct(null);
     loadAll();
+    if (codeSearchResult !== null) handleCodeSearch();
   };
 
   // ★2026-08-04実装: 販売登録(SaleFormModal)の保存後、この商品もあわせて一覧を再読み込みする
@@ -5266,6 +5407,51 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
         販売登録の「新規仕入で追加」で登録した商品(未販売分)の一覧です。仕入れロットの選択や、返金確定後の正しいCNY金額への修正はここから行えます。
         サンプル・在庫の一覧や他の販売登録の「在庫から追加」候補には出てきません。
       </p>
+
+      {/* ★2026-08-04実装: 既に販売済みになった「受注(新規仕入対応)」商品は、下の一覧には出てこないため、
+          商品番号検索から状態を問わず見つけて編集できるようにする(2.30参照) */}
+      <div className="rounded-xl p-4 space-y-2" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+        <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+          商品番号で検索(既に販売済みになったものも含めて編集できます)
+        </p>
+        <div className="flex gap-2">
+          <input
+            type="text" value={codeSearchText}
+            onChange={(e) => setCodeSearchText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleCodeSearch(); }}
+            placeholder="例: P-0006"
+            className="flex-1 rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+          <button onClick={handleCodeSearch} disabled={codeSearching} className="rounded-lg px-4 py-2 text-sm shrink-0" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+            {codeSearching ? "検索中..." : "検索"}
+          </button>
+        </div>
+        {codeSearchResult !== null && (
+          codeSearchResult.length === 0 ? (
+            <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>該当する商品が見つかりませんでした</p>
+          ) : (
+            <div className="rounded-lg divide-y mt-1" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+              {codeSearchResult.map((p) => (
+                <div key={p.id} className="flex items-center gap-3 px-3 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm truncate">{p.product_name || "(名称未設定)"} {p.size ? `- ${p.size}` : ""}</p>
+                    <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                      No.{p.product_code} ・ {p.status}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setModalProduct(p)}
+                    className="text-xs px-2.5 py-1.5 rounded-lg shrink-0"
+                    style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+                  >
+                    編集
+                  </button>
+                </div>
+              ))}
+            </div>
+          )
+        )}
+      </div>
 
       {products.length === 0 ? (
         <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>該当する商品はありません</p>
