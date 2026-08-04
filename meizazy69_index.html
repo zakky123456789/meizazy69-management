@@ -3368,6 +3368,10 @@ function ReturnFormModal({ sourceProduct, onClose, onSave }) {
 /* ---- 商品カード ---- */
 function ProductCard({ product, onEdit, onReturn, onDelete, onTogglePurpose }) {
   const costCny = (Number(product.purchase_amount_cny) || 0) + (Number(product.shipping_cny) || 0) + (Number(product.fee_cny) || 0);
+  // ★2026-08-04実装: JPY確定原価の内訳(商品本体代 / 手数料=送料+その他手数料)
+  const purchaseJpy = Number(product.purchase_amount_jpy) || 0;
+  const feeJpyTotal = (Number(product.shipping_jpy) || 0) + (Number(product.fee_jpy) || 0);
+  const costJpy = purchaseJpy + feeJpyTotal;
   const isSample = product.type === "sample";
   const isReturnedStock = !isSample && !!product.return_source_product_id;
   return (
@@ -3399,6 +3403,15 @@ function ProductCard({ product, onEdit, onReturn, onDelete, onTogglePurpose }) {
           {product.selling_price_jpy != null && <span>参考価格: {fmtJPY(product.selling_price_jpy)}</span>}
           <span>原価合計: {costCny.toFixed(2)} CNY</span>
         </div>
+        {/* ★2026-08-04実装: ウォレット消化で確定したJPY原価を、商品本体代と手数料(送料+その他手数料)に分けて表示。
+            未消化(まだ0円)の場合は表示しない */}
+        {costJpy > 0 && (
+          <div className="text-xs mt-0.5 flex flex-wrap gap-x-3" style={{ color: "var(--mz-gold-soft)" }}>
+            <span>本体: {fmtJPY(purchaseJpy)}</span>
+            <span>手数料: {fmtJPY(feeJpyTotal)}</span>
+            <span>原価合計(JPY): {fmtJPY(costJpy)}</span>
+          </div>
+        )}
       </div>
       <div className="flex flex-col gap-1.5 shrink-0 items-end">
         <button onClick={() => onEdit(product)} className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>編集</button>
