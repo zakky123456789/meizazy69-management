@@ -3992,7 +3992,7 @@ function ProductsPage() {
 
    実装済み範囲:
      ・既存の未販売商品(サンプル・在庫)を選択して販売登録、複数商品まとめて1回の取引として登録(sale_items)
-     ・消費税端数処理(1領収書につき1回、切り捨て)を反映した領収書自動作成
+     ・領収書自動作成(★2026-08-05変更: 消費税免税事業者のため税抜・消費税額の分割表示は撤廃し、税込合計金額のみを記載)
      ・販売一覧・削除(削除時は商品を「未販売」へ自動復元)、編集(明細差分反映)
      ・販売画面からの「新規仕入対応」(その場でproducts新規登録+ウォレット消化)
      ・領収書プレビュー・印刷/PDF保存(ReceiptPreviewModal, window.print())
@@ -4003,15 +4003,12 @@ function ProductsPage() {
 
 const ISSUER_INFO_DEFAULT = "〒012-0055\n秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
-/* ---- 消費税端数処理(インボイス制度準拠: 1領収書につき1回、切り捨て)
-   ※ 販売登録の単価入力は税込金額のため、税込合計から税抜金額を逆算する方式。
-      税抜金額 = 税込合計 ÷ 1.1 を小数点以下切り捨て(1領収書につき1回だけ計算)、
-      消費税額 = 税込合計 − 税抜金額。 ---- */
+/* ---- 領収書の金額計算(★2026-08-05変更: 消費税免税事業者のため、税抜・消費税額への分割をやめ、税込合計金額のみを扱う。
+   関数名・戻り値のキー(subtotal/tax/total)はそのまま据え置いているが、subtotalはtotalと同値・taxは常に0になる点に注意。
+   呼び出し側で内訳表示をしていた箇所は「合計金額」のみの表示に変更済み(2.3参照)。) ---- */
 function calcReceiptTotals(totalInclJpy) {
   const total = Math.round(Number(totalInclJpy) || 0);
-  const subtotal = Math.floor(total / 1.1);
-  const tax = total - subtotal;
-  return { subtotal, tax, total };
+  return { subtotal: total, tax: 0, total };
 }
 
 /* ---- 明細1件分の利益計算用の金額(★2026-08-05: 消費税免税事業者のため、税抜換算せず税込単価をそのまま使用するよう変更。
@@ -4759,9 +4756,7 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
 
         {items.length > 0 && (
           <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: "var(--mz-surface-hover)" }}>
-            <div className="flex justify-between"><span style={{ color: "var(--mz-ink-muted)" }}>小計(税抜)</span><span>{fmtJPY(totals.subtotal)}</span></div>
-            <div className="flex justify-between"><span style={{ color: "var(--mz-ink-muted)" }}>消費税(10%・切り捨て)</span><span>{fmtJPY(totals.tax)}</span></div>
-            <div className="flex justify-between font-medium"><span>合計(税込)</span><span style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(totals.total)}</span></div>
+            <div className="flex justify-between font-medium"><span>合計金額</span><span style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(totals.total)}</span></div>
           </div>
         )}
 
@@ -4920,8 +4915,6 @@ function ReceiptPreviewModal({ sale, onClose }) {
               )}
 
               <div className="text-xs space-y-1 mb-6" style={{ borderTop: "1px solid #ccc", paddingTop: "8px" }}>
-                <div className="flex justify-between"><span>小計</span><span>{fmtJPY(receipt.subtotal_jpy)}</span></div>
-                <div className="flex justify-between"><span>消費税(10%)</span><span>{fmtJPY(receipt.tax_jpy)}</span></div>
                 <div className="flex justify-between font-medium"><span>合計</span><span>{fmtJPY(receipt.total_jpy)}</span></div>
               </div>
 
@@ -5475,9 +5468,7 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
           </div>
           <div className="text-xs space-y-1">
             <div className="flex justify-between"><span style={{ color: "var(--mz-ink-muted)" }}>選択中</span><span>{selectedSales.length}件・{allItems.length}点</span></div>
-            <div className="flex justify-between"><span style={{ color: "var(--mz-ink-muted)" }}>小計(税抜)</span><span>{fmtJPY(totals.subtotal)}</span></div>
-            <div className="flex justify-between"><span style={{ color: "var(--mz-ink-muted)" }}>消費税(10%)</span><span>{fmtJPY(totals.tax)}</span></div>
-            <div className="flex justify-between font-medium"><span>合計(税込)</span><span style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(totals.total)}</span></div>
+            <div className="flex justify-between font-medium"><span>合計金額</span><span style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(totals.total)}</span></div>
           </div>
         </div>
       )}
