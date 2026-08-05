@@ -7465,8 +7465,9 @@ function ContractorInvoicesPage() {
       const totalExpenses = (expenseData || []).reduce((sum, e) => sum + (Number(e.amount_incl_tax) || 0), 0);
       const grossProfit = totalSales - totalPurchaseCost - totalExpenses;
 
+      // target_monthはDB側がdate型のため、"YYYY-MM"のままではなく月初日("YYYY-MM-01")で保存・照会する(monthStartを流用)
       const patch = {
-        target_month: calcTargetMonth,
+        target_month: monthStart,
         total_sales_jpy: totalSales,
         total_purchase_cost_jpy: totalPurchaseCost,
         total_general_expenses_jpy: totalExpenses,
@@ -7477,7 +7478,7 @@ function ContractorInvoicesPage() {
       const { data: existing, error: existingError } = await supabase
         .from("monthly_profits")
         .select("id")
-        .eq("target_month", calcTargetMonth)
+        .eq("target_month", monthStart)
         .maybeSingle();
       if (existingError) { setProfitError("既存の月次損益データの確認に失敗しました"); setCalculating(false); return; }
 
@@ -7505,11 +7506,13 @@ function ContractorInvoicesPage() {
     setPreviewing(true);
     setInvoicePreview(null);
     try {
+      // target_month(contractor_invoices/monthly_profits共にdate型)は"YYYY-MM"のままでは照会できないため、月初日に変換する
+      const issueTargetMonthDate = `${issueTargetMonth}-01`;
       const { data: existing, error: existingError } = await supabase
         .from("contractor_invoices")
         .select("id,invoice_number")
         .eq("staff_id", issueStaffId)
-        .eq("target_month", issueTargetMonth)
+        .eq("target_month", issueTargetMonthDate)
         .maybeSingle();
       if (existingError) { setInvoicePreview({ error: "既存請求書の確認に失敗しました" }); return; }
       if (existing) {
@@ -7520,7 +7523,7 @@ function ContractorInvoicesPage() {
       const { data: mp, error: mpError } = await supabase
         .from("monthly_profits")
         .select("id,target_month,gross_profit_jpy")
-        .eq("target_month", issueTargetMonth)
+        .eq("target_month", issueTargetMonthDate)
         .maybeSingle();
       if (mpError) { setInvoicePreview({ error: "月次損益データの取得に失敗しました" }); return; }
       if (!mp) { setInvoicePreview({ error: "この対象月の月次損益がまだ集計されていません。先に「月次損益」タブで集計してください。" }); return; }
@@ -7545,7 +7548,7 @@ function ContractorInvoicesPage() {
       const { error } = await supabase.from("contractor_invoices").insert({
         invoice_number: invoiceNumber,
         staff_id: issueStaffId,
-        target_month: issueTargetMonth,
+        target_month: `${issueTargetMonth}-01`,
         monthly_profit_id: invoicePreview.monthlyProfit.id,
         rate_percent: invoicePreview.rate.rate_percent,
         amount_jpy: invoicePreview.amount,
