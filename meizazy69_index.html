@@ -4014,9 +4014,10 @@ function calcReceiptTotals(totalInclJpy) {
   return { subtotal, tax, total };
 }
 
-/* ---- 明細1件分の税抜金額(利益計算用。税込単価を1.1で割り、小数点以下切り捨て) ---- */
+/* ---- 明細1件分の利益計算用の金額(★2026-08-05: 消費税免税事業者のため、税抜換算せず税込単価をそのまま使用するよう変更。
+   関数名・呼び出し箇所はitemPretaxJpyのまま据え置くが、中身は単純にunitPriceInclJpyを返すだけになっている点に注意) ---- */
 function itemPretaxJpy(unitPriceInclJpy) {
-  return Math.floor((Number(unitPriceInclJpy) || 0) / 1.1);
+  return Math.round(Number(unitPriceInclJpy) || 0);
 }
 
 /* ---- 商品の原価合計(仕入代+送料+手数料、JPY確定額) ---- */
