@@ -3744,11 +3744,32 @@ function ProductsPage() {
   };
 
   const handleDeleteProduct = async (product) => {
+    // ★2026-08-04実装: catalog_items.product_idはON DELETE RESTRICTのため、掲載中のカタログが
+    //   あると削除が失敗する。事前にどのカタログに載っているか調べ、外した上で削除するか
+    //   まとめて確認できるようにする(2.31参照)
+    const { data: catalogRows, error: catalogErr } = await supabase
+      .from("catalog_items")
+      .select("id,catalogs(name)")
+      .eq("product_id", product.id);
+    if (catalogErr) { alert("カタログ掲載状況の確認に失敗しました"); return; }
+
+    const catalogNames = (catalogRows || []).map((r) => (r.catalogs ? r.catalogs.name : null)).filter(Boolean);
     const hasConsumption = consumedProductIds.has(product.id);
-    const confirmMsg = hasConsumption
-      ? "この商品を削除しますか?仕入れにかかったウォレット消化額(CNY)は、消化元のチャージ残高へ自動的に払い戻されます。"
-      : "この商品を削除しますか?";
+
+    let confirmMsg;
+    if (catalogNames.length > 0) {
+      confirmMsg = `この商品は以下のカタログに掲載されています:\n・${catalogNames.join("\n・")}\n\nカタログから外した上で削除しますか?`;
+    } else {
+      confirmMsg = hasConsumption
+        ? "この商品を削除しますか?仕入れにかかったウォレット消化額(CNY)は、消化元のチャージ残高へ自動的に払い戻されます。"
+        : "この商品を削除しますか?";
+    }
     if (!window.confirm(confirmMsg)) return;
+
+    if (catalogRows && catalogRows.length > 0) {
+      const { error: delCatalogErr } = await supabase.from("catalog_items").delete().eq("product_id", product.id);
+      if (delCatalogErr) { alert("カタログからの削除に失敗しました"); return; }
+    }
 
     if (hasConsumption) {
       const reverseRes = await reverseWalletConsumption(product.id);
@@ -3911,6 +3932,13 @@ function ProductsPage() {
                       style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
                     >
                       編集
+                    </button>
+                    <button
+                      onClick={async () => { await handleDeleteProduct(p); handleCodeSearch(); }}
+                      className="text-xs px-2.5 py-1.5 rounded-lg shrink-0"
+                      style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}
+                    >
+                      削除
                     </button>
                   </div>
                 ))}
