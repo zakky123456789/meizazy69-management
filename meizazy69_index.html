@@ -5101,6 +5101,11 @@ function ReceiptPreviewModal({ sale, onClose }) {
                   <p className="text-base mt-5" style={{ borderBottom: "1px solid #1a1710", display: "inline-block", paddingBottom: "2px" }}>
                     {receipt.recipient_name || clubName} {receipt.honorific || "様"}
                   </p>
+                  <div className="mt-4">
+                    <p className="font-display" style={{ fontSize: "24px" }}>{fmtJPY(receipt.total_jpy)} -</p>
+                    <p className="text-xs mt-1">但し {receipt.memo || "衣装代"} として</p>
+                    <p className="text-xs mt-1">{receipt.payment_type === "振込" ? "振込にて受領しました。" : "現金にて受領しました。"}</p>
+                  </div>
                 </div>
                 <div className="text-right text-xs" style={{ maxWidth: "220px" }}>
                   <p>No. {receipt.receipt_number}</p>
@@ -5111,12 +5116,6 @@ function ReceiptPreviewModal({ sale, onClose }) {
                     <p className="whitespace-pre-line" style={{ color: "#555" }}>{receipt.issuer_info}</p>
                   </div>
                 </div>
-              </div>
-
-              <div className="mb-6">
-                <p className="font-display" style={{ fontSize: "24px" }}>{fmtJPY(receipt.total_jpy)} -</p>
-                <p className="text-xs mt-1">但し {receipt.memo || "衣装代"} として</p>
-                <p className="text-xs mt-1">{receipt.payment_type === "振込" ? "振込にて受領しました。" : "現金にて受領しました。"}</p>
               </div>
 
               {items.length > 0 && (
