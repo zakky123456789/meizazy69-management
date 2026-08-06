@@ -5096,22 +5096,21 @@ function ReceiptPreviewModal({ sale, onClose }) {
             {/* 印刷対象領域(印刷時はここだけが用紙に出力される) */}
             <div className="mz-receipt-print-area rounded-xl p-6" style={{ background: "#ffffff", color: "#1a1710" }}>
               <div className="flex items-start justify-between mb-6">
-                <h3 className="font-display" style={{ fontSize: "22px" }}>領収書</h3>
+                <div>
+                  <h3 className="font-display" style={{ fontSize: "22px" }}>領収書</h3>
+                  <p className="text-base mt-5" style={{ borderBottom: "1px solid #1a1710", display: "inline-block", paddingBottom: "2px" }}>
+                    {receipt.recipient_name || clubName} {receipt.honorific || "様"}
+                  </p>
+                </div>
                 <div className="text-right text-xs" style={{ maxWidth: "220px" }}>
                   <p>No. {receipt.receipt_number}</p>
                   <p>受領日: {receipt.received_date || receipt.issue_date}</p>
                   <p>発行日: {receipt.issue_date}</p>
-                  <div className="mt-3 pt-2" style={{ borderTop: "1px solid #ccc" }}>
+                  <div className="mt-3 pt-2 text-left" style={{ borderTop: "1px solid #ccc" }}>
                     <p className="mb-1" style={{ color: "#888" }}>発行者</p>
                     <p className="whitespace-pre-line" style={{ color: "#555" }}>{receipt.issuer_info}</p>
                   </div>
                 </div>
-              </div>
-
-              <div className="mb-6">
-                <p className="text-base" style={{ borderBottom: "1px solid #1a1710", display: "inline-block", paddingBottom: "2px" }}>
-                  {receipt.recipient_name || clubName} {receipt.honorific || "様"}
-                </p>
               </div>
 
               <div className="mb-6">
