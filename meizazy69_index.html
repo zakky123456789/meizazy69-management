@@ -4030,20 +4030,24 @@ function productLabel(p) {
   return label;
 }
 
-/* ---- 領収書番号の自動採番("2026-0001"形式、年度でリセット) ---- */
+/* ---- 領収書番号の自動採番("2026-0001"形式、年度でリセット) ----
+   ★2026-08-06実装: 他システムで先に発行した分と番号を合わせたい等のケースに対応するため、
+   receipt_number_overrides(year, last_number)に手動で基準点を設定できるようにした。
+   実際の採番は「receipts内の既存最大値」と「overridesの値」のうち大きい方を採用し、その+1を返す。 */
 async function generateReceiptNumber(dateStr) {
   const year = (dateStr || todayISO()).slice(0, 4);
-  const { data, error } = await supabase
-    .from("receipts")
-    .select("receipt_number")
-    .ilike("receipt_number", `${year}-%`);
-  if (error || !data) return `${year}-0001`;
-  let maxNum = 0;
-  const re = new RegExp(`^${year}-(\\d+)$`);
-  data.forEach((r) => {
-    const m = re.exec(r.receipt_number || "");
-    if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
-  });
+  const [{ data, error }, { data: overrideRow }] = await Promise.all([
+    supabase.from("receipts").select("receipt_number").ilike("receipt_number", `${year}-%`),
+    supabase.from("receipt_number_overrides").select("last_number").eq("year", year).maybeSingle(),
+  ]);
+  let maxNum = overrideRow ? overrideRow.last_number : 0;
+  if (!error && data) {
+    const re = new RegExp(`^${year}-(\\d+)$`);
+    data.forEach((r) => {
+      const m = re.exec(r.receipt_number || "");
+      if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10));
+    });
+  }
   return `${year}-${String(maxNum + 1).padStart(4, "0")}`;
 }
 
