@@ -4429,6 +4429,11 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
   );
   const [honorific, setHonorific] = useState(sale && sale.receipts ? (sale.receipts.honorific || "様") : "様");
   const [memo, setMemo] = useState(sale && sale.receipts ? (sale.receipts.memo || "衣装代") : "衣装代");
+  // ★2026-08-06実装: 受領日(発行日とは別に、実際に代金を受け取った日)・受領方法(現金/振込)
+  const [receivedDate, setReceivedDate] = useState(
+    sale && sale.receipts && sale.receipts.received_date ? sale.receipts.received_date : (sale ? sale.transaction_date : todayISO())
+  );
+  const [paymentType, setPaymentType] = useState(sale && sale.receipts ? (sale.receipts.payment_type || "現金") : "現金");
   const [unsoldProducts, setUnsoldProducts] = useState(null); // null = 読み込み中
   const [searchText, setSearchText] = useState("");
   const [items, setItems] = useState(() => {
@@ -4615,6 +4620,8 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
       recipient_name: recipientName,
       honorific: honorific || "様",
       memo: memo.trim() || "衣装代",
+      received_date: receivedDate || transactionDate,
+      payment_type: paymentType || "現金",
       items: items.map((it) => ({
         product_id: it.productId,
         unit_price_jpy: parseFloat(it.unitPrice),
@@ -4692,6 +4699,21 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>受領日(領収書用)</label>
+            <input type="date" value={receivedDate} onChange={(e) => setReceivedDate(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>受領方法</label>
+            <select value={paymentType} onChange={(e) => setPaymentType(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+              <option value="現金">現金</option>
+              <option value="振込">振込</option>
+            </select>
+          </div>
         </div>
 
         <div className="pt-1" style={{ borderTop: "1px solid var(--mz-border)" }} />
@@ -4868,11 +4890,13 @@ function ReceiptPreviewModal({ sale, onClose }) {
   const [receipt, setReceipt] = useState(null); // null=読込中, false=見つからない
   const [mergedItems, setMergedItems] = useState(null); // まとめ領収書の場合のみセット(複数sale分の明細)
   const [error, setError] = useState(null);
-  // ★2026-08-06実装: プレビュー画面でも宛名・敬称・但し書きをその場で修正できるようにする
+  // ★2026-08-06実装: プレビュー画面でも宛名・敬称・但し書き・受領日・受領方法をその場で修正できるようにする
   const [editing, setEditing] = useState(false);
   const [editRecipientName, setEditRecipientName] = useState("");
   const [editHonorific, setEditHonorific] = useState("様");
   const [editMemo, setEditMemo] = useState("衣装代");
+  const [editReceivedDate, setEditReceivedDate] = useState("");
+  const [editPaymentType, setEditPaymentType] = useState("現金");
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState(null);
 
@@ -4882,8 +4906,8 @@ function ReceiptPreviewModal({ sale, onClose }) {
       // ★2026-07-19実装: 個別発行・まとめ発行のどちらにも対応するため、まず sale.receipt_id から領収書を取得する
       //   (旧データ互換のため receipt_id が無い場合のみ sale_id での逆引きにフォールバック)
       const receiptQuery = sale.receipt_id
-        ? supabase.from("receipts").select("id,receipt_number,issue_date,recipient_name,honorific,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info").eq("id", sale.receipt_id).maybeSingle()
-        : supabase.from("receipts").select("id,receipt_number,issue_date,recipient_name,honorific,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info").eq("sale_id", sale.id).maybeSingle();
+        ? supabase.from("receipts").select("id,receipt_number,issue_date,recipient_name,honorific,memo,received_date,payment_type,subtotal_jpy,tax_jpy,total_jpy,issuer_info").eq("id", sale.receipt_id).maybeSingle()
+        : supabase.from("receipts").select("id,receipt_number,issue_date,recipient_name,honorific,memo,received_date,payment_type,subtotal_jpy,tax_jpy,total_jpy,issuer_info").eq("sale_id", sale.id).maybeSingle();
 
       const { data, error } = await receiptQuery;
       if (cancelled) return;
@@ -4892,6 +4916,8 @@ function ReceiptPreviewModal({ sale, onClose }) {
       setEditRecipientName(data.recipient_name || "");
       setEditHonorific(data.honorific || "様");
       setEditMemo(data.memo || "衣装代");
+      setEditReceivedDate(data.received_date || data.issue_date);
+      setEditPaymentType(data.payment_type || "現金");
 
       // この領収書が複数の販売記録(まとめ発行)に紐づいているか確認する
       const { data: links, error: linksErr } = await supabase.from("receipt_sales").select("sale_id").eq("receipt_id", data.id);
@@ -4918,6 +4944,7 @@ function ReceiptPreviewModal({ sale, onClose }) {
     if (!receipt) return;
     setEditError(null);
     if (!editRecipientName.trim()) { setEditError("宛名を入力してください"); return; }
+    if (!editReceivedDate) { setEditError("受領日を入力してください"); return; }
     setSavingEdit(true);
     const { data, error } = await supabase
       .from("receipts")
@@ -4925,9 +4952,11 @@ function ReceiptPreviewModal({ sale, onClose }) {
         recipient_name: editRecipientName.trim(),
         honorific: editHonorific,
         memo: editMemo.trim() || "衣装代",
+        received_date: editReceivedDate,
+        payment_type: editPaymentType,
       })
       .eq("id", receipt.id)
-      .select("id,receipt_number,issue_date,recipient_name,honorific,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info")
+      .select("id,receipt_number,issue_date,recipient_name,honorific,memo,received_date,payment_type,subtotal_jpy,tax_jpy,total_jpy,issuer_info")
       .single();
     setSavingEdit(false);
     if (error || !data) { setEditError("保存に失敗しました"); return; }
@@ -4965,7 +4994,7 @@ function ReceiptPreviewModal({ sale, onClose }) {
                   className="text-xs px-2.5 py-1.5 rounded-lg"
                   style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
                 >
-                  宛名・但し書きを編集
+                  宛名・受領日など編集
                 </button>
               ) : (
                 <div className="rounded-xl p-4 space-y-3" style={{ background: "var(--mz-surface-hover)", border: "1px solid var(--mz-border)" }}>
@@ -4999,6 +5028,24 @@ function ReceiptPreviewModal({ sale, onClose }) {
                       style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
                     />
                   </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>受領日</label>
+                      <input
+                        type="date" value={editReceivedDate} onChange={(e) => setEditReceivedDate(e.target.value)}
+                        className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+                        style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>受領方法</label>
+                      <select value={editPaymentType} onChange={(e) => setEditPaymentType(e.target.value)}
+                        className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+                        <option value="現金">現金</option>
+                        <option value="振込">振込</option>
+                      </select>
+                    </div>
+                  </div>
                   <div className="flex gap-2">
                     <button
                       type="button" onClick={handleSaveEdit} disabled={savingEdit}
@@ -5015,6 +5062,8 @@ function ReceiptPreviewModal({ sale, onClose }) {
                         setEditRecipientName(receipt.recipient_name || "");
                         setEditHonorific(receipt.honorific || "様");
                         setEditMemo(receipt.memo || "衣装代");
+                        setEditReceivedDate(receipt.received_date || receipt.issue_date);
+                        setEditPaymentType(receipt.payment_type || "現金");
                       }}
                       className="flex-1 rounded-lg py-2 text-sm"
                       style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
@@ -5032,7 +5081,8 @@ function ReceiptPreviewModal({ sale, onClose }) {
                 <h3 className="font-display" style={{ fontSize: "22px" }}>領収書</h3>
                 <div className="text-right text-xs">
                   <p>No. {receipt.receipt_number}</p>
-                  <p>{receipt.issue_date}</p>
+                  <p>受領日: {receipt.received_date || receipt.issue_date}</p>
+                  <p>発行日: {receipt.issue_date}</p>
                 </div>
               </div>
 
@@ -5045,6 +5095,7 @@ function ReceiptPreviewModal({ sale, onClose }) {
               <div className="mb-6">
                 <p className="font-display" style={{ fontSize: "24px" }}>{fmtJPY(receipt.total_jpy)} -</p>
                 <p className="text-xs mt-1">但し {receipt.memo || "衣装代"} として</p>
+                <p className="text-xs mt-1">{receipt.payment_type === "振込" ? "振込にて受領しました。" : "現金にて受領しました。"}</p>
               </div>
 
               {items.length > 0 && (
@@ -5068,7 +5119,7 @@ function ReceiptPreviewModal({ sale, onClose }) {
 
               <div className="text-xs space-y-1 mb-6" style={{ borderTop: "1px solid #ccc", paddingTop: "8px" }}>
                 <div className="flex justify-between"><span>合計点数</span><span>{items.length}点</span></div>
-                <div className="flex justify-between font-medium"><span>合計</span><span>{fmtJPY(receipt.total_jpy)}</span></div>
+                <div className="flex justify-between font-medium"><span>合計金額</span><span>{fmtJPY(receipt.total_jpy)}</span></div>
               </div>
 
               <div className="text-xs whitespace-pre-line" style={{ color: "#555" }}>
@@ -5477,6 +5528,8 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
   const [recipientName, setRecipientName] = useState("");
   const [honorific, setHonorific] = useState("様");
   const [memo, setMemo] = useState("衣装代");
+  const [receivedDate, setReceivedDate] = useState(todayISO());
+  const [paymentType, setPaymentType] = useState("現金");
   const [issuing, setIssuing] = useState(false);
   const [error, setError] = useState(null);
 
@@ -5532,6 +5585,8 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
         recipient_name: recipientName.trim(),
         honorific: honorific,
         memo: memo.trim() || "衣装代",
+        received_date: receivedDate || issueDate,
+        payment_type: paymentType,
         subtotal_jpy: totals.subtotal,
         tax_jpy: totals.tax,
         total_jpy: totals.total,
@@ -5575,6 +5630,8 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
     setRecipientName("");
     setHonorific("様");
     setMemo("衣装代");
+    setReceivedDate(todayISO());
+    setPaymentType("現金");
     onIssued(previewSale);
   };
 
@@ -5641,6 +5698,21 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
               placeholder="衣装代"
               className="w-full rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
             />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>受領日</label>
+              <input type="date" value={receivedDate} onChange={(e) => setReceivedDate(e.target.value)}
+                className="w-full rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+            </div>
+            <div>
+              <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>受領方法</label>
+              <select value={paymentType} onChange={(e) => setPaymentType(e.target.value)}
+                className="w-full rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+                <option value="現金">現金</option>
+                <option value="振込">振込</option>
+              </select>
+            </div>
           </div>
           <div className="text-xs space-y-1">
             <div className="flex justify-between"><span style={{ color: "var(--mz-ink-muted)" }}>選択中</span><span>{selectedSales.length}件・{allItems.length}点</span></div>
@@ -5964,6 +6036,8 @@ function SalesPage() {
           recipient_name: form.recipient_name,
           honorific: form.honorific || "様",
           memo: form.memo || "衣装代",
+          received_date: form.received_date || form.transaction_date,
+          payment_type: form.payment_type || "現金",
           subtotal_jpy: totals.subtotal,
           tax_jpy: totals.tax,
           total_jpy: totals.total,
@@ -6034,6 +6108,8 @@ function SalesPage() {
         recipient_name: form.recipient_name,
         honorific: form.honorific || "様",
         memo: form.memo || "衣装代",
+        received_date: form.received_date || form.transaction_date,
+        payment_type: form.payment_type || "現金",
         subtotal_jpy: totals.subtotal,
         tax_jpy: totals.tax,
         total_jpy: totals.total,
