@@ -4421,6 +4421,14 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
   const [hostClubId, setHostClubId] = useState(sale ? sale.host_club_id : "");
   const [hosts, setHosts] = useState([]);
   const [hostId, setHostId] = useState(sale ? (sale.host_id || "") : "");
+  // ★2026-08-06実装: 領収書の宛名・敬称・但し書きを販売登録時点で編集できるようにする
+  //   (編集時は既存の領収書の値を初期値にし、以後は自動追随させない。新規時はホスト/クラブ名を自動提案する)
+  const [recipientNameTouched, setRecipientNameTouched] = useState(isEdit);
+  const [recipientNameInput, setRecipientNameInput] = useState(
+    sale && sale.receipts ? (sale.receipts.recipient_name || "") : ""
+  );
+  const [honorific, setHonorific] = useState(sale && sale.receipts ? (sale.receipts.honorific || "様") : "様");
+  const [memo, setMemo] = useState(sale && sale.receipts ? (sale.receipts.memo || "衣装代") : "衣装代");
   const [unsoldProducts, setUnsoldProducts] = useState(null); // null = 読み込み中
   const [searchText, setSearchText] = useState("");
   const [items, setItems] = useState(() => {
@@ -4536,6 +4544,14 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
     return () => { cancelled = true; };
   }, [hostClubId]);
 
+  // ★2026-08-06実装: 宛名を手動編集していない場合のみ、ホスト/クラブ選択に合わせて宛名候補を自動提案する
+  useEffect(() => {
+    if (recipientNameTouched) return;
+    const club = clubs.find((c) => c.id === hostClubId);
+    const host = hosts.find((h) => h.id === hostId);
+    setRecipientNameInput(host ? host.name : (club ? club.name : ""));
+  }, [hostClubId, hostId, hosts, clubs, recipientNameTouched]);
+
   const selectedIds = useMemo(() => new Set(items.map((it) => it.productId)), [items]);
 
   const candidates = useMemo(() => {
@@ -4587,7 +4603,8 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
 
     const club = clubs.find((c) => c.id === hostClubId);
     const host = hosts.find((h) => h.id === hostId);
-    const recipientName = host ? host.name : (club ? club.name : "");
+    // ★2026-08-06実装: 手入力があればそれを優先し、未入力ならホスト/クラブ名にフォールバックする
+    const recipientName = recipientNameInput.trim() || (host ? host.name : (club ? club.name : ""));
 
     setSaving(true);
     const ok = await onSave({
@@ -4596,6 +4613,8 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
       host_club_id: hostClubId,
       host_id: hostId || null,
       recipient_name: recipientName,
+      honorific: honorific || "様",
+      memo: memo.trim() || "衣装代",
       items: items.map((it) => ({
         product_id: it.productId,
         unit_price_jpy: parseFloat(it.unitPrice),
@@ -4642,6 +4661,37 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
             <option value="">指定なし(クラブ宛)</option>
             {hosts.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
           </select>
+        </div>
+
+        {/* ★2026-08-06実装: 領収書の宛名・敬称・但し書き。未編集ならホスト/クラブ名が自動で入る */}
+        <div className="grid grid-cols-3 gap-3">
+          <div className="col-span-2">
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>宛名(領収書用)</label>
+            <input
+              type="text" value={recipientNameInput}
+              onChange={(e) => { setRecipientNameTouched(true); setRecipientNameInput(e.target.value); }}
+              placeholder="未入力ならホスト/クラブ名が自動で入ります"
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>敬称</label>
+            <select value={honorific} onChange={(e) => setHonorific(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+              <option value="様">様</option>
+              <option value="御中">御中</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>但し書き(領収書用)</label>
+          <input
+            type="text" value={memo} onChange={(e) => setMemo(e.target.value)}
+            placeholder="衣装代"
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
         </div>
 
         <div className="pt-1" style={{ borderTop: "1px solid var(--mz-border)" }} />
@@ -4818,6 +4868,13 @@ function ReceiptPreviewModal({ sale, onClose }) {
   const [receipt, setReceipt] = useState(null); // null=読込中, false=見つからない
   const [mergedItems, setMergedItems] = useState(null); // まとめ領収書の場合のみセット(複数sale分の明細)
   const [error, setError] = useState(null);
+  // ★2026-08-06実装: プレビュー画面でも宛名・敬称・但し書きをその場で修正できるようにする
+  const [editing, setEditing] = useState(false);
+  const [editRecipientName, setEditRecipientName] = useState("");
+  const [editHonorific, setEditHonorific] = useState("様");
+  const [editMemo, setEditMemo] = useState("衣装代");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -4825,13 +4882,16 @@ function ReceiptPreviewModal({ sale, onClose }) {
       // ★2026-07-19実装: 個別発行・まとめ発行のどちらにも対応するため、まず sale.receipt_id から領収書を取得する
       //   (旧データ互換のため receipt_id が無い場合のみ sale_id での逆引きにフォールバック)
       const receiptQuery = sale.receipt_id
-        ? supabase.from("receipts").select("id,receipt_number,issue_date,recipient_name,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info").eq("id", sale.receipt_id).maybeSingle()
-        : supabase.from("receipts").select("id,receipt_number,issue_date,recipient_name,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info").eq("sale_id", sale.id).maybeSingle();
+        ? supabase.from("receipts").select("id,receipt_number,issue_date,recipient_name,honorific,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info").eq("id", sale.receipt_id).maybeSingle()
+        : supabase.from("receipts").select("id,receipt_number,issue_date,recipient_name,honorific,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info").eq("sale_id", sale.id).maybeSingle();
 
       const { data, error } = await receiptQuery;
       if (cancelled) return;
       if (error || !data) { setError("領収書の取得に失敗しました"); setReceipt(false); return; }
       setReceipt(data);
+      setEditRecipientName(data.recipient_name || "");
+      setEditHonorific(data.honorific || "様");
+      setEditMemo(data.memo || "衣装代");
 
       // この領収書が複数の販売記録(まとめ発行)に紐づいているか確認する
       const { data: links, error: linksErr } = await supabase.from("receipt_sales").select("sale_id").eq("receipt_id", data.id);
@@ -4851,6 +4911,29 @@ function ReceiptPreviewModal({ sale, onClose }) {
 
   const items = mergedItems !== null ? mergedItems : (sale.sale_items || []);
   const clubName = sale.host_clubs ? sale.host_clubs.name : "-";
+
+  // ★2026-08-06実装: プレビュー画面での宛名・敬称・但し書きの修正をreceipts行へ直接保存する
+  //   (receipt.idを直接指定するため、個別発行・まとめ発行のどちらでも同じロジックで動く)
+  const handleSaveEdit = async () => {
+    if (!receipt) return;
+    setEditError(null);
+    if (!editRecipientName.trim()) { setEditError("宛名を入力してください"); return; }
+    setSavingEdit(true);
+    const { data, error } = await supabase
+      .from("receipts")
+      .update({
+        recipient_name: editRecipientName.trim(),
+        honorific: editHonorific,
+        memo: editMemo.trim() || "衣装代",
+      })
+      .eq("id", receipt.id)
+      .select("id,receipt_number,issue_date,recipient_name,honorific,memo,subtotal_jpy,tax_jpy,total_jpy,issuer_info")
+      .single();
+    setSavingEdit(false);
+    if (error || !data) { setEditError("保存に失敗しました"); return; }
+    setReceipt(data);
+    setEditing(false);
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
@@ -4874,6 +4957,75 @@ function ReceiptPreviewModal({ sale, onClose }) {
 
         {receipt && (
           <>
+            {/* ★2026-08-06実装: 宛名・敬称・但し書きのその場編集(印刷対象外) */}
+            <div className="mz-no-print">
+              {!editing ? (
+                <button
+                  type="button" onClick={() => setEditing(true)}
+                  className="text-xs px-2.5 py-1.5 rounded-lg"
+                  style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+                >
+                  宛名・但し書きを編集
+                </button>
+              ) : (
+                <div className="rounded-xl p-4 space-y-3" style={{ background: "var(--mz-surface-hover)", border: "1px solid var(--mz-border)" }}>
+                  {editError && (
+                    <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{editError}</p>
+                  )}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="col-span-2">
+                      <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>宛名</label>
+                      <input
+                        type="text" value={editRecipientName} onChange={(e) => setEditRecipientName(e.target.value)}
+                        className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+                        style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>敬称</label>
+                      <select value={editHonorific} onChange={(e) => setEditHonorific(e.target.value)}
+                        className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+                        <option value="様">様</option>
+                        <option value="御中">御中</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>但し書き</label>
+                    <input
+                      type="text" value={editMemo} onChange={(e) => setEditMemo(e.target.value)}
+                      placeholder="衣装代"
+                      className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+                      style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button" onClick={handleSaveEdit} disabled={savingEdit}
+                      className="flex-1 rounded-lg py-2 text-sm font-medium disabled:opacity-50"
+                      style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+                    >
+                      {savingEdit ? "保存中..." : "保存"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditing(false);
+                        setEditError(null);
+                        setEditRecipientName(receipt.recipient_name || "");
+                        setEditHonorific(receipt.honorific || "様");
+                        setEditMemo(receipt.memo || "衣装代");
+                      }}
+                      className="flex-1 rounded-lg py-2 text-sm"
+                      style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+                    >
+                      キャンセル
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* 印刷対象領域(印刷時はここだけが用紙に出力される) */}
             <div className="mz-receipt-print-area rounded-xl p-6" style={{ background: "#ffffff", color: "#1a1710" }}>
               <div className="flex items-start justify-between mb-6">
@@ -4886,7 +5038,7 @@ function ReceiptPreviewModal({ sale, onClose }) {
 
               <div className="mb-6">
                 <p className="text-base" style={{ borderBottom: "1px solid #1a1710", display: "inline-block", paddingBottom: "2px" }}>
-                  {receipt.recipient_name || clubName} 様
+                  {receipt.recipient_name || clubName} {receipt.honorific || "様"}
                 </p>
               </div>
 
@@ -4915,6 +5067,7 @@ function ReceiptPreviewModal({ sale, onClose }) {
               )}
 
               <div className="text-xs space-y-1 mb-6" style={{ borderTop: "1px solid #ccc", paddingTop: "8px" }}>
+                <div className="flex justify-between"><span>合計点数</span><span>{items.length}点</span></div>
                 <div className="flex justify-between font-medium"><span>合計</span><span>{fmtJPY(receipt.total_jpy)}</span></div>
               </div>
 
@@ -5322,6 +5475,8 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
   const [clubFilter, setClubFilter] = useState("");
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [recipientName, setRecipientName] = useState("");
+  const [honorific, setHonorific] = useState("様");
+  const [memo, setMemo] = useState("衣装代");
   const [issuing, setIssuing] = useState(false);
   const [error, setError] = useState(null);
 
@@ -5375,7 +5530,8 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
         sale_id: null, // まとめ領収書は特定の1販売に紐付かないためnull(receipt_salesで管理)
         issue_date: issueDate,
         recipient_name: recipientName.trim(),
-        memo: "衣装代",
+        honorific: honorific,
+        memo: memo.trim() || "衣装代",
         subtotal_jpy: totals.subtotal,
         tax_jpy: totals.tax,
         total_jpy: totals.total,
@@ -5417,6 +5573,8 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
     const previewSale = { ...selectedSales[0], receipt_id: newReceipt.id };
     setSelectedIds(new Set());
     setRecipientName("");
+    setHonorific("様");
+    setMemo("衣装代");
     onIssued(previewSale);
   };
 
@@ -5458,11 +5616,29 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
 
       {selectedSales.length > 0 && (
         <div className="rounded-lg p-3 space-y-3" style={{ background: "var(--mz-surface-hover)" }}>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="col-span-2">
+              <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>宛名</label>
+              <input
+                type="text" value={recipientName} onChange={(e) => setRecipientName(e.target.value)}
+                placeholder="例: ○○クラブ"
+                className="w-full rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+              />
+            </div>
+            <div>
+              <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>敬称</label>
+              <select value={honorific} onChange={(e) => setHonorific(e.target.value)}
+                className="w-full rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+                <option value="様">様</option>
+                <option value="御中">御中</option>
+              </select>
+            </div>
+          </div>
           <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>宛名</label>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>但し書き</label>
             <input
-              type="text" value={recipientName} onChange={(e) => setRecipientName(e.target.value)}
-              placeholder="例: ○○クラブ"
+              type="text" value={memo} onChange={(e) => setMemo(e.target.value)}
+              placeholder="衣装代"
               className="w-full rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
             />
           </div>
@@ -5702,7 +5878,7 @@ function SalesPage() {
     const [salesRes, clubsRes, batchesRes] = await Promise.all([
       supabase
         .from("sales")
-        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
+        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number,recipient_name,honorific,memo),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
       supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
@@ -5786,6 +5962,8 @@ function SalesPage() {
         .update({
           issue_date: form.transaction_date,
           recipient_name: form.recipient_name,
+          honorific: form.honorific || "様",
+          memo: form.memo || "衣装代",
           subtotal_jpy: totals.subtotal,
           tax_jpy: totals.tax,
           total_jpy: totals.total,
@@ -5854,7 +6032,8 @@ function SalesPage() {
         sale_id: saleId,
         issue_date: form.transaction_date,
         recipient_name: form.recipient_name,
-        memo: "衣装代",
+        honorific: form.honorific || "様",
+        memo: form.memo || "衣装代",
         subtotal_jpy: totals.subtotal,
         tax_jpy: totals.tax,
         total_jpy: totals.total,
