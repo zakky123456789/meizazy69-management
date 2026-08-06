@@ -664,6 +664,14 @@ function nextMonthFirstDay(targetMonth) {
   return `${ny}-${String(nm).padStart(2, "0")}-01`;
 }
 
+/* ---- "YYYY-MM" の前月1日を "YYYY-MM-DD" で返す(月次損益の損失繰越の計算に使用) ★2026-08-06実装 ---- */
+function prevMonthFirstDay(targetMonth) {
+  const [y, m] = targetMonth.split("-").map(Number);
+  const py = m === 1 ? y - 1 : y;
+  const pm = m === 1 ? 12 : m - 1;
+  return `${py}-${String(pm).padStart(2, "0")}-01`;
+}
+
 /* ---- "YYYY-MM" を "2026年7月" 形式のラベルに変換 ---- */
 function formatMonthLabel(targetMonth) {
   const [y, m] = (targetMonth || "").split("-");
@@ -7502,6 +7510,9 @@ function MonthlyProfitList({ profits, onDelete }) {
     <div className="space-y-2">
       {profits.map((p) => {
         const gross = Number(p.gross_profit_jpy) || 0;
+        // ★2026-08-06実装: 繰越損失(前月までの赤字の繰越分)を加味した、報酬の実際の計算基準額
+        const carriedLoss = Number(p.carried_loss_in_jpy) || 0;
+        const commissionBase = gross + carriedLoss;
         return (
           <div
             key={p.id}
@@ -7515,6 +7526,11 @@ function MonthlyProfitList({ profits, onDelete }) {
                 <span>仕入原価合計: {fmtJPY(p.total_purchase_cost_jpy)}</span>
                 <span>一般経費合計: {fmtJPY(p.total_general_expenses_jpy)}</span>
               </div>
+              {carriedLoss < 0 && (
+                <p className="text-xs mt-1" style={{ color: "#f2b8bd" }}>
+                  前月までの繰越損失: {fmtJPY(carriedLoss)}(報酬基準額: {fmtJPY(commissionBase)})
+                </p>
+              )}
               <p className="text-xs mt-1" style={{ color: "var(--mz-ink-muted)" }}>
                 算出日時: {(p.calculated_at || "").slice(0, 16).replace("T", " ")}
               </p>
@@ -7644,7 +7660,7 @@ function ContractorInvoicesPage() {
     setProfitError(null);
     const { data, error } = await supabase
       .from("monthly_profits")
-      .select("id,target_month,total_sales_jpy,total_purchase_cost_jpy,total_general_expenses_jpy,gross_profit_jpy,calculated_at")
+      .select("id,target_month,total_sales_jpy,total_purchase_cost_jpy,total_general_expenses_jpy,gross_profit_jpy,carried_loss_in_jpy,calculated_at")
       .order("target_month", { ascending: false });
     if (error) {
       setProfitError("月次損益データの取得に失敗しました");
@@ -7748,6 +7764,18 @@ function ContractorInvoicesPage() {
       const totalExpenses = (expenseData || []).reduce((sum, e) => sum + (Number(e.amount_incl_tax) || 0), 0);
       const grossProfit = totalSales - totalPurchaseCost - totalExpenses;
 
+      // ★2026-08-06実装: 前月の「粗利益+繰越損失」がマイナスなら、その分を今月への繰越損失として引き継ぐ。
+      //   前月がさらに前月から繰り越している分も前月の値に既に反映されているため、直前の月だけ見れば連鎖的に正しく計算できる。
+      //   前月がまだ集計されていない場合は0扱い(先に前月を集計してから今月を集計する運用を推奨)。
+      const { data: prevMp, error: prevMpError } = await supabase
+        .from("monthly_profits")
+        .select("gross_profit_jpy,carried_loss_in_jpy")
+        .eq("target_month", prevMonthFirstDay(calcTargetMonth))
+        .maybeSingle();
+      if (prevMpError) { setProfitError("前月の月次損益データの確認に失敗しました"); setCalculating(false); return; }
+      const prevBase = prevMp ? (Number(prevMp.gross_profit_jpy) || 0) + (Number(prevMp.carried_loss_in_jpy) || 0) : 0;
+      const carriedLossIn = prevBase < 0 ? prevBase : 0;
+
       // target_monthはDB側がdate型のため、"YYYY-MM"のままではなく月初日("YYYY-MM-01")で保存・照会する(monthStartを流用)
       const patch = {
         target_month: monthStart,
@@ -7755,6 +7783,7 @@ function ContractorInvoicesPage() {
         total_purchase_cost_jpy: totalPurchaseCost,
         total_general_expenses_jpy: totalExpenses,
         gross_profit_jpy: grossProfit,
+        carried_loss_in_jpy: carriedLossIn,
         calculated_at: new Date().toISOString(),
       };
 
@@ -7781,9 +7810,11 @@ function ContractorInvoicesPage() {
 
   /* ---- 請求内容の計算(実際のinsertは行わず、プレビューをstateに保持するだけ) ----
      1) 同一担当者・同一対象月の請求書が既に発行済みでないか確認(重複発行防止)
-     2) monthly_profitsから対象月の粗利益を取得(未集計ならエラー)
+     2) monthly_profitsから対象月の粗利益・繰越損失を取得(未集計ならエラー)
      3) getApplicableCommissionRateで適用歩合率を取得(未設定ならエラー)
-     4) 請求金額 = 粗利益 × 歩合率 ÷ 100(円未満四捨五入) */
+     4) 報酬基準額 = 粗利益 + 繰越損失(★2026-08-06実装。前月までの赤字を引き継いで相殺する)。
+        基準額が0以下の月は報酬が発生しないため、発行不可としてエラー表示する。
+     5) 請求金額 = 報酬基準額 × 歩合率 ÷ 100(円未満四捨五入) */
   const handlePreviewInvoice = async () => {
     if (!issueStaffId || !issueTargetMonth) return;
     setPreviewing(true);
@@ -7805,7 +7836,7 @@ function ContractorInvoicesPage() {
 
       const { data: mp, error: mpError } = await supabase
         .from("monthly_profits")
-        .select("id,target_month,gross_profit_jpy")
+        .select("id,target_month,gross_profit_jpy,carried_loss_in_jpy")
         .eq("target_month", issueTargetMonthDate)
         .maybeSingle();
       if (mpError) { setInvoicePreview({ error: "月次損益データの取得に失敗しました" }); return; }
@@ -7814,8 +7845,17 @@ function ContractorInvoicesPage() {
       const rate = getApplicableCommissionRate(issueStaffId, issueTargetMonth, rates || []);
       if (!rate) { setInvoicePreview({ error: "この担当者・対象月に適用できる歩合率が設定されていません。先に「歩合率設定」タブで登録してください。" }); return; }
 
-      const amount = Math.round((Number(mp.gross_profit_jpy) || 0) * (Number(rate.rate_percent) || 0) / 100);
-      setInvoicePreview({ monthlyProfit: mp, rate, amount });
+      const carriedLoss = Number(mp.carried_loss_in_jpy) || 0;
+      const commissionBase = (Number(mp.gross_profit_jpy) || 0) + carriedLoss;
+      if (commissionBase <= 0) {
+        setInvoicePreview({
+          error: `前月までの繰越損失(${fmtJPY(carriedLoss)})を差し引くと報酬基準額が${fmtJPY(commissionBase)}のため、この月の報酬は発生しません。この赤字は翌月以降に自動で繰り越されます。`,
+        });
+        return;
+      }
+
+      const amount = Math.round(commissionBase * (Number(rate.rate_percent) || 0) / 100);
+      setInvoicePreview({ monthlyProfit: mp, rate, amount, commissionBase, carriedLoss });
     } finally {
       setPreviewing(false);
     }
@@ -7833,6 +7873,7 @@ function ContractorInvoicesPage() {
         staff_id: issueStaffId,
         target_month: `${issueTargetMonth}-01`,
         monthly_profit_id: invoicePreview.monthlyProfit.id,
+        commission_base_jpy: invoicePreview.commissionBase,
         rate_percent: invoicePreview.rate.rate_percent,
         amount_jpy: invoicePreview.amount,
         issue_date: issueDate,
@@ -8005,6 +8046,10 @@ function ContractorInvoicesPage() {
               >
                 <div className="text-xs space-y-1" style={{ color: "var(--mz-ink-muted)" }}>
                   <p>対象月の粗利益: {fmtJPY(invoicePreview.monthlyProfit.gross_profit_jpy)}</p>
+                  {invoicePreview.carriedLoss < 0 && (
+                    <p>前月までの繰越損失: {fmtJPY(invoicePreview.carriedLoss)}</p>
+                  )}
+                  <p>報酬基準額: {fmtJPY(invoicePreview.commissionBase)}</p>
                   <p>適用歩合率: {invoicePreview.rate.rate_percent}%</p>
                   <p className="text-sm font-display" style={{ color: "var(--mz-ink)" }}>
                     請求金額: {fmtJPY(invoicePreview.amount)}
