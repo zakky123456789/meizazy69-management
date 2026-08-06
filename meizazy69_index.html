@@ -4051,6 +4051,20 @@ async function generateReceiptNumber(dateStr) {
   return `${year}-${String(maxNum + 1).padStart(4, "0")}`;
 }
 
+/* ---- 領収書PDFのファイル名生成 ★2026-08-06実装 ----
+   電子帳簿保存法の検索要件(取引年月日・取引金額・取引先)を満たす形式で統一する。
+   「取引先」は社内管理用のホストクラブ名ではなく、相手にもファイルを渡すことを考慮し、
+   実際の請求・受領先である領収書の宛名(recipient_name)を使う。
+   例: "20260806_SDK（株）_148000円_領収書_2026-0042" */
+function buildReceiptFileName(receipt, fallbackName) {
+  const date = (receipt.issue_date || "").replace(/-/g, "");
+  const rawName = (receipt.recipient_name || fallbackName || "宛先未設定").trim();
+  // ファイル名に使えない/紛らわしい記号だけ除去する(スラッシュ・コロン等)
+  const safeName = rawName.replace(/[\\/:*?"<>|]/g, "");
+  const amount = receipt.total_jpy != null ? Math.round(Number(receipt.total_jpy)) : 0;
+  return `${date}_${safeName}_${amount}円_領収書_${receipt.receipt_number}`;
+}
+
 /* ---- 外注費請求書番号の自動採番(generateInvoiceNumber) ----
    receiptsと同じ考え方で年ごとにリセットする連番だが、領収書番号と混同しないよう
    "INV-{年}-{4桁連番}"形式にする(例: INV-2026-0001)。 */
@@ -5133,7 +5147,19 @@ function ReceiptPreviewModal({ sale, onClose }) {
             </div>
 
             <button
-              onClick={() => window.print()}
+              onClick={() => {
+                // ★2026-08-06実装: 「PDFとして保存」時にブラウザが提案するファイル名は
+                //   document.titleが使われるため、印刷ダイアログを開く直前だけ一時的に差し替える。
+                //   afterprintイベント(ダイアログが閉じたタイミング)で元のタイトルに戻す。
+                const originalTitle = document.title;
+                document.title = buildReceiptFileName(receipt, clubName);
+                const restoreTitle = () => {
+                  document.title = originalTitle;
+                  window.removeEventListener("afterprint", restoreTitle);
+                };
+                window.addEventListener("afterprint", restoreTitle);
+                window.print();
+              }}
               className="mz-no-print w-full rounded-lg py-2.5 text-sm font-medium"
               style={{ background: "var(--mz-gold)", color: "#1a1710" }}
             >
