@@ -1387,6 +1387,267 @@ function HostClubsPage() {
 }
 
 /* ---- ホスト 登録・編集モーダル ---- */
+/* ---- 配送先 登録・編集フォーム ★2026-08-14実装 ----
+   郵便番号入力→zipcloud(日本郵便のデータを使った無料API、郵便番号のみ送信)で
+   都道府県・市区町村(町域まで)を自動入力する。番地・建物名は自動入力の対象外(手入力)。 */
+function ShippingAddressFormModal({ hostId, address, onClose, onSave }) {
+  const isNew = !address.id;
+  const [name, setName] = useState(address.name || "");
+  const [phone, setPhone] = useState(address.phone || "");
+  const [postalCode, setPostalCode] = useState(address.postal_code || "");
+  const [prefecture, setPrefecture] = useState(address.prefecture || "");
+  const [city, setCity] = useState(address.city || "");
+  const [addressLine, setAddressLine] = useState(address.address_line || "");
+  const [building, setBuilding] = useState(address.building || "");
+  const [zipLoading, setZipLoading] = useState(false);
+  const [zipError, setZipError] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  const handleZipLookup = async () => {
+    const digits = postalCode.replace(/[^0-9]/g, "");
+    if (digits.length !== 7) { setZipError("郵便番号は7桁で入力してください"); return; }
+    setZipError(null);
+    setZipLoading(true);
+    try {
+      const res = await fetch(`https://zipcloud.ibsnet.co.jp/api/search?zipcode=${digits}`);
+      const json = await res.json();
+      if (json.status !== 200 || !json.results || json.results.length === 0) {
+        setZipError("該当する住所が見つかりませんでした。手入力してください。");
+        return;
+      }
+      const r = json.results[0];
+      setPrefecture(r.address1 || "");
+      setCity(`${r.address2 || ""}${r.address3 || ""}`);
+    } catch (e) {
+      setZipError("住所検索に失敗しました。手入力してください。");
+    } finally {
+      setZipLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setSaving(true);
+    const ok = await onSave({
+      id: address.id || null,
+      host_id: hostId,
+      name: name.trim(),
+      phone: phone.trim() || null,
+      postal_code: postalCode.trim() || null,
+      prefecture: prefecture.trim() || null,
+      city: city.trim() || null,
+      address_line: addressLine.trim() || null,
+      building: building.trim() || null,
+    });
+    setSaving(false);
+    if (ok) onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <form
+        onSubmit={handleSubmit}
+        className="w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <h2 className="font-display text-lg">{isNew ? "配送先を追加" : "配送先を編集"}</h2>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>名前</label>
+          <input
+            type="text" value={name} onChange={(e) => setName(e.target.value)} required autoFocus
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>電話番号</label>
+          <input
+            type="tel" value={phone} onChange={(e) => setPhone(e.target.value)}
+            placeholder="09012345678"
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>郵便番号</label>
+          <div className="flex gap-2">
+            <input
+              type="text" value={postalCode} onChange={(e) => setPostalCode(e.target.value)}
+              placeholder="1234567(ハイフンなし)"
+              className="flex-1 rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+            <button
+              type="button" onClick={handleZipLookup} disabled={zipLoading}
+              className="text-xs px-3 rounded-lg shrink-0 disabled:opacity-60"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            >
+              {zipLoading ? "検索中..." : "住所検索"}
+            </button>
+          </div>
+          {zipError && <p className="text-xs mt-1" style={{ color: "#f2b8bd" }}>{zipError}</p>}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>都道府県</label>
+            <input
+              type="text" value={prefecture} onChange={(e) => setPrefecture(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>市区町村</label>
+            <input
+              type="text" value={city} onChange={(e) => setCity(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>番地</label>
+          <input
+            type="text" value={addressLine} onChange={(e) => setAddressLine(e.target.value)}
+            placeholder="1-2-3"
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>建物名+部屋番号(任意)</label>
+          <input
+            type="text" value={building} onChange={(e) => setBuilding(e.target.value)}
+            placeholder="○○マンション101"
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <div className="flex gap-2 pt-1">
+          <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+            キャンセル
+          </button>
+          <button type="submit" disabled={saving} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+            {saving ? "保存中..." : "保存"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ---- 配送先 一覧モーダル(特定ホストの配送先を複数管理) ★2026-08-14実装 ---- */
+function ShippingAddressesModal({ host, onClose }) {
+  const [addresses, setAddresses] = useState(null); // null = 読み込み中
+  const [error, setError] = useState(null);
+  const [modalAddress, setModalAddress] = useState(null); // null=閉じる, {}=新規, obj=編集
+
+  const loadAddresses = useCallback(async () => {
+    setError(null);
+    const { data, error } = await supabase
+      .from("host_shipping_addresses")
+      .select("id,name,phone,postal_code,prefecture,city,address_line,building")
+      .eq("host_id", host.id)
+      .order("created_at");
+    if (error) { setError("配送先の取得に失敗しました"); setAddresses([]); return; }
+    setAddresses(data || []);
+  }, [host.id]);
+
+  useEffect(() => { loadAddresses(); }, [loadAddresses]);
+
+  const handleSave = async (form) => {
+    if (form.id) {
+      const { error } = await supabase.from("host_shipping_addresses").update({
+        name: form.name, phone: form.phone, postal_code: form.postal_code,
+        prefecture: form.prefecture, city: form.city, address_line: form.address_line,
+        building: form.building, updated_at: new Date().toISOString(),
+      }).eq("id", form.id);
+      if (error) { alert("更新に失敗しました"); return false; }
+    } else {
+      const { error } = await supabase.from("host_shipping_addresses").insert({
+        host_id: form.host_id, name: form.name, phone: form.phone, postal_code: form.postal_code,
+        prefecture: form.prefecture, city: form.city, address_line: form.address_line, building: form.building,
+      });
+      if (error) { alert("登録に失敗しました"); return false; }
+    }
+    await loadAddresses();
+    return true;
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm("この配送先を削除しますか?")) return;
+    const { error } = await supabase.from("host_shipping_addresses").delete().eq("id", id);
+    if (error) { alert("削除に失敗しました"); return; }
+    loadAddresses();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <div
+        className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="font-display text-lg">{host.name} の配送先</h2>
+          <button onClick={onClose} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>閉じる</button>
+        </div>
+
+        <button
+          onClick={() => setModalAddress({})}
+          className="text-xs px-3 py-1.5 rounded-lg"
+          style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+        >
+          + 配送先追加
+        </button>
+
+        {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
+
+        {addresses === null ? (
+          <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+        ) : addresses.length === 0 ? (
+          <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>登録された配送先がありません</p>
+        ) : (
+          <div className="space-y-2">
+            {addresses.map((a) => (
+              <div key={a.id} className="rounded-xl p-3 space-y-1" style={{ background: "var(--mz-surface-hover)", border: "1px solid var(--mz-border)" }}>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium truncate">{a.name}</span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={() => setModalAddress(a)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>編集</button>
+                    <button onClick={() => handleDelete(a.id)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}>削除</button>
+                  </div>
+                </div>
+                <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                  {a.phone && <>{a.phone}<br /></>}
+                  {a.postal_code && `〒${a.postal_code} `}
+                  {a.prefecture}{a.city}{a.address_line}{a.building ? ` ${a.building}` : ""}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {modalAddress && (
+        <ShippingAddressFormModal
+          hostId={host.id}
+          address={modalAddress}
+          onClose={() => setModalAddress(null)}
+          onSave={handleSave}
+        />
+      )}
+    </div>
+  );
+}
+
 function HostFormModal({ host, onClose, onSave }) {
   const isNew = !host.id;
   const [name, setName] = useState(host.name || "");
@@ -1639,6 +1900,7 @@ function HostClubDetailPage({ clubId }) {
   const [error, setError] = useState(null);
   const [modalHost, setModalHost] = useState(null);
   const [modalVisit, setModalVisit] = useState(null);
+  const [shippingAddressHost, setShippingAddressHost] = useState(null); // ★2026-08-14実装: 配送先一覧モーダルの対象ホスト
 
   const loadAll = useCallback(async () => {
     setError(null);
@@ -1825,6 +2087,7 @@ function HostClubDetailPage({ clubId }) {
               >
                 <span className="text-sm truncate">{h.name}</span>
                 <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={() => setShippingAddressHost(h)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>配送先</button>
                   <button onClick={() => setModalHost(h)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>編集</button>
                   <button onClick={() => handleDeleteHost(h.id)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}>削除</button>
                 </div>
@@ -1930,6 +2193,7 @@ function HostClubDetailPage({ clubId }) {
       </section>
 
       {modalHost && <HostFormModal host={modalHost} onClose={() => setModalHost(null)} onSave={handleSaveHost} />}
+      {shippingAddressHost && <ShippingAddressesModal host={shippingAddressHost} onClose={() => setShippingAddressHost(null)} />}
       {modalVisit && (
         <VisitFormModal
           visit={modalVisit}
