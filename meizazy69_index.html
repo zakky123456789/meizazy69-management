@@ -1386,22 +1386,13 @@ function HostClubsPage() {
   );
 }
 
-/* ---- ホスト 登録・編集モーダル ---- */
-/* ---- 配送先 登録・編集フォーム ★2026-08-14実装 ----
+/* ---- 住所入力(郵便番号検索込み)の共通部品 ★2026-08-14実装 ----
+   ShippingAddressFormModal・QuickAddHostModalの両方から使う。
    郵便番号入力→zipcloud(日本郵便のデータを使った無料API、郵便番号のみ送信)で
    都道府県・市区町村(町域まで)を自動入力する。番地・建物名は自動入力の対象外(手入力)。 */
-function ShippingAddressFormModal({ hostId, address, onClose, onSave }) {
-  const isNew = !address.id;
-  const [name, setName] = useState(address.name || "");
-  const [phone, setPhone] = useState(address.phone || "");
-  const [postalCode, setPostalCode] = useState(address.postal_code || "");
-  const [prefecture, setPrefecture] = useState(address.prefecture || "");
-  const [city, setCity] = useState(address.city || "");
-  const [addressLine, setAddressLine] = useState(address.address_line || "");
-  const [building, setBuilding] = useState(address.building || "");
+function AddressFieldsBlock({ postalCode, setPostalCode, prefecture, setPrefecture, city, setCity, addressLine, setAddressLine, building, setBuilding }) {
   const [zipLoading, setZipLoading] = useState(false);
   const [zipError, setZipError] = useState(null);
-  const [saving, setSaving] = useState(false);
 
   const handleZipLookup = async () => {
     const digits = postalCode.replace(/[^0-9]/g, "");
@@ -1424,6 +1415,83 @@ function ShippingAddressFormModal({ hostId, address, onClose, onSave }) {
       setZipLoading(false);
     }
   };
+
+  return (
+    <>
+      <div>
+        <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>郵便番号</label>
+        <div className="flex gap-2">
+          <input
+            type="text" value={postalCode} onChange={(e) => setPostalCode(e.target.value)}
+            placeholder="1234567(ハイフンなし)"
+            className="flex-1 rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+          <button
+            type="button" onClick={handleZipLookup} disabled={zipLoading}
+            className="text-xs px-3 rounded-lg shrink-0 disabled:opacity-60"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            {zipLoading ? "検索中..." : "住所検索"}
+          </button>
+        </div>
+        {zipError && <p className="text-xs mt-1" style={{ color: "#f2b8bd" }}>{zipError}</p>}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>都道府県</label>
+          <input
+            type="text" value={prefecture} onChange={(e) => setPrefecture(e.target.value)}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>市区町村</label>
+          <input
+            type="text" value={city} onChange={(e) => setCity(e.target.value)}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>番地</label>
+        <input
+          type="text" value={addressLine} onChange={(e) => setAddressLine(e.target.value)}
+          placeholder="1-2-3"
+          className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+        />
+      </div>
+
+      <div>
+        <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>建物名+部屋番号(任意)</label>
+        <input
+          type="text" value={building} onChange={(e) => setBuilding(e.target.value)}
+          placeholder="○○マンション101"
+          className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+        />
+      </div>
+    </>
+  );
+}
+
+/* ---- ホスト 登録・編集モーダル ---- */
+/* ---- 配送先 登録・編集フォーム ★2026-08-14実装 ---- */
+function ShippingAddressFormModal({ hostId, address, onClose, onSave }) {
+  const isNew = !address.id;
+  const [name, setName] = useState(address.name || "");
+  const [phone, setPhone] = useState(address.phone || "");
+  const [postalCode, setPostalCode] = useState(address.postal_code || "");
+  const [prefecture, setPrefecture] = useState(address.prefecture || "");
+  const [city, setCity] = useState(address.city || "");
+  const [addressLine, setAddressLine] = useState(address.address_line || "");
+  const [building, setBuilding] = useState(address.building || "");
+  const [saving, setSaving] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -1472,64 +1540,13 @@ function ShippingAddressFormModal({ hostId, address, onClose, onSave }) {
           />
         </div>
 
-        <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>郵便番号</label>
-          <div className="flex gap-2">
-            <input
-              type="text" value={postalCode} onChange={(e) => setPostalCode(e.target.value)}
-              placeholder="1234567(ハイフンなし)"
-              className="flex-1 rounded-lg px-3 py-2.5 text-sm bg-transparent"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-            />
-            <button
-              type="button" onClick={handleZipLookup} disabled={zipLoading}
-              className="text-xs px-3 rounded-lg shrink-0 disabled:opacity-60"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-            >
-              {zipLoading ? "検索中..." : "住所検索"}
-            </button>
-          </div>
-          {zipError && <p className="text-xs mt-1" style={{ color: "#f2b8bd" }}>{zipError}</p>}
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>都道府県</label>
-            <input
-              type="text" value={prefecture} onChange={(e) => setPrefecture(e.target.value)}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-            />
-          </div>
-          <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>市区町村</label>
-            <input
-              type="text" value={city} onChange={(e) => setCity(e.target.value)}
-              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-            />
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>番地</label>
-          <input
-            type="text" value={addressLine} onChange={(e) => setAddressLine(e.target.value)}
-            placeholder="1-2-3"
-            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-          />
-        </div>
-
-        <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>建物名+部屋番号(任意)</label>
-          <input
-            type="text" value={building} onChange={(e) => setBuilding(e.target.value)}
-            placeholder="○○マンション101"
-            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
-            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
-          />
-        </div>
+        <AddressFieldsBlock
+          postalCode={postalCode} setPostalCode={setPostalCode}
+          prefecture={prefecture} setPrefecture={setPrefecture}
+          city={city} setCity={setCity}
+          addressLine={addressLine} setAddressLine={setAddressLine}
+          building={building} setBuilding={setBuilding}
+        />
 
         <div className="flex gap-2 pt-1">
           <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
@@ -4781,12 +4798,181 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
   );
 }
 
+/* ---- ホストクラブ クイック新規登録(販売登録フォームから) ★2026-08-14実装 ---- */
+function QuickAddClubModal({ onClose, onCreated }) {
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setSaving(true);
+    setError(null);
+    const { data, error } = await supabase.from("host_clubs").insert({ name: name.trim() }).select("id,name").single();
+    setSaving(false);
+    if (error || !data) { setError("登録に失敗しました"); return; }
+    onCreated(data);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <form
+        onSubmit={handleSubmit}
+        className="w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl p-5 space-y-4"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <h2 className="font-display text-lg">ホストクラブを新規登録</h2>
+        {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>クラブ名</label>
+          <input
+            type="text" value={name} onChange={(e) => setName(e.target.value)} required autoFocus
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+        <div className="flex gap-2 pt-1">
+          <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+            キャンセル
+          </button>
+          <button type="submit" disabled={saving} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+            {saving ? "登録中..." : "登録"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ---- ホスト クイック新規登録(販売登録フォームから)。配送先まで一度に登録できる ★2026-08-14実装 ---- */
+function QuickAddHostModal({ hostClubId, onClose, onCreated }) {
+  const [name, setName] = useState("");
+  const [addAddress, setAddAddress] = useState(false);
+  const [addressName, setAddressName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [postalCode, setPostalCode] = useState("");
+  const [prefecture, setPrefecture] = useState("");
+  const [city, setCity] = useState("");
+  const [addressLine, setAddressLine] = useState("");
+  const [building, setBuilding] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setSaving(true);
+    setError(null);
+    const { data: hostRow, error: hostError } = await supabase
+      .from("hosts").insert({ host_club_id: hostClubId, name: name.trim() }).select("id,name").single();
+    if (hostError || !hostRow) { setSaving(false); setError("ホストの登録に失敗しました"); return; }
+
+    if (addAddress) {
+      const { error: addrError } = await supabase.from("host_shipping_addresses").insert({
+        host_id: hostRow.id,
+        name: (addressName.trim() || name.trim()),
+        phone: phone.trim() || null,
+        postal_code: postalCode.trim() || null,
+        prefecture: prefecture.trim() || null,
+        city: city.trim() || null,
+        address_line: addressLine.trim() || null,
+        building: building.trim() || null,
+      });
+      if (addrError) {
+        setSaving(false);
+        setError("ホストは登録されましたが、配送先の登録に失敗しました。ホストクラブ詳細から配送先を追加してください。");
+        onCreated(hostRow); // ホスト自体は登録済みなので選択状態にはする
+        return;
+      }
+    }
+
+    setSaving(false);
+    onCreated(hostRow);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <form
+        onSubmit={handleSubmit}
+        className="w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+      >
+        <h2 className="font-display text-lg">ホストを新規登録</h2>
+        {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>ホスト名</label>
+          <input
+            type="text" value={name} onChange={(e) => setName(e.target.value)} required autoFocus
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input type="checkbox" checked={addAddress} onChange={(e) => setAddAddress(e.target.checked)} />
+          配送先も一緒に登録する
+        </label>
+
+        {addAddress && (
+          <div className="space-y-4 rounded-xl p-3" style={{ background: "var(--mz-surface-hover)", border: "1px solid var(--mz-border)" }}>
+            <div>
+              <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>配送先名(空欄ならホスト名を使用)</label>
+              <input
+                type="text" value={addressName} onChange={(e) => setAddressName(e.target.value)}
+                placeholder={name || "配送先名"}
+                className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+              />
+            </div>
+            <div>
+              <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>電話番号</label>
+              <input
+                type="tel" value={phone} onChange={(e) => setPhone(e.target.value)}
+                placeholder="09012345678"
+                className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+              />
+            </div>
+            <AddressFieldsBlock
+              postalCode={postalCode} setPostalCode={setPostalCode}
+              prefecture={prefecture} setPrefecture={setPrefecture}
+              city={city} setCity={setCity}
+              addressLine={addressLine} setAddressLine={setAddressLine}
+              building={building} setBuilding={setBuilding}
+            />
+          </div>
+        )}
+
+        <div className="flex gap-2 pt-1">
+          <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+            キャンセル
+          </button>
+          <button type="submit" disabled={saving} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+            {saving ? "登録中..." : "登録"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }) {
   const isEdit = !!sale;
   const [transactionDate, setTransactionDate] = useState(sale ? sale.transaction_date : todayISO());
   const [hostClubId, setHostClubId] = useState(sale ? sale.host_club_id : "");
   const [hosts, setHosts] = useState([]);
   const [hostId, setHostId] = useState(sale ? (sale.host_id || "") : "");
+  // ★2026-08-14実装: 販売登録フォームからホストクラブ/ホストをその場で新規登録できるようにする。
+  //   clubsはprop(親のSalesPageが保持)のため、登録直後は親の再取得が終わるまでローカルに追加分を保持して選択肢に含める。
+  const [extraClubs, setExtraClubs] = useState([]);
+  const [showAddClub, setShowAddClub] = useState(false);
+  const [showAddHost, setShowAddHost] = useState(false);
+  const clubOptions = useMemo(() => {
+    const merged = [...clubs];
+    extraClubs.forEach((c) => { if (!merged.some((m) => m.id === c.id)) merged.push(c); });
+    return merged.sort((a, b) => a.name.localeCompare(b.name, "ja"));
+  }, [clubs, extraClubs]);
   // ★2026-08-06実装: 領収書の宛名・敬称・但し書きを販売登録時点で編集できるようにする
   //   (編集時は既存の領収書の値を初期値にし、以後は自動追随させない。新規時はホスト/クラブ名を自動提案する)
   const [recipientNameTouched, setRecipientNameTouched] = useState(isEdit);
@@ -5018,17 +5204,23 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
               className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
           </div>
           <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>ホストクラブ</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs" style={{ color: "var(--mz-ink-muted)" }}>ホストクラブ</label>
+              <button type="button" onClick={() => setShowAddClub(true)} className="text-xs" style={{ color: "var(--mz-gold-soft)" }}>+新規</button>
+            </div>
             <select value={hostClubId} onChange={(e) => setHostClubId(e.target.value)} required
               className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
               <option value="">選択してください</option>
-              {clubs.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {clubOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
         </div>
 
         <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>ホスト(任意)</label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="block text-xs" style={{ color: "var(--mz-ink-muted)" }}>ホスト(任意)</label>
+            <button type="button" onClick={() => setShowAddHost(true)} disabled={!hostClubId} className="text-xs disabled:opacity-40" style={{ color: "var(--mz-gold-soft)" }}>+新規</button>
+          </div>
           <select value={hostId} onChange={(e) => setHostId(e.target.value)} disabled={!hostClubId}
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent disabled:opacity-50" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
             <option value="">指定なし(クラブ宛)</option>
@@ -5228,6 +5420,28 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
             const { data, error: batchErr } = await supabase.from("purchase_batches").insert(form).select().single();
             if (batchErr || !data) return { ok: false, message: "ロットの登録に失敗しました" };
             return { ok: true, batch: data };
+          }}
+        />
+      )}
+
+      {showAddClub && (
+        <QuickAddClubModal
+          onClose={() => setShowAddClub(false)}
+          onCreated={(newClub) => {
+            setExtraClubs((prev) => [...prev, newClub]);
+            setHostClubId(newClub.id);
+            setShowAddClub(false);
+          }}
+        />
+      )}
+      {showAddHost && (
+        <QuickAddHostModal
+          hostClubId={hostClubId}
+          onClose={() => setShowAddHost(false)}
+          onCreated={(newHost) => {
+            setHosts((prev) => [...prev, newHost].sort((a, b) => a.name.localeCompare(b.name, "ja")));
+            setHostId(newHost.id);
+            setShowAddHost(false);
           }}
         />
       )}
