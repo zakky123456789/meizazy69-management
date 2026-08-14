@@ -70,6 +70,13 @@
       レシート内容を複製描画することで、印刷対象の高さだけがページ計算に使われるようにする) */
   #print-root { display: none; }
   @media print {
+    /* ★2026-08-14実装: ページ余白を0にすると、多くのブラウザ(特にスマホ)で
+       標準のヘッダー/フッター(URL・日付・ページ番号)が表示されなくなる。
+       余白分の見た目はReceiptDocument側のp-6(内側パディング)で確保する。 */
+    @page { margin: 0; }
+    /* ★2026-08-14実装: bodyのダーク背景(--mz-bg)が#print-root周りの余白から
+       透けて黒く見えてしまっていたため、印刷時はhtml/bodyの背景も白に上書きする */
+    html, body { background: #ffffff !important; }
     #root { display: none !important; }
     #print-root {
       display: block !important;
