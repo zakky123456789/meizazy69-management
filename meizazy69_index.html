@@ -22,6 +22,10 @@
 <!-- Supabase -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
+<!-- 領収書PDFを共有シートへ直接渡すため ★2026-08-14実装 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
 <style>
   :root{
     --mz-bg: #14120F;
@@ -5053,6 +5057,10 @@ function ReceiptPreviewModal({ sale, onClose }) {
   const [editPaymentType, setEditPaymentType] = useState("現金");
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState(null);
+  // ★2026-08-14実装: 画面表示中の領収書をPDF化して共有シートへ直接渡すためのref・state
+  const captureRef = useRef(null);
+  const [sharingPdf, setSharingPdf] = useState(false);
+  const [shareError, setShareError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -5229,31 +5237,82 @@ function ReceiptPreviewModal({ sale, onClose }) {
               )}
             </div>
 
-            {/* 画面プレビュー用(通常表示) */}
-            <ReceiptDocument receipt={receipt} items={items} clubName={clubName} />
+            {/* 画面プレビュー用(通常表示)。PDF化にもこのDOMをそのまま使う */}
+            <div ref={captureRef}>
+              <ReceiptDocument receipt={receipt} items={items} clubName={clubName} />
+            </div>
 
+            {shareError && (
+              <p className="text-xs rounded-lg px-3 py-2 mz-no-print" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{shareError}</p>
+            )}
+
+            {/* ★2026-08-14実装: 画面表示中の領収書をその場でPDF化し、対応端末では
+                navigator.share()で共有シートへ直接渡す(LINE等のアプリもここから選べる)。
+                Web Share APIやファイル共有に非対応の環境では、別タブでの印刷方式にフォールバックする。 */}
             <button
-              onClick={() => {
-                // ★2026-08-14実装: アプリ本体を巻き込まないよう、領収書だけの独立した
-                // 静的HTMLを別タブで開き、そちらで印刷ダイアログを呼び出す。
-                const printWindow = window.open("", "_blank");
-                if (!printWindow) {
-                  alert("ポップアップがブロックされました。ブラウザの設定でこのサイトのポップアップを許可してから、もう一度お試しください。");
-                  return;
+              onClick={async () => {
+                if (!captureRef.current || sharingPdf) return;
+                setShareError(null);
+                setSharingPdf(true);
+                try {
+                  const canvas = await html2canvas(captureRef.current, { scale: 2, backgroundColor: "#ffffff" });
+                  const imgData = canvas.toDataURL("image/png");
+                  const { jsPDF } = window.jspdf;
+                  const pdf = new jsPDF({ unit: "mm", format: "a4" });
+                  const pageWidth = pdf.internal.pageSize.getWidth();
+                  const pageHeight = pdf.internal.pageSize.getHeight();
+                  const imgWidth = pageWidth;
+                  const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+                  // A4 1枚に収まらない場合(まとめ領収書で品目が多い等)は複数ページに分割する
+                  let heightLeft = imgHeight;
+                  let position = 0;
+                  pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+                  heightLeft -= pageHeight;
+                  while (heightLeft > 0) {
+                    position = heightLeft - imgHeight;
+                    pdf.addPage();
+                    pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+                    heightLeft -= pageHeight;
+                  }
+
+                  const fileName = `${buildReceiptFileName(receipt, clubName)}.pdf`;
+                  const blob = pdf.output("blob");
+                  const file = new File([blob], fileName, { type: "application/pdf" });
+
+                  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    await navigator.share({ files: [file], title: fileName });
+                  } else {
+                    // Web Share API(ファイル共有)未対応の環境向けフォールバック:
+                    // 領収書だけの独立した静的HTMLを別タブで開き、そちらで印刷/共有してもらう
+                    const printWindow = window.open("", "_blank");
+                    if (!printWindow) {
+                      alert("ポップアップがブロックされました。ブラウザの設定でこのサイトのポップアップを許可してから、もう一度お試しください。");
+                      return;
+                    }
+                    const html = buildReceiptPrintHtml(receipt, items, clubName);
+                    printWindow.document.open();
+                    printWindow.document.write(html);
+                    printWindow.document.close();
+                    printWindow.onload = () => {
+                      printWindow.focus();
+                      printWindow.print();
+                    };
+                  }
+                } catch (e) {
+                  // ユーザーが共有シートをキャンセルした場合もここに来るため、エラー表示はしない
+                  if (e && e.name !== "AbortError") {
+                    setShareError("PDFの生成/共有に失敗しました。時間をおいて再度お試しください。");
+                  }
+                } finally {
+                  setSharingPdf(false);
                 }
-                const html = buildReceiptPrintHtml(receipt, items, clubName);
-                printWindow.document.open();
-                printWindow.document.write(html);
-                printWindow.document.close();
-                printWindow.onload = () => {
-                  printWindow.focus();
-                  printWindow.print();
-                };
               }}
-              className="mz-no-print w-full rounded-lg py-2.5 text-sm font-medium"
+              disabled={sharingPdf}
+              className="mz-no-print w-full rounded-lg py-2.5 text-sm font-medium disabled:opacity-60"
               style={{ background: "var(--mz-gold)", color: "#1a1710" }}
             >
-              印刷 / PDFとして保存(別タブで開く)
+              {sharingPdf ? "PDFを生成中..." : "PDFを共有/保存"}
             </button>
           </>
         )}
