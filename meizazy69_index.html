@@ -22,11 +22,6 @@
 <!-- Supabase -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
-<!-- 領収書PDF生成用 ★2026-08-14実装: window.print()に頼らず、画面の内容を画像化してPDFへ直接書き出す方式に変更
-     (iOS Safari等、ブラウザ標準の印刷ヘッダー/フッターを除去できない環境があったため) -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-
 <style>
   :root{
     --mz-bg: #14120F;
@@ -3996,7 +3991,7 @@ function ProductsPage() {
      ・領収書自動作成(★2026-08-05変更: 消費税免税事業者のため税抜・消費税額の分割表示は撤廃し、税込合計金額のみを記載)
      ・販売一覧・削除(削除時は商品を「未販売」へ自動復元)、編集(明細差分反映)
      ・販売画面からの「新規仕入対応」(その場でproducts新規登録+ウォレット消化)
-     ・領収書プレビュー・PDF保存(ReceiptPreviewModal, html2canvas+jsPDFで直接PDF生成 ★2026-08-14変更)
+     ・領収書プレビュー・印刷/PDF保存(ReceiptPreviewModal, window.print())
 
    積み残し:
      ・ダッシュボードの売上・利益連携
@@ -4064,6 +4059,90 @@ function buildReceiptFileName(receipt, fallbackName) {
   const safeName = rawName.replace(/[\\/:*?"<>|]/g, "");
   const amount = receipt.total_jpy != null ? Math.round(Number(receipt.total_jpy)) : 0;
   return `${date}_${safeName}_${amount}円_領収書_${receipt.receipt_number}`;
+}
+
+/* ---- HTML文字列組み立て用のエスケープ ★2026-08-14実装 ---- */
+function escapeHtml(str) {
+  return String(str == null ? "" : str)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/* ---- 領収書印刷用の完全に独立した静的HTMLドキュメントを組み立てる ★2026-08-14実装 ----
+   別タブでこれだけを開いて印刷することで、アプリ本体(ダーク背景・長いスクロール領域等)を
+   一切巻き込まずに済むようにする(iOS Safari等でのヘッダー/フッター・黒塗り対策)。 */
+function buildReceiptPrintHtml(receipt, items, clubName) {
+  const rows = items.map((it) => `
+    <tr>
+      <td style="padding:4px 0;">${escapeHtml(saleItemLabel(it))}</td>
+      <td style="padding:4px 0; text-align:right; white-space:nowrap;">${escapeHtml(fmtJPY(it.unit_price_jpy))}</td>
+    </tr>`).join("");
+
+  const itemsTable = items.length > 0 ? `
+    <table style="width:100%; font-size:12px; border-collapse:collapse; margin-bottom:16px;">
+      <thead>
+        <tr style="border-bottom:1px solid #ccc;">
+          <th style="text-align:left; padding:4px 0;">品名</th>
+          <th style="text-align:right; padding:4px 0;">金額</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>` : "";
+
+  return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>${escapeHtml(buildReceiptFileName(receipt, clubName))}</title>
+<style>
+  @page { margin: 10mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body {
+    font-family: 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+    color: #1a1710; padding: 24px;
+  }
+  .title { font-size: 22px; font-weight: 700; margin: 0; }
+  .recipient { font-size: 16px; display: inline-block; border-bottom: 1px solid #1a1710; padding-bottom: 2px; margin-top: 20px; }
+  .amount { font-size: 24px; font-weight: 700; margin: 16px 0 0; }
+  .small { font-size: 12px; margin-top: 4px; }
+  .header-right { text-align: right; font-size: 12px; max-width: 220px; }
+  .issuer-box { margin-top: 12px; padding-top: 8px; border-top: 1px solid #ccc; text-align: left; }
+  .issuer-label { color: #888; margin: 0 0 4px; }
+  .issuer-info { color: #555; white-space: pre-line; margin: 0; }
+  .totals { font-size: 12px; border-top: 1px solid #ccc; padding-top: 8px; }
+  .totals-row { display: flex; justify-content: space-between; }
+  @media print {
+    body { padding: 0; }
+  }
+</style>
+</head>
+<body>
+  <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:24px;">
+    <div>
+      <p class="title">領収書</p>
+      <p class="recipient">${escapeHtml(receipt.recipient_name || clubName)} ${escapeHtml(receipt.honorific || "様")}</p>
+      <p class="amount">${escapeHtml(fmtJPY(receipt.total_jpy))} -</p>
+      <p class="small">但し ${escapeHtml(receipt.memo || "衣装代")} として</p>
+      <p class="small">${receipt.payment_type === "振込" ? "振込にて受領しました。" : "現金にて受領しました。"}</p>
+    </div>
+    <div class="header-right">
+      <p style="margin:0;">No. ${escapeHtml(receipt.receipt_number)}</p>
+      <p style="margin:0;">受領日: ${escapeHtml(receipt.received_date || receipt.issue_date)}</p>
+      <p style="margin:0;">発行日: ${escapeHtml(receipt.issue_date)}</p>
+      <div class="issuer-box">
+        <p class="issuer-label">発行者</p>
+        <p class="issuer-info">${escapeHtml(receipt.issuer_info)}</p>
+      </div>
+    </div>
+  </div>
+  ${itemsTable}
+  <div class="totals">
+    <div class="totals-row"><span>合計点数</span><span>${items.length}点</span></div>
+    <div class="totals-row" style="font-weight:700;"><span>合計金額</span><span>${escapeHtml(fmtJPY(receipt.total_jpy))}</span></div>
+  </div>
+</body>
+</html>`;
 }
 
 /* ---- 外注費請求書番号の自動採番(generateInvoiceNumber) ----
@@ -4898,15 +4977,16 @@ function saleItemLabel(item) {
   return label;
 }
 
-/* ---- 領収書プレビュー・PDF保存モーダル ----
+/* ---- 領収書プレビュー・印刷モーダル ----
    ・saleに紐づくreceipts行(sale_idで検索)を取得し、実際の領収書レイアウトで表示。
-   ・「PDFとして保存」ボタンで、画面表示中の領収書DOMをhtml2canvasで画像化し、
-     jsPDFでPDFファイルを直接組み立ててダウンロードする。★2026-08-14実装
-     (以前はwindow.print()を使っていたが、iOS Safari等でブラウザ標準の
-      印刷ヘッダー/フッターを消せない・余白の背景が黒く出る等の問題があり、
-      ブラウザの印刷機能に依存しない方式に作り直した)
+   ・「印刷 / PDFとして保存(別タブで開く)」ボタンで、window.open()で新しい空のタブを開き、
+     buildReceiptPrintHtml()で組み立てた領収書だけの独立した静的HTMLを書き込んでから、
+     そのタブでwindow.print()を呼び出す。★2026-08-14実装
+     (アプリ本体(ダーク背景・長いスクロール領域)を同一タブ内でCSSで隠す方式だと、
+      iOS Safari等でブラウザ標準のヘッダー/フッターが消せない・背景が黒く出る等の
+      問題が解消しきれなかったため、印刷対象を物理的に別タブへ分離する方式にした)
    ------------------------------------------------------------ */
-/* ---- 領収書の中身(画面プレビュー・PDF化の両方で共通利用) ★2026-08-14実装 ---- */
+/* ---- 領収書の中身(画面プレビュー用) ---- */
 function ReceiptDocument({ receipt, items, clubName }) {
   return (
     <div className="rounded-xl p-6" style={{ background: "#ffffff", color: "#1a1710" }}>
@@ -4973,10 +5053,6 @@ function ReceiptPreviewModal({ sale, onClose }) {
   const [editPaymentType, setEditPaymentType] = useState("現金");
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState(null);
-  // ★2026-08-14実装: window.print()ではなくhtml2canvas+jsPDFで画面表示をそのまま画像化してPDF化する
-  const printRef = useRef(null);
-  const [generatingPdf, setGeneratingPdf] = useState(false);
-  const [pdfError, setPdfError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -5153,54 +5229,31 @@ function ReceiptPreviewModal({ sale, onClose }) {
               )}
             </div>
 
-            {/* 画面プレビュー用。このDOMノードをそのままhtml2canvasで画像化してPDF化する ★2026-08-14実装 */}
-            <div ref={printRef}>
-              <ReceiptDocument receipt={receipt} items={items} clubName={clubName} />
-            </div>
-
-            {pdfError && (
-              <p className="text-sm rounded-lg px-3 py-2 mz-no-print" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{pdfError}</p>
-            )}
+            {/* 画面プレビュー用(通常表示) */}
+            <ReceiptDocument receipt={receipt} items={items} clubName={clubName} />
 
             <button
-              onClick={async () => {
-                if (!printRef.current || generatingPdf) return;
-                setPdfError(null);
-                setGeneratingPdf(true);
-                try {
-                  const canvas = await html2canvas(printRef.current, { scale: 2, backgroundColor: "#ffffff", useCORS: true });
-                  const imgData = canvas.toDataURL("image/png");
-                  const { jsPDF } = window.jspdf;
-                  const pdf = new jsPDF({ unit: "mm", format: "a4" });
-                  const pageWidth = pdf.internal.pageSize.getWidth();
-                  const pageHeight = pdf.internal.pageSize.getHeight();
-                  const imgWidth = pageWidth;
-                  const imgHeight = (canvas.height * imgWidth) / canvas.width;
-
-                  // 画像がA4 1枚に収まらない場合(まとめ領収書で品目が多い等)は複数ページに分割する
-                  let heightLeft = imgHeight;
-                  let position = 0;
-                  pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
-                  heightLeft -= pageHeight;
-                  while (heightLeft > 0) {
-                    position = heightLeft - imgHeight;
-                    pdf.addPage();
-                    pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
-                    heightLeft -= pageHeight;
-                  }
-
-                  pdf.save(`${buildReceiptFileName(receipt, clubName)}.pdf`);
-                } catch (e) {
-                  setPdfError("PDFの生成に失敗しました。時間をおいて再度お試しください。");
-                } finally {
-                  setGeneratingPdf(false);
+              onClick={() => {
+                // ★2026-08-14実装: アプリ本体を巻き込まないよう、領収書だけの独立した
+                // 静的HTMLを別タブで開き、そちらで印刷ダイアログを呼び出す。
+                const printWindow = window.open("", "_blank");
+                if (!printWindow) {
+                  alert("ポップアップがブロックされました。ブラウザの設定でこのサイトのポップアップを許可してから、もう一度お試しください。");
+                  return;
                 }
+                const html = buildReceiptPrintHtml(receipt, items, clubName);
+                printWindow.document.open();
+                printWindow.document.write(html);
+                printWindow.document.close();
+                printWindow.onload = () => {
+                  printWindow.focus();
+                  printWindow.print();
+                };
               }}
-              disabled={generatingPdf}
-              className="mz-no-print w-full rounded-lg py-2.5 text-sm font-medium disabled:opacity-60"
+              className="mz-no-print w-full rounded-lg py-2.5 text-sm font-medium"
               style={{ background: "var(--mz-gold)", color: "#1a1710" }}
             >
-              {generatingPdf ? "PDFを生成中..." : "PDFとして保存"}
+              印刷 / PDFとして保存(別タブで開く)
             </button>
           </>
         )}
