@@ -6393,6 +6393,149 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
 }
 
 /* ============================================================
+   仕入れロットへの一括紐付け(BulkBatchAssignModal) ★2026-08-17実装
+   ・「仕入れ商品」タブで複数選択した商品を、1つの仕入れロットへまとめて紐付ける(2.35参照)。
+   ・仕入れロットは送料・手数料が確定してから登録する運用のため、先に登録済みの商品(受注時点では
+     ロット未定・仕入代0円のことも多い)へ、後からロットだけをまとめて反映したいという要望への対応。
+   ・仕入代(purchase_amount_cny)自体は一切変更しない。送料・手数料(shipping_cny/fee_cny)のみを
+     選択したロットの配分ルール(computeBatchItemAmounts、1.9の「最終品吸収方式」)で自動計算し、
+     既存の updateProductCore に通すことで、必要なウォレットFIFO再消化(2.18と同じロジック)も
+     まとめて行う。
+   ・computeBatchItemAmountsの「最終品吸収方式」はDB上の実際の登録済み件数を数えて最終品かどうかを
+     判定するため、複数商品を並列処理すると最終品判定がずれる可能性がある。そのため必ず1件ずつ、
+     前の商品の更新が完了してから次の商品を処理する(Promise.allは使わない)。
+   ============================================================ */
+function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSaved }) {
+  // onSavedは呼び出し元(PendingPurchasesTab)で選択状態のクリア+再読み込みを行うため、
+  // その結果このモーダルへ渡されるproducts propは処理完了後に変わりうる(空になる等)。
+  // 処理結果(row status)の表示が消えてしまわないよう、開いた時点のリストをローカルに固定して使う。
+  const [items] = useState(products);
+  const [extraBatches, setExtraBatches] = useState([]); // この画面内で新規作成したロット(親のbatches propに反映されるまでの一時保持)
+  const [batchModalOpen, setBatchModalOpen] = useState(false);
+  const [batchId, setBatchId] = useState("");
+  const [processing, setProcessing] = useState(false);
+  const [rowStatus, setRowStatus] = useState({}); // { [productId]: "pending" | "done" | "error" }
+  const [errorMessages, setErrorMessages] = useState([]);
+  const [done, setDone] = useState(false);
+
+  const allBatches = useMemo(() => {
+    const ids = new Set(batches.map((b) => b.id));
+    return [...batches, ...extraBatches.filter((b) => !ids.has(b.id))];
+  }, [batches, extraBatches]);
+
+  const handleBatchCreated = async (form) => {
+    const res = await onCreateBatch(form);
+    if (!res.ok) { alert(res.message || "ロットの登録に失敗しました"); return; }
+    setExtraBatches((prev) => [...prev, res.batch]);
+    setBatchModalOpen(false);
+    setBatchId(res.batch.id);
+  };
+
+  const handleSubmit = async () => {
+    if (!batchId || processing) return;
+    const batch = allBatches.find((b) => b.id === batchId);
+    if (!batch) return;
+    if (!window.confirm(`選択中の${items.length}件を、このロットへ紐付けます(送料・手数料は自動計算され、仕入代は変更しません)。よろしいですか?`)) return;
+
+    setProcessing(true);
+    setErrorMessages([]);
+    const failed = [];
+    // 「最終品吸収方式」がDB上の登録済み件数に依存するため、必ず1件ずつ完了を待ってから次へ進む
+    for (const p of items) {
+      setRowStatus((prev) => ({ ...prev, [p.id]: "pending" }));
+      const amounts = await computeBatchItemAmounts(batch, p.id);
+      const form = { ...p, batch_id: batch.id, shipping_cny: amounts.shipping, fee_cny: amounts.fee };
+      const res = await updateProductCore(form, p);
+      if (!res.ok) {
+        failed.push(`${p.product_name || p.product_code || "(名称未設定)"}: ${res.message}`);
+        setRowStatus((prev) => ({ ...prev, [p.id]: "error" }));
+      } else {
+        if (res.warning) failed.push(`${p.product_name || p.product_code || "(名称未設定)"}: ${res.warning}`);
+        setRowStatus((prev) => ({ ...prev, [p.id]: "done" }));
+      }
+    }
+    setProcessing(false);
+    setDone(true);
+    setErrorMessages(failed);
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <div className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto"
+        style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+        <h2 className="font-display text-lg">仕入れロットへ一括登録</h2>
+        <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+          選択中の{items.length}件に、同じ仕入れロットをまとめて割り当てます。仕入代(商品代)は変更せず、送料・手数料のみロットの配分から自動計算されます。
+          既にロットが設定されている商品を含めると、そのロットの割り当ては上書きされます。
+        </p>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入れロット</label>
+          <div className="flex gap-2">
+            <select value={batchId} onChange={(e) => setBatchId(e.target.value)} disabled={processing}
+              className="flex-1 rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+              <option value="">選択してください</option>
+              {allBatches.map((b) => <option key={b.id} value={b.id}>{b.name ? `${b.name}(${b.purchase_date})` : b.purchase_date}</option>)}
+            </select>
+            <button type="button" onClick={() => setBatchModalOpen(true)} disabled={processing}
+              className="text-xs px-3 py-2 rounded-lg shrink-0 disabled:opacity-60" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+              + 新規ロット登録
+            </button>
+          </div>
+        </div>
+
+        <div className="rounded-lg divide-y max-h-64 overflow-y-auto" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+          {items.map((p) => (
+            <div key={p.id} className="flex items-center gap-3 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm truncate">{p.product_name || "(名称未設定)"}</p>
+                <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                  No.{p.product_code || "-"}{p.batch_id ? " ・ 既にロット紐付け済み" : ""}
+                </p>
+              </div>
+              {rowStatus[p.id] === "pending" && <span className="text-xs shrink-0" style={{ color: "var(--mz-ink-muted)" }}>処理中...</span>}
+              {rowStatus[p.id] === "done" && <span className="text-xs shrink-0" style={{ color: "#8fd19e" }}>✓ 完了</span>}
+              {rowStatus[p.id] === "error" && <span className="text-xs shrink-0" style={{ color: "#f2b8bd" }}>✗ 失敗</span>}
+            </div>
+          ))}
+        </div>
+
+        {errorMessages.length > 0 && (
+          <div className="rounded-lg px-3 py-2 text-xs space-y-1" style={{ background: "#3a1f22", color: "#f2b8bd" }}>
+            <p className="font-medium">一部の商品でエラー・警告が発生しました:</p>
+            {errorMessages.map((m, i) => <p key={i}>・{m}</p>)}
+          </div>
+        )}
+
+        {done && errorMessages.length === 0 && (
+          <p className="text-xs rounded-lg px-3 py-2" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" }}>
+            全件の登録が完了しました。
+          </p>
+        )}
+
+        <div className="flex gap-2 pt-1">
+          <button type="button" onClick={onClose} disabled={processing}
+            className="flex-1 rounded-lg py-2.5 text-sm disabled:opacity-60" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+            {done ? "閉じる" : "キャンセル"}
+          </button>
+          {!done && (
+            <button type="button" onClick={handleSubmit} disabled={!batchId || processing}
+              className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60" style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+              {processing ? "登録中..." : `${items.length}件を登録`}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {batchModalOpen && (
+        <BatchFormModal onClose={() => setBatchModalOpen(false)} onSave={handleBatchCreated} />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
    仕入れ商品(PendingPurchasesTab) ★2026-08-04実装
    ・「新規仕入で追加」(created_via_sale=true)で登録された商品は、サンプル・在庫の一覧や
      「在庫から追加」検索候補からは常に除外される(2.30参照)。この専用タブが唯一の
@@ -6411,6 +6554,21 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
   const [codeSearchText, setCodeSearchText] = useState("");
   const [codeSearchResult, setCodeSearchResult] = useState(null);
   const [codeSearching, setCodeSearching] = useState(false);
+  // ★2026-08-17実装: 複数商品を選択して、まとめて仕入れロットへ紐付けるための選択state(2.35参照)
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
+  const toggleSelect = (id) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+  const toggleSelectAll = () => {
+    if (!products) return;
+    setSelectedIds((prev) => (prev.length === products.length ? [] : products.map((p) => p.id)));
+  };
+  // productsが再読み込みされた際、一覧から消えた(=状態が変わった等)商品の選択は自動的に外す
+  useEffect(() => {
+    if (!products) return;
+    setSelectedIds((prev) => prev.filter((id) => products.some((p) => p.id === id)));
+  }, [products]);
 
   const handleCodeSearch = async () => {
     const code = codeSearchText.trim();
@@ -6532,9 +6690,31 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
       {products.length === 0 ? (
         <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>該当する商品はありません</p>
       ) : (
+        <>
+          {/* ★2026-08-17実装: 仕入れロットが確定してから、複数商品をまとめて紐付けられるようにする選択バー(2.35参照) */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <button type="button" onClick={toggleSelectAll} className="text-xs px-2.5 py-1.5 rounded-lg"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+              {selectedIds.length === products.length ? "選択解除" : "すべて選択"}
+            </button>
+            <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+              {selectedIds.length > 0 ? `${selectedIds.length}件選択中` : "商品を選択してロットへ一括登録できます"}
+            </span>
+            <button type="button" onClick={() => setBulkAssignOpen(true)} disabled={selectedIds.length === 0}
+              className="text-xs px-3 py-1.5 rounded-lg ml-auto disabled:opacity-40"
+              style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+              仕入れロットへ一括登録
+            </button>
+          </div>
         <div className="rounded-lg divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
           {products.map((p) => (
             <div key={p.id} className="flex items-center gap-3 px-3 py-3">
+              <input
+                type="checkbox"
+                checked={selectedIds.includes(p.id)}
+                onChange={() => toggleSelect(p.id)}
+                className="shrink-0 w-4 h-4"
+              />
               {p.product_image_url ? (
                 <img src={p.product_image_url} alt="" className="w-12 h-12 rounded-md object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
               ) : (
@@ -6546,6 +6726,7 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
                 <p className="text-sm truncate">{p.product_name || "(名称未設定)"}</p>
                 <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
                   {[p.category, p.size, p.product_code ? `No.${p.product_code}` : ""].filter(Boolean).join(" / ")}
+                  {p.batch_id ? " ・ ロット紐付け済み" : " ・ ロット未紐付け"}
                 </p>
                 {p.linkedSale ? (
                   <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
@@ -6577,6 +6758,7 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
             </div>
           ))}
         </div>
+        </>
       )}
 
       {modalProduct && (
@@ -6585,6 +6767,16 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
 
       {linkingProduct && (
         <SaleFormModal clubs={clubs} batches={batches} sale={null} initialProduct={linkingProduct} onClose={() => setLinkingProduct(null)} onSave={handleSaveLinkingSale} />
+      )}
+
+      {bulkAssignOpen && (
+        <BulkBatchAssignModal
+          products={products.filter((p) => selectedIds.includes(p.id))}
+          batches={batches}
+          onCreateBatch={onCreateBatch}
+          onClose={() => setBulkAssignOpen(false)}
+          onSaved={() => { setSelectedIds([]); loadAll(); }}
+        />
       )}
     </div>
   );
