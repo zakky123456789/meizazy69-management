@@ -3031,13 +3031,20 @@ function BatchList({ batches, usageCountByBatch, onEdit }) {
   }
   return (
     <div className="space-y-2">
-      {batches.map((b) => (
-        <div key={b.id} className="rounded-xl p-4" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+      {batches.map((b) => {
+        // ★2026-08-17実装: ロットに金額を入れただけではウォレットは消化されない(消化されるのは
+        //   その金額が商品へ振り分けられて保存されたとき)。紐付けが済んでいないロットは、実際には
+        //   支払済みの送料・手数料がウォレット残高に残ったままになるため、目立つように表示する(2.35参照)
+        const linked = usageCountByBatch[b.id] || 0;
+        const total = Number(b.total_items) || 0;
+        const remaining = total - linked;
+        return (
+        <div key={b.id} className="rounded-xl p-4" style={{ background: "var(--mz-surface)", border: `1px solid ${remaining > 0 ? "#7a5a3a" : "var(--mz-border)"}` }}>
           <div className="flex items-center justify-between flex-wrap gap-2">
             <p className="text-sm font-medium">{b.name ? `${b.name}(${b.purchase_date})` : b.purchase_date}</p>
             <div className="flex items-center gap-2">
-              <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-                使用済み: {usageCountByBatch[b.id] || 0} / {b.total_items} 点
+              <span className="text-xs" style={{ color: remaining === 0 ? "var(--mz-ink-muted)" : "#d6a98f" }}>
+                紐付け済み: {linked} / {total} 点
               </span>
               <button
                 onClick={() => onEdit(b)}
@@ -3052,8 +3059,19 @@ function BatchList({ batches, usageCountByBatch, onEdit }) {
             <span>送料合計: {b.total_shipping_cny} CNY(1点 {Number(b.per_item_shipping_cny).toFixed(2)})</span>
             <span>手数料合計: {b.total_fee_cny} CNY(1点 {Number(b.per_item_fee_cny).toFixed(2)})</span>
           </div>
+          {remaining > 0 && (
+            <p className="text-xs mt-2 rounded-lg px-2.5 py-1.5" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
+              ⚠️ 残り{remaining}点が未紐付けです。この分の送料・手数料はまだウォレットから消化されていません(残高が実態より多く見えています)。販売登録ページの「ロット紐付け」タブから商品に紐付けてください。
+            </p>
+          )}
+          {remaining < 0 && (
+            <p className="text-xs mt-2 rounded-lg px-2.5 py-1.5" style={{ background: "#3a1f22", color: "#f2b8bd" }}>
+              ⚠️ 総点数({total}点)より多い{linked}点が紐付いています。端数の調整が正しく働かず、合計がズレている可能性があります。ロットの総点数を実態に合わせて修正してください。
+            </p>
+          )}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -3798,6 +3816,39 @@ function ProductCard({ product, onEdit, onReturn, onDelete, onTogglePurpose }) {
 /* ★2026-08-04実装: 商品編集(既存商品のCNY金額変更を含む)の保存処理を共通関数として切り出し。
    ProductsPageの編集画面だけでなく、販売登録ページの「仕入れ商品」タブからの編集でも再利用する(2.30参照)。
    original: モーダルを開いた時点の元データ(CNY金額の変更検知に使用) */
+/* ★2026-08-17実装: 指定した商品に紐づく販売明細の利益(sale_items.profit_jpy)を、現在の確定原価から
+   再計算して書き戻す(2.35参照)。
+   ・profit_jpyは販売登録時点のスナップショットで、後から商品原価を修正しても自動追随しない(1.12参照)。
+   ・販売一覧(SaleCard)や月次損益は都度再計算するため画面上は正しく見えるが、ダッシュボードと
+     ホストクラブ詳細の利益合計は保存済みのprofit_jpyを合算するため、直さないと数字が食い違う。
+   ・そのため「後から原価を変える」処理(ロット一括紐付け等)では、変更後にこの関数を呼んで同期する。 */
+async function syncSaleItemProfits(productIds) {
+  if (!productIds || productIds.length === 0) return { ok: true };
+
+  const { data: prods, error: prodErr } = await supabase
+    .from("products")
+    .select("id,purchase_amount_jpy,shipping_jpy,fee_jpy")
+    .in("id", productIds);
+  if (prodErr) return { ok: false, message: "商品の確定原価の取得に失敗しました" };
+  const costById = {};
+  (prods || []).forEach((p) => { costById[p.id] = productCostJpy(p); });
+
+  const { data: rows, error: itemErr } = await supabase
+    .from("sale_items")
+    .select("id,product_id,unit_price_jpy")
+    .in("product_id", productIds);
+  if (itemErr) return { ok: false, message: "販売明細の取得に失敗しました" };
+  if (!rows || rows.length === 0) return { ok: true };
+
+  for (const row of rows) {
+    if (!(row.product_id in costById)) continue;
+    const profit = itemPretaxJpy(row.unit_price_jpy) - costById[row.product_id];
+    const { error: updErr } = await supabase.from("sale_items").update({ profit_jpy: profit }).eq("id", row.id);
+    if (updErr) return { ok: false, message: "販売明細の利益の更新に失敗しました" };
+  }
+  return { ok: true };
+}
+
 async function updateProductCore(form, original) {
   const orig = original || {};
   const oldTotalCny = (Number(orig.purchase_amount_cny) || 0) + (Number(orig.shipping_cny) || 0) + (Number(orig.fee_cny) || 0);
@@ -3857,6 +3908,8 @@ function ProductsPage() {
   const [products, setProducts] = useState(null); // null = 読み込み中
   const [batches, setBatches] = useState([]);
   const [consumptions, setConsumptions] = useState([]);
+  // ★2026-08-17実装: ロットごとの紐付け点数を数えるための、全商品のbatch_idのみの一覧(2.35参照)
+  const [batchLinkRows, setBatchLinkRows] = useState([]);
   const [error, setError] = useState(null);
   const [filterKind, setFilterKind] = useState("all"); // "all" | "sample_all" | "sample_display" | "sample_disposal" | "stock_normal" | "stock_returned"
   const [sortOrder, setSortOrder] = useState("desc"); // "desc"=登録日(仕入れ日)新しい順 / "asc"=古い順
@@ -3886,18 +3939,23 @@ function ProductsPage() {
 
   const loadAll = useCallback(async () => {
     setError(null);
-    const [productsRes, batchesRes, consumptionsRes] = await Promise.all([
+    const [productsRes, batchesRes, consumptionsRes, batchLinkRes] = await Promise.all([
       supabase.from("products")
         .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
         .eq("created_via_sale", false) // ★2026-08-04実装: 販売登録からの新規仕入はサンプル・在庫の一覧から除外(2.30参照)
         .order("created_at", { ascending: false }),
       supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
       supabase.from("agent_charge_consumptions").select("id,product_id"),
+      // ★2026-08-17修正: ロットの紐付け点数は「全商品」を対象に数える必要がある。上のproductsクエリは
+      //   created_via_sale=false(=受注商品を除外)で取得しているため、これを使って数えると、
+      //   受注商品しか入っていないロットが常に「0点」と表示されてしまう(2.35参照)。
+      supabase.from("products").select("batch_id").not("batch_id", "is", null),
     ]);
     if (productsRes.error) { setError("商品情報の取得に失敗しました"); setProducts([]); return; }
     setProducts(productsRes.data || []);
     setBatches(batchesRes.data || []);
     setConsumptions(consumptionsRes.data || []);
+    setBatchLinkRows(batchLinkRes.data || []);
   }, []);
 
   useEffect(() => { loadAll(); }, [loadAll]);
@@ -3914,11 +3972,12 @@ function ProductsPage() {
 
   const consumedProductIds = useMemo(() => new Set((consumptions || []).map((c) => c.product_id)), [consumptions]);
 
+  // ★2026-08-17修正: 受注商品(created_via_sale=true)も含めた全商品から数える(2.35参照)
   const usageCountByBatch = useMemo(() => {
     const m = {};
-    (products || []).forEach((p) => { if (p.batch_id) m[p.batch_id] = (m[p.batch_id] || 0) + 1; });
+    (batchLinkRows || []).forEach((p) => { if (p.batch_id) m[p.batch_id] = (m[p.batch_id] || 0) + 1; });
     return m;
-  }, [products]);
+  }, [batchLinkRows]);
 
   const filteredProducts = useMemo(() => {
     if (!products) return [];
@@ -6394,9 +6453,10 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
 
 /* ============================================================
    仕入れロットへの一括紐付け(BulkBatchAssignModal) ★2026-08-17実装
-   ・「仕入れ商品」タブで複数選択した商品を、1つの仕入れロットへまとめて紐付ける(2.35参照)。
-   ・仕入れロットは送料・手数料が確定してから登録する運用のため、先に登録済みの商品(受注時点では
-     ロット未定・仕入代0円のことも多い)へ、後からロットだけをまとめて反映したいという要望への対応。
+   ・「ロット紐付け」タブ(BatchLinkTab)で複数選択した商品を、1つの仕入れロットへまとめて紐付ける(2.35参照)。
+   ・仕入れロットは国際送料・手数料が確定してから登録する運用のため、商品(特に販売登録の
+     「新規仕入で追加」で作られた受注商品)はロット未定のまま先に登録されている。後からロットだけを
+     まとめて反映したい、という要望への対応。
    ・仕入代(purchase_amount_cny)自体は一切変更しない。送料・手数料(shipping_cny/fee_cny)のみを
      選択したロットの配分ルール(computeBatchItemAmounts、1.9の「最終品吸収方式」)で自動計算し、
      既存の updateProductCore に通すことで、必要なウォレットFIFO再消化(2.18と同じロジック)も
@@ -6404,9 +6464,12 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
    ・computeBatchItemAmountsの「最終品吸収方式」はDB上の実際の登録済み件数を数えて最終品かどうかを
      判定するため、複数商品を並列処理すると最終品判定がずれる可能性がある。そのため必ず1件ずつ、
      前の商品の更新が完了してから次の商品を処理する(Promise.allは使わない)。
+   ・同じ理由で「ロットの総点数(total_items)」と「実際に紐付く商品の合計点数」が一致していないと、
+     最終品での差額吸収が働かず、ロット合計と商品側の合計がズレる。ロットを選んだ時点で
+     既存の紐付け件数をDBから数え、点数が合わない場合は警告を表示する。
    ============================================================ */
 function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSaved }) {
-  // onSavedは呼び出し元(PendingPurchasesTab)で選択状態のクリア+再読み込みを行うため、
+  // onSavedは呼び出し元(BatchLinkTab)で選択状態のクリア+再読み込みを行うため、
   // その結果このモーダルへ渡されるproducts propは処理完了後に変わりうる(空になる等)。
   // 処理結果(row status)の表示が消えてしまわないよう、開いた時点のリストをローカルに固定して使う。
   const [items] = useState(products);
@@ -6417,11 +6480,54 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
   const [rowStatus, setRowStatus] = useState({}); // { [productId]: "pending" | "done" | "error" }
   const [errorMessages, setErrorMessages] = useState([]);
   const [done, setDone] = useState(false);
+  // ★選択したロットに「今回選ぶ商品以外で」既に紐付いている件数(点数チェック用)
+  const [otherLinkedCount, setOtherLinkedCount] = useState(null);
+  const [countCheckError, setCountCheckError] = useState(false);
 
   const allBatches = useMemo(() => {
     const ids = new Set(batches.map((b) => b.id));
     return [...batches, ...extraBatches.filter((b) => !ids.has(b.id))];
   }, [batches, extraBatches]);
+
+  const selectedBatch = allBatches.find((b) => b.id === batchId) || null;
+
+  // ロットを選ぶたびに、そのロットに既に紐付いている商品数を数え直す(今回選択中の商品は除く)
+  useEffect(() => {
+    if (!batchId) { setOtherLinkedCount(null); setCountCheckError(false); return; }
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase.from("products").select("id").eq("batch_id", batchId);
+      if (cancelled) return;
+      // ★取得に失敗した場合は「チェックできなかった」ことを明示する。黙って非表示にすると、
+      //   点数が合っていないのに何の警告も出ないまま登録できてしまう。
+      if (error || !data) { setOtherLinkedCount(null); setCountCheckError(true); return; }
+      setCountCheckError(false);
+      const selectedIdSet = new Set(items.map((p) => p.id));
+      setOtherLinkedCount(data.filter((r) => !selectedIdSet.has(r.id)).length);
+    })();
+    return () => { cancelled = true; };
+  }, [batchId, items]);
+
+  // 紐付け後にこのロットへ紐付く合計点数と、ロットの総点数(total_items)の突き合わせ
+  const countCheck = useMemo(() => {
+    if (!selectedBatch || otherLinkedCount === null) return null;
+    const totalItems = Number(selectedBatch.total_items) || 0;
+    const after = otherLinkedCount + items.length;
+    return { totalItems, after, matches: totalItems === after };
+  }, [selectedBatch, otherLinkedCount, items]);
+
+  // ★別のロットに既に紐付いている商品を選んでいる場合の警告。付け替えると「元のロット」側は
+  //   点数が減るため、そのロットの送料・手数料の合計と商品側の合計が合わなくなる(1.9の最終品吸収は
+  //   総点数に達したときにだけ働くため、減った側は自動では直らない)。
+  const reassignFrom = useMemo(() => {
+    const names = items
+      .filter((p) => p.batch_id && p.batch_id !== batchId)
+      .map((p) => {
+        const b = batches.find((x) => x.id === p.batch_id);
+        return b ? (b.name ? `${b.name}(${b.purchase_date})` : b.purchase_date) : "別のロット";
+      });
+    return [...new Set(names)];
+  }, [items, batchId, batches]);
 
   const handleBatchCreated = async (form) => {
     const res = await onCreateBatch(form);
@@ -6435,28 +6541,68 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
     if (!batchId || processing) return;
     const batch = allBatches.find((b) => b.id === batchId);
     if (!batch) return;
-    if (!window.confirm(`選択中の${items.length}件を、このロットへ紐付けます(送料・手数料は自動計算され、仕入代は変更しません)。よろしいですか?`)) return;
+    const warns = [];
+    if (countCheck && !countCheck.matches) {
+      warns.push(`⚠️ 点数が一致していません(このロットに紐付く合計 ${countCheck.after}点 / ロットの総点数 ${countCheck.totalItems}点)。\nこのまま進めると、ロットの送料・手数料の合計と、商品側に配分された合計がズレます。`);
+    }
+    if (countCheckError) {
+      warns.push("⚠️ 点数の確認ができませんでした(通信エラー)。ロットの総点数と実際の紐付け点数が合っているか、登録後にご確認ください。");
+    }
+    if (reassignFrom.length > 0) {
+      warns.push(`⚠️ 別のロット(${reassignFrom.join("、")})に紐付いている商品が含まれています。付け替えると、元のロット側は点数が減り、送料・手数料の合計が合わなくなります。`);
+    }
+    const warn = warns.length > 0 ? `\n\n${warns.join("\n\n")}` : "";
+    if (!window.confirm(`選択中の${items.length}件を、このロットへ紐付けます(送料・手数料は自動計算され、仕入代は変更しません)。よろしいですか?${warn}`)) return;
 
     setProcessing(true);
     setErrorMessages([]);
-    const failed = [];
+    const messages = [];
+    const succeededIds = [];
+    const nameOf = (p) => p.product_name || p.product_code || "(名称未設定)";
+
     // 「最終品吸収方式」がDB上の登録済み件数に依存するため、必ず1件ずつ完了を待ってから次へ進む
-    for (const p of items) {
+    for (let i = 0; i < items.length; i++) {
+      const p = items[i];
       setRowStatus((prev) => ({ ...prev, [p.id]: "pending" }));
       const amounts = await computeBatchItemAmounts(batch, p.id);
       const form = { ...p, batch_id: batch.id, shipping_cny: amounts.shipping, fee_cny: amounts.fee };
       const res = await updateProductCore(form, p);
+
       if (!res.ok) {
-        failed.push(`${p.product_name || p.product_code || "(名称未設定)"}: ${res.message}`);
+        // ★updateProductCoreは「ウォレットの旧消化を払い戻してからUPDATE」の順で動くため、
+        //   ここで失敗した場合はウォレット残高と商品の状態が食い違っている可能性がある。
+        //   そのまま次の商品を処理すると、その不整合な残高を前提にFIFO消化が進んでしまうため、
+        //   1件でも失敗したらループを中断する(残りは未処理のまま残し、原因解消後にやり直す)。
+        messages.push(`${nameOf(p)}: ${res.message}`);
         setRowStatus((prev) => ({ ...prev, [p.id]: "error" }));
+        const remaining = items.length - (i + 1);
+        if (remaining > 0) {
+          messages.push(`エラーが発生したため、残り${remaining}件は処理していません。ウォレット残高と上記商品の状態を確認してから、改めてやり直してください。`);
+        }
+        break;
+      }
+
+      succeededIds.push(p.id);
+      if (res.warning) {
+        // 商品自体は更新されたがウォレット再消化でエラー → 「完了」ではなく警告として明示する
+        messages.push(`${nameOf(p)}: ${res.warning}`);
+        setRowStatus((prev) => ({ ...prev, [p.id]: "warn" }));
       } else {
-        if (res.warning) failed.push(`${p.product_name || p.product_code || "(名称未設定)"}: ${res.warning}`);
         setRowStatus((prev) => ({ ...prev, [p.id]: "done" }));
       }
     }
+
+    // ★原価が変わった商品について、販売明細に保存済みの利益(sale_items.profit_jpy)を再計算して同期する。
+    //   profit_jpyは登録時点のスナップショットで原価修正に自動追随しない(1.12参照)。ダッシュボードや
+    //   ホストクラブ別の利益合計はこの保存値を集計するため、ここで直さないと月次損益(都度再計算)とズレる。
+    if (succeededIds.length > 0) {
+      const syncRes = await syncSaleItemProfits(succeededIds);
+      if (!syncRes.ok) messages.push(`販売明細の利益(profit_jpy)の再計算に失敗しました: ${syncRes.message}`);
+    }
+
     setProcessing(false);
     setDone(true);
-    setErrorMessages(failed);
+    setErrorMessages(messages);
     onSaved();
   };
 
@@ -6466,8 +6612,10 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
         style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
         <h2 className="font-display text-lg">仕入れロットへ一括登録</h2>
         <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-          選択中の{items.length}件に、同じ仕入れロットをまとめて割り当てます。仕入代(商品代)は変更せず、送料・手数料のみロットの配分から自動計算されます。
+          選択中の{items.length}件に、同じ仕入れロットをまとめて割り当てます。仕入代(商品代)の入力値は変更せず、送料・手数料のみロットの配分から自動計算されます。
           既にロットが設定されている商品を含めると、そのロットの割り当ては上書きされます。
+          金額が変わるため、各商品のウォレット消化は一度取り消して再消化されます(そのときのFIFO順で消化し直すため、
+          適用される為替レート、つまり確定JPY原価が多少変わることがあります)。
         </p>
 
         <div>
@@ -6485,6 +6633,47 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
           </div>
         </div>
 
+        {/* ★点数チェック: ロットの総点数と、紐付け後に実際にこのロットへ紐付く点数を突き合わせる。
+            一致していないと「最終品吸収方式」による差額吸収が働かず、合計がズレる(1.9参照) */}
+        {countCheck && (
+          <div className="rounded-lg px-3 py-2 text-xs space-y-0.5"
+            style={countCheck.matches
+              ? { background: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" }
+              : { background: "#3a2a1f", color: "#d6a98f" }}>
+            <p>
+              ロットの総点数: {countCheck.totalItems}点 / 紐付け後の合計: {countCheck.after}点
+              {otherLinkedCount > 0 ? `(既存 ${otherLinkedCount}点 + 今回 ${items.length}点)` : ""}
+            </p>
+            {/* ★端数の扱いを事前に見せる: 1点あたりは小数点4桁まで保持し、総点数に達する最後の1点で
+                「ロット合計 − 既に登録済みの実際の合計」を差額として吸収する(1.9「最終品吸収方式」) */}
+            {selectedBatch && (
+              <p>
+                1点あたり: 送料 {preciseCny(selectedBatch.per_item_shipping_cny)} CNY ・ 手数料 {preciseCny(selectedBatch.per_item_fee_cny)} CNY
+                (割り切れない分は最後の1点で差額調整され、合計は必ずロット合計と一致します)
+              </p>
+            )}
+            {countCheck.matches ? (
+              <p>点数が一致しています。送料・手数料の合計はロット合計とぴったり一致します。</p>
+            ) : (
+              <p>⚠️ 点数が一致していません。このまま登録すると、ロットの送料・手数料合計と商品側の合計がズレます(ロットの総点数を修正するか、選択する商品を調整してください)。</p>
+            )}
+          </div>
+        )}
+
+        {countCheckError && (
+          <div className="rounded-lg px-3 py-2 text-xs" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
+            ⚠️ 点数の確認ができませんでした(通信エラー)。ロットの総点数と実際の紐付け点数が合っているか、登録後にご確認ください。
+          </div>
+        )}
+
+        {/* ★別ロットからの付け替えは、元のロット側の合計が合わなくなるため明示的に警告する */}
+        {reassignFrom.length > 0 && (
+          <div className="rounded-lg px-3 py-2 text-xs" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
+            ⚠️ 別のロット({reassignFrom.join("、")})に紐付いている商品が含まれています。付け替えると、元のロット側は点数が減り、
+            送料・手数料の合計が合わなくなります(元のロットの総点数も併せて修正してください)。
+          </div>
+        )}
+
         <div className="rounded-lg divide-y max-h-64 overflow-y-auto" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
           {items.map((p) => (
             <div key={p.id} className="flex items-center gap-3 px-3 py-2">
@@ -6496,7 +6685,9 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
               </div>
               {rowStatus[p.id] === "pending" && <span className="text-xs shrink-0" style={{ color: "var(--mz-ink-muted)" }}>処理中...</span>}
               {rowStatus[p.id] === "done" && <span className="text-xs shrink-0" style={{ color: "#8fd19e" }}>✓ 完了</span>}
+              {rowStatus[p.id] === "warn" && <span className="text-xs shrink-0" style={{ color: "#d6a98f" }}>⚠ 要確認</span>}
               {rowStatus[p.id] === "error" && <span className="text-xs shrink-0" style={{ color: "#f2b8bd" }}>✗ 失敗</span>}
+              {!rowStatus[p.id] && done && <span className="text-xs shrink-0" style={{ color: "var(--mz-ink-muted)" }}>- 未処理</span>}
             </div>
           ))}
         </div>
@@ -6536,6 +6727,245 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
 }
 
 /* ============================================================
+   ロット紐付け(BatchLinkTab) ★2026-08-17実装
+   ・仕入れロットは国際送料・手数料が確定してから登録する運用のため、商品を登録する時点では
+     ロットがまだ存在しない。特に販売登録の「新規仕入で追加」で作られた受注商品は、保存と同時に
+     status が「販売済み」になり(2.4参照)、「仕入れ商品」タブ(status=未販売のみ)にも
+     サンプル・在庫一覧(created_via_sale=falseのみ)にも出てこなくなる。
+   ・そのため従来は「販売一覧 → 該当の販売を編集 → 明細の『仕入編集』 → ロットを選ぶ」という
+     手順を、商品1点ごと・販売1件ごとに繰り返す必要があった。
+   ・このタブは、その紐付け作業だけを目的に、状態(未販売/販売済み/返品済み)を問わず
+     ロット未紐付けの商品を横断表示し、チェックで複数選択して一括で紐付けられるようにする(2.35参照)。
+   ============================================================ */
+function BatchLinkTab({ batches, onCreateBatch }) {
+  const [products, setProducts] = useState(null); // null=読込中
+  const [linkFilter, setLinkFilter] = useState("unlinked"); // "unlinked" | "all"
+  const [kindFilter, setKindFilter] = useState("all"); // "all" | "order" | "sample" | "stock"
+  const [searchText, setSearchText] = useState("");
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
+  const [loadError, setLoadError] = useState(null);
+  // ★紐付けが全点数分そろっていないロット(= ウォレット未消化分が残っているロット)
+  const [pendingBatches, setPendingBatches] = useState([]);
+
+  const loadAll = useCallback(async () => {
+    setProducts(null);
+    setLoadError(null);
+    let query = supabase
+      .from("products")
+      .select("id,type,status,sample_purpose,created_via_sale,return_source_product_id,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      // ★返品在庫(return_source_product_idあり)は常に除外する。返品登録はコスト0円・ウォレット消化なしで
+      //   作られる行(1.10参照)で、batch_idが永久にnullのままのため、除外しないとこの一覧に residual として
+      //   出続け、誤って選択するとウォレットから送料を二重に消化してしまう。
+      .is("return_source_product_id", null)
+      .order("created_at", { ascending: false });
+    if (linkFilter === "unlinked") query = query.is("batch_id", null);
+    const { data: productsData, error } = await query;
+    if (error) { setLoadError("商品の読み込みに失敗しました"); setProducts([]); return; }
+
+    // どの販売に紐づいているかを併記する(PendingPurchasesTabと同じく、埋め込みではなく2段階取得。2.30参照)
+    const ids = (productsData || []).map((p) => p.id);
+    const linkMap = {};
+    if (ids.length > 0) {
+      const { data: linkRows, error: linkErr } = await supabase
+        .from("sale_items")
+        .select("product_id,sale_id")
+        .in("product_id", ids);
+      if (!linkErr && linkRows && linkRows.length > 0) {
+        const saleIds = [...new Set(linkRows.map((r) => r.sale_id))];
+        const { data: salesData } = await supabase
+          .from("sales")
+          .select("id,transaction_date,host_clubs(name),hosts(name)")
+          .in("id", saleIds);
+        const saleById = {};
+        (salesData || []).forEach((s) => { saleById[s.id] = s; });
+        linkRows.forEach((r) => { linkMap[r.product_id] = saleById[r.sale_id] || null; });
+      }
+    }
+    setProducts((productsData || []).map((p) => ({ ...p, linkedSale: linkMap[p.id] || null })));
+  }, [linkFilter]);
+
+  // ★2026-08-17実装: 「まだ全点数の紐付けが終わっていないロット」を検出して先頭に案内する。
+  //   ロットに金額を入れただけではウォレットは消化されないため(消化は商品へ振り分けた時点)、
+  //   紐付け漏れがあると、実際には支払済みの送料・手数料がウォレット残高に残り続ける(2.35参照)。
+  const loadPendingBatches = useCallback(async () => {
+    const { data, error } = await supabase.from("products").select("batch_id").not("batch_id", "is", null);
+    if (error || !data) { setPendingBatches([]); return; }
+    const countById = {};
+    data.forEach((r) => { countById[r.batch_id] = (countById[r.batch_id] || 0) + 1; });
+    setPendingBatches(
+      batches
+        .map((b) => ({ batch: b, linked: countById[b.id] || 0, total: Number(b.total_items) || 0 }))
+        .filter((x) => x.linked < x.total)
+    );
+  }, [batches]);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+  useEffect(() => { loadPendingBatches(); }, [loadPendingBatches]);
+
+  // 商品の区分ラベル(受注 / サンプル(目的) / 在庫)。返品在庫はクエリ側で除外済み
+  const kindOf = (p) => {
+    if (p.created_via_sale) return "受注";
+    if (p.type === "sample") return `サンプル(${p.sample_purpose || "展示用"})`;
+    return "在庫";
+  };
+
+  const filtered = useMemo(() => {
+    if (!products) return [];
+    const q = searchText.trim().toLowerCase();
+    return products.filter((p) => {
+      if (kindFilter === "order" && !p.created_via_sale) return false;
+      if (kindFilter === "sample" && (p.created_via_sale || p.type !== "sample")) return false;
+      if (kindFilter === "stock" && (p.created_via_sale || p.type !== "stock")) return false;
+      if (q) {
+        const hay = `${p.product_name || ""} ${p.product_code || ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [products, kindFilter, searchText]);
+
+  // フィルタや再読み込みで一覧から消えた商品の選択は自動的に外す
+  useEffect(() => {
+    setSelectedIds((prev) => prev.filter((id) => filtered.some((p) => p.id === id)));
+  }, [filtered]);
+
+  const toggleSelect = (id) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+  const allSelected = filtered.length > 0 && selectedIds.length === filtered.length;
+  const toggleSelectAll = () => {
+    setSelectedIds(allSelected ? [] : filtered.map((p) => p.id));
+  };
+
+  const selectClass = "rounded-lg px-3 py-2 text-sm bg-transparent";
+  const selectStyle = { border: "1px solid var(--mz-border)", color: "var(--mz-ink)" };
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+        仕入れロットが確定した後で、そのロットに含まれる商品をまとめて紐付けるための画面です。販売登録済み(販売済み)の受注商品も、
+        サンプル・在庫も、状態を問わずここに表示されます。チェックを入れて「仕入れロットへ一括登録」を押すと、選択した全商品に同じロットが割り当てられ、
+        送料・手数料が自動計算されます(仕入代は変更されません)。返品在庫はコスト0円で扱うため、この一覧には表示されません。
+      </p>
+
+      {loadError && (
+        <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{loadError}</p>
+      )}
+
+      {/* ★未消化(紐付け未完了)のロットがあれば先頭で案内する。ロット登録だけではウォレットは減らないため */}
+      {pendingBatches.length > 0 && (
+        <div className="rounded-xl p-4 text-xs space-y-1.5" style={{ background: "#3a2a1f", color: "#d6a98f", border: "1px solid #7a5a3a" }}>
+          <p className="font-medium">紐付けが済んでいない仕入れロットがあります</p>
+          {pendingBatches.map(({ batch, linked, total }) => (
+            <p key={batch.id}>
+              ・{batch.name ? `${batch.name}(${batch.purchase_date})` : batch.purchase_date}: {linked} / {total} 点(残り{total - linked}点)
+            </p>
+          ))}
+          <p className="pt-0.5">
+            ロットに金額を入れただけではウォレットは消化されません(消化されるのは商品へ振り分けて保存した時点です)。
+            残りを紐付けるまで、その分の送料・手数料はウォレット残高に残ったままになります。
+          </p>
+        </div>
+      )}
+
+      <div className="rounded-xl p-4 space-y-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+        <div className="flex flex-wrap gap-2">
+          <select value={linkFilter} onChange={(e) => setLinkFilter(e.target.value)} className={selectClass} style={selectStyle}>
+            <option value="unlinked">ロット未紐付けのみ</option>
+            <option value="all">すべて(紐付け済みも表示)</option>
+          </select>
+          <select value={kindFilter} onChange={(e) => setKindFilter(e.target.value)} className={selectClass} style={selectStyle}>
+            <option value="all">区分: すべて</option>
+            <option value="order">受注(新規仕入対応)</option>
+            <option value="sample">サンプル</option>
+            <option value="stock">在庫</option>
+          </select>
+        </div>
+        <input
+          type="text" value={searchText} onChange={(e) => setSearchText(e.target.value)}
+          placeholder="商品名・商品番号で絞り込み"
+          className="w-full rounded-lg px-3 py-2 text-sm bg-transparent" style={selectStyle}
+        />
+      </div>
+
+      {products === null ? (
+        <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+      ) : filtered.length === 0 ? (
+        <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>該当する商品はありません</p>
+      ) : (
+        <>
+          <div className="flex items-center gap-3 flex-wrap">
+            <button type="button" onClick={toggleSelectAll} className="text-xs px-2.5 py-1.5 rounded-lg"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+              {allSelected ? "選択解除" : `表示中の${filtered.length}件をすべて選択`}
+            </button>
+            <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+              {selectedIds.length > 0 ? `${selectedIds.length}件選択中` : "商品を選択してください"}
+            </span>
+            <button type="button" onClick={() => setBulkAssignOpen(true)} disabled={selectedIds.length === 0}
+              className="text-xs px-3 py-1.5 rounded-lg ml-auto disabled:opacity-40"
+              style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+              仕入れロットへ一括登録
+            </button>
+          </div>
+
+          <div className="rounded-lg divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+            {filtered.map((p) => (
+              <label key={p.id} className="flex items-center gap-3 px-3 py-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={selectedIds.includes(p.id)}
+                  onChange={() => toggleSelect(p.id)}
+                  className="shrink-0 w-4 h-4"
+                />
+                {p.product_image_url ? (
+                  <img src={p.product_image_url} alt="" className="w-12 h-12 rounded-md object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
+                ) : (
+                  <div className="w-12 h-12 rounded-md flex items-center justify-center shrink-0" style={{ background: "var(--mz-surface-hover)" }}>
+                    <Icon name="tag" className="w-5 h-5" style={{ color: "var(--mz-ink-muted)" }} />
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm truncate">{p.product_name || "(名称未設定)"}</p>
+                  <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                    {[kindOf(p), p.status, p.size, p.product_code ? `No.${p.product_code}` : ""].filter(Boolean).join(" / ")}
+                  </p>
+                  {p.linkedSale ? (
+                    <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
+                      販売: {p.linkedSale.transaction_date} ・ {p.linkedSale.host_clubs ? p.linkedSale.host_clubs.name : "-"}
+                      {p.linkedSale.hosts ? ` / ${p.linkedSale.hosts.name}` : ""}
+                    </p>
+                  ) : null}
+                  {p.batch_id && (
+                    <p className="text-xs mt-0.5" style={{ color: "#d6a98f" }}>
+                      ロット紐付け済み{(() => {
+                        const b = batches.find((x) => x.id === p.batch_id);
+                        return b ? `: ${b.name ? `${b.name}(${b.purchase_date})` : b.purchase_date}` : "";
+                      })()}
+                    </p>
+                  )}
+                </div>
+              </label>
+            ))}
+          </div>
+        </>
+      )}
+
+      {bulkAssignOpen && (
+        <BulkBatchAssignModal
+          products={filtered.filter((p) => selectedIds.includes(p.id))}
+          batches={batches}
+          onCreateBatch={onCreateBatch}
+          onClose={() => setBulkAssignOpen(false)}
+          onSaved={() => { setSelectedIds([]); loadAll(); loadPendingBatches(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
    仕入れ商品(PendingPurchasesTab) ★2026-08-04実装
    ・「新規仕入で追加」(created_via_sale=true)で登録された商品は、サンプル・在庫の一覧や
      「在庫から追加」検索候補からは常に除外される(2.30参照)。この専用タブが唯一の
@@ -6554,21 +6984,6 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
   const [codeSearchText, setCodeSearchText] = useState("");
   const [codeSearchResult, setCodeSearchResult] = useState(null);
   const [codeSearching, setCodeSearching] = useState(false);
-  // ★2026-08-17実装: 複数商品を選択して、まとめて仕入れロットへ紐付けるための選択state(2.35参照)
-  const [selectedIds, setSelectedIds] = useState([]);
-  const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
-  const toggleSelect = (id) => {
-    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  };
-  const toggleSelectAll = () => {
-    if (!products) return;
-    setSelectedIds((prev) => (prev.length === products.length ? [] : products.map((p) => p.id)));
-  };
-  // productsが再読み込みされた際、一覧から消えた(=状態が変わった等)商品の選択は自動的に外す
-  useEffect(() => {
-    if (!products) return;
-    setSelectedIds((prev) => prev.filter((id) => products.some((p) => p.id === id)));
-  }, [products]);
 
   const handleCodeSearch = async () => {
     const code = codeSearchText.trim();
@@ -6690,31 +7105,9 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
       {products.length === 0 ? (
         <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>該当する商品はありません</p>
       ) : (
-        <>
-          {/* ★2026-08-17実装: 仕入れロットが確定してから、複数商品をまとめて紐付けられるようにする選択バー(2.35参照) */}
-          <div className="flex items-center gap-3 flex-wrap">
-            <button type="button" onClick={toggleSelectAll} className="text-xs px-2.5 py-1.5 rounded-lg"
-              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
-              {selectedIds.length === products.length ? "選択解除" : "すべて選択"}
-            </button>
-            <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-              {selectedIds.length > 0 ? `${selectedIds.length}件選択中` : "商品を選択してロットへ一括登録できます"}
-            </span>
-            <button type="button" onClick={() => setBulkAssignOpen(true)} disabled={selectedIds.length === 0}
-              className="text-xs px-3 py-1.5 rounded-lg ml-auto disabled:opacity-40"
-              style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
-              仕入れロットへ一括登録
-            </button>
-          </div>
         <div className="rounded-lg divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
           {products.map((p) => (
             <div key={p.id} className="flex items-center gap-3 px-3 py-3">
-              <input
-                type="checkbox"
-                checked={selectedIds.includes(p.id)}
-                onChange={() => toggleSelect(p.id)}
-                className="shrink-0 w-4 h-4"
-              />
               {p.product_image_url ? (
                 <img src={p.product_image_url} alt="" className="w-12 h-12 rounded-md object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
               ) : (
@@ -6726,7 +7119,6 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
                 <p className="text-sm truncate">{p.product_name || "(名称未設定)"}</p>
                 <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
                   {[p.category, p.size, p.product_code ? `No.${p.product_code}` : ""].filter(Boolean).join(" / ")}
-                  {p.batch_id ? " ・ ロット紐付け済み" : " ・ ロット未紐付け"}
                 </p>
                 {p.linkedSale ? (
                   <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
@@ -6758,7 +7150,6 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
             </div>
           ))}
         </div>
-        </>
       )}
 
       {modalProduct && (
@@ -6767,16 +7158,6 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
 
       {linkingProduct && (
         <SaleFormModal clubs={clubs} batches={batches} sale={null} initialProduct={linkingProduct} onClose={() => setLinkingProduct(null)} onSave={handleSaveLinkingSale} />
-      )}
-
-      {bulkAssignOpen && (
-        <BulkBatchAssignModal
-          products={products.filter((p) => selectedIds.includes(p.id))}
-          batches={batches}
-          onCreateBatch={onCreateBatch}
-          onClose={() => setBulkAssignOpen(false)}
-          onSaved={() => { setSelectedIds([]); loadAll(); }}
-        />
       )}
     </div>
   );
@@ -7044,42 +7425,53 @@ function SalesPage() {
       </div>
 
       {/* ★2026-07-19実装: 販売一覧 / 領収書発行(まとめ発行) / 未発注リストのタブ */}
+      {/* ★2026-08-17: タブが6つになりスマホ幅に収まらなくなったため、横スクロール可能にした */}
+      <div className="overflow-x-auto -mx-1 px-1">
       <div className="flex gap-1.5 p-1 rounded-lg" style={{ background: "var(--mz-surface-hover)", width: "fit-content" }}>
         <button
           type="button" onClick={() => setActiveTab("list")}
-          className="text-xs px-3 py-1.5 rounded-md"
+          className="text-xs px-3 py-1.5 rounded-md whitespace-nowrap"
           style={activeTab === "list" ? { background: "var(--mz-gold)", color: "#1a1710" } : { color: "var(--mz-ink-muted)" }}
         >
           販売一覧
         </button>
         <button
           type="button" onClick={() => setActiveTab("merge")}
-          className="text-xs px-3 py-1.5 rounded-md"
+          className="text-xs px-3 py-1.5 rounded-md whitespace-nowrap"
           style={activeTab === "merge" ? { background: "var(--mz-gold)", color: "#1a1710" } : { color: "var(--mz-ink-muted)" }}
         >
           領収書発行
         </button>
         <button
           type="button" onClick={() => setActiveTab("unordered")}
-          className="text-xs px-3 py-1.5 rounded-md"
+          className="text-xs px-3 py-1.5 rounded-md whitespace-nowrap"
           style={activeTab === "unordered" ? { background: "var(--mz-gold)", color: "#1a1710" } : { color: "var(--mz-ink-muted)" }}
         >
           未発注リスト
         </button>
         <button
           type="button" onClick={() => setActiveTab("pending")}
-          className="text-xs px-3 py-1.5 rounded-md"
+          className="text-xs px-3 py-1.5 rounded-md whitespace-nowrap"
           style={activeTab === "pending" ? { background: "var(--mz-gold)", color: "#1a1710" } : { color: "var(--mz-ink-muted)" }}
         >
           仕入れ商品
         </button>
         <button
           type="button" onClick={() => setActiveTab("reorder")}
-          className="text-xs px-3 py-1.5 rounded-md"
+          className="text-xs px-3 py-1.5 rounded-md whitespace-nowrap"
           style={activeTab === "reorder" ? { background: "var(--mz-gold)", color: "#1a1710" } : { color: "var(--mz-ink-muted)" }}
         >
           再仕入れ検討
         </button>
+        {/* ★2026-08-17実装: 送料確定後に登録した仕入れロットを、既存商品へまとめて紐付けるタブ(2.35参照) */}
+        <button
+          type="button" onClick={() => setActiveTab("batchlink")}
+          className="text-xs px-3 py-1.5 rounded-md whitespace-nowrap"
+          style={activeTab === "batchlink" ? { background: "var(--mz-gold)", color: "#1a1710" } : { color: "var(--mz-ink-muted)" }}
+        >
+          ロット紐付け
+        </button>
+      </div>
       </div>
 
       {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
@@ -7105,6 +7497,10 @@ function SalesPage() {
 
       {activeTab === "pending" && (
         <PendingPurchasesTab batches={batches} clubs={clubs} onCreateBatch={handleCreateBatchInlineSales} onSaveSale={handleSaveSale} />
+      )}
+
+      {activeTab === "batchlink" && (
+        <BatchLinkTab batches={batches} onCreateBatch={handleCreateBatchInlineSales} />
       )}
 
       {activeTab === "reorder" && sales !== null && (
