@@ -2920,11 +2920,13 @@ async function getWalletRemainingTotal() {
 /* ---- 仕入れ確定(products登録)時の共通処理 ----
    ウォレットからCNY合計をFIFO消化し、消化結果(JPY換算額)をproductsレコードに反映する。
    ProductsPage(通常の仕入れ登録)・SalesPage(販売画面からの新規仕入対応)の両方から呼び出す共通ヘルパー。 */
-async function consumeAndFinalizeProductCost(productId, { purchaseCny, shippingCny, feeCny }) {
-  const results = { purchase_amount_jpy: 0, shipping_jpy: 0, fee_jpy: 0 };
+async function consumeAndFinalizeProductCost(productId, { purchaseCny, shippingCny, feeCny, domesticShippingCny }) {
+  const results = { purchase_amount_jpy: 0, shipping_jpy: 0, fee_jpy: 0, domestic_shipping_jpy: 0 };
   const steps = [
     { cny: purchaseCny, type: "商品仕入", key: "purchase_amount_jpy" },
     { cny: shippingCny, type: "国際送料", key: "shipping_jpy" },
+    // ★2026-08-17実装: 中国国内送料(1点ごとに入力。ロットの按分対象外)。2.36参照
+    { cny: domesticShippingCny, type: "中国国内送料", key: "domestic_shipping_jpy" },
     { cny: feeCny, type: "その他手数料", key: "fee_jpy" },
   ];
   for (const step of steps) {
@@ -3207,6 +3209,8 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
   const [purchaseAmountCny, setPurchaseAmountCny] = useState(product.purchase_amount_cny != null ? String(product.purchase_amount_cny) : "");
   const [shippingCny, setShippingCny] = useState(product.shipping_cny != null ? String(product.shipping_cny) : "");
   const [feeCny, setFeeCny] = useState(product.fee_cny != null ? String(product.fee_cny) : "");
+  // ★2026-08-17実装: 中国国内送料(1点ごと。ロットの按分対象外)。2.36参照
+  const [domesticShippingCny, setDomesticShippingCny] = useState(product.domestic_shipping_cny != null ? String(product.domestic_shipping_cny) : "");
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
 
@@ -3321,7 +3325,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
   const toggleColor = (color) => {
     setCheckedColors((prev) => ({ ...prev, [color]: !prev[color] }));
     // 初めてチェックした色は、共通欄(AI自動抽出で入った仕入代等)の現在値をデフォルトとして引き継ぐ
-    setColorCostInputs((prev) => (prev[color] ? prev : { ...prev, [color]: { purchaseAmountCny: purchaseAmountCny || "", shippingCny: shippingCny || "", feeCny: feeCny || "" } }));
+    setColorCostInputs((prev) => (prev[color] ? prev : { ...prev, [color]: { purchaseAmountCny: purchaseAmountCny || "", shippingCny: shippingCny || "", feeCny: feeCny || "", domesticShippingCny: domesticShippingCny || "" } }));
   };
 
   const updateColorCost = (color, field, value) => {
@@ -3384,6 +3388,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           purchase_amount_cny: costs.purchaseAmountCny ? parseFloat(costs.purchaseAmountCny) : 0,
           shipping_cny: costs.shippingCny ? parseFloat(costs.shippingCny) : 0,
           fee_cny: costs.feeCny ? parseFloat(costs.feeCny) : 0,
+          domestic_shipping_cny: costs.domesticShippingCny ? parseFloat(costs.domesticShippingCny) : 0,
         });
       }
       await onSave({ multiItems });
@@ -3410,6 +3415,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
       purchase_amount_cny: purchaseAmountCny ? parseFloat(purchaseAmountCny) : 0,
       shipping_cny: shippingCny ? parseFloat(shippingCny) : 0,
       fee_cny: feeCny ? parseFloat(feeCny) : 0,
+      domestic_shipping_cny: domesticShippingCny ? parseFloat(domesticShippingCny) : 0,
     });
     setSaving(false);
   };
@@ -3473,21 +3479,28 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
                       onFile={(file) => handleColorImageFile(c, file)}
                       helperText="ドラッグ&ドロップ、またはクリックして画像を選択"
                     />
-                    <div className="grid grid-cols-3 gap-2">
+                    <div className="grid grid-cols-2 gap-2">
                       <input
                         type="number" min="0" step="0.01" placeholder="仕入代(CNY)"
                         value={(colorCostInputs[c] && colorCostInputs[c].purchaseAmountCny) || ""}
                         onChange={(e) => updateColorCost(c, "purchaseAmountCny", e.target.value)}
                         className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
                       />
+                      {/* ★2026-08-17実装: 中国国内送料も色ごとに個別入力(2.36参照) */}
                       <input
-                        type="number" min="0" step="0.01" placeholder="送料(CNY)"
+                        type="number" min="0" step="0.01" placeholder="中国国内送料(CNY)"
+                        value={(colorCostInputs[c] && colorCostInputs[c].domesticShippingCny) || ""}
+                        onChange={(e) => updateColorCost(c, "domesticShippingCny", e.target.value)}
+                        className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                      />
+                      <input
+                        type="number" min="0" step="0.01" placeholder="国際送料(CNY)"
                         value={(colorCostInputs[c] && colorCostInputs[c].shippingCny) || ""}
                         onChange={(e) => updateColorCost(c, "shippingCny", e.target.value)}
                         className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
                       />
                       <input
-                        type="number" min="0" step="0.01" placeholder="手数料(CNY)"
+                        type="number" min="0" step="0.01" placeholder="その他手数料(CNY)"
                         value={(colorCostInputs[c] && colorCostInputs[c].feeCny) || ""}
                         onChange={(e) => updateColorCost(c, "feeCny", e.target.value)}
                         className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
@@ -3606,7 +3619,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
 
         {!isNew && (
           <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#2a2f3a", color: "#9fb8d6" }}>
-            仕入代・送料・手数料を変更して保存すると、この商品の既存のウォレット消化を取り消し、新しい金額で改めてFIFO消化します(サンプル登録時点では未定で、後から仕入れが確定するケースに対応)。
+            仕入代・中国国内送料・国際送料・手数料を変更して保存すると、この商品の既存のウォレット消化を取り消し、新しい金額で改めてFIFO消化します(サンプル登録時点では未定で、後から仕入れが確定するケースに対応)。
           </p>
         )}
 
@@ -3636,23 +3649,32 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
 
         {activeColors.length === 0 && (
           <>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入代(CNY)</label>
                 <input type="number" min="0" step="0.01" value={purchaseAmountCny} onChange={(e) => setPurchaseAmountCny(e.target.value)} required
                   className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
               </div>
+              {/* ★2026-08-17実装: 中国国内送料。1点ごとに入力し、仕入れロットの按分対象には含めない(2.36参照) */}
               <div>
-                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>送料(CNY)</label>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>中国国内送料(CNY)</label>
+                <input type="number" min="0" step="0.01" value={domesticShippingCny} onChange={(e) => setDomesticShippingCny(e.target.value)}
+                  className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+              </div>
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>国際送料(CNY)</label>
                 <input type="number" min="0" step="0.01" value={shippingCny} onChange={(e) => setShippingCny(e.target.value)}
                   className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
               </div>
               <div>
-                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>手数料(CNY)</label>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>その他手数料(CNY)</label>
                 <input type="number" min="0" step="0.01" value={feeCny} onChange={(e) => setFeeCny(e.target.value)}
                   className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
               </div>
             </div>
+            <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+              国際送料・その他手数料は仕入れロットを選ぶと自動で入ります。中国国内送料は1点ごとの金額なので、ロットとは関係なく手入力してください。
+            </p>
 
             <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
               保存すると、上記CNY合計額がウォレット(チャージ残高)からFIFOで自動消化されます。
@@ -3728,10 +3750,13 @@ function ReturnFormModal({ sourceProduct, onClose, onSave }) {
 
 /* ---- 商品カード ---- */
 function ProductCard({ product, onEdit, onReturn, onDelete, onTogglePurpose }) {
-  const costCny = (Number(product.purchase_amount_cny) || 0) + (Number(product.shipping_cny) || 0) + (Number(product.fee_cny) || 0);
-  // ★2026-08-04実装: JPY確定原価の内訳(商品本体代 / 手数料=送料+その他手数料)
+  const costCny = (Number(product.purchase_amount_cny) || 0) + (Number(product.shipping_cny) || 0) + (Number(product.fee_cny) || 0)
+    + (Number(product.domestic_shipping_cny) || 0);
+  // ★2026-08-04実装: JPY確定原価の内訳(商品本体代 / 送料・手数料=国際送料+その他手数料+中国国内送料)
   const purchaseJpy = Number(product.purchase_amount_jpy) || 0;
-  const feeJpyTotal = (Number(product.shipping_jpy) || 0) + (Number(product.fee_jpy) || 0);
+  // ★2026-08-17: 中国国内送料も「手数料」枠にまとめて表示する(内訳は編集画面で確認できる。2.36参照)
+  const domesticJpy = Number(product.domestic_shipping_jpy) || 0;
+  const feeJpyTotal = (Number(product.shipping_jpy) || 0) + (Number(product.fee_jpy) || 0) + domesticJpy;
   const costJpy = purchaseJpy + feeJpyTotal;
   const isSample = product.type === "sample";
   const isReturnedStock = !isSample && !!product.return_source_product_id;
@@ -3780,7 +3805,7 @@ function ProductCard({ product, onEdit, onReturn, onDelete, onTogglePurpose }) {
           {costJpy > 0 && (
             <div className="text-xs mt-0.5 flex flex-wrap gap-x-3" style={{ color: "var(--mz-gold-soft)" }}>
               <span>本体: {fmtJPY(purchaseJpy)}</span>
-              <span>手数料: {fmtJPY(feeJpyTotal)}</span>
+              <span>送料・手数料: {fmtJPY(feeJpyTotal)}</span>
               <span>原価合計(JPY): {fmtJPY(costJpy)}</span>
             </div>
           )}
@@ -3827,7 +3852,7 @@ async function syncSaleItemProfits(productIds) {
 
   const { data: prods, error: prodErr } = await supabase
     .from("products")
-    .select("id,purchase_amount_jpy,shipping_jpy,fee_jpy")
+    .select("id,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
     .in("id", productIds);
   if (prodErr) return { ok: false, message: "商品の確定原価の取得に失敗しました" };
   const costById = {};
@@ -3851,12 +3876,15 @@ async function syncSaleItemProfits(productIds) {
 
 async function updateProductCore(form, original) {
   const orig = original || {};
-  const oldTotalCny = (Number(orig.purchase_amount_cny) || 0) + (Number(orig.shipping_cny) || 0) + (Number(orig.fee_cny) || 0);
-  const newTotalCny = (Number(form.purchase_amount_cny) || 0) + (Number(form.shipping_cny) || 0) + (Number(form.fee_cny) || 0);
+  const oldTotalCny = (Number(orig.purchase_amount_cny) || 0) + (Number(orig.shipping_cny) || 0) + (Number(orig.fee_cny) || 0)
+    + (Number(orig.domestic_shipping_cny) || 0);
+  const newTotalCny = (Number(form.purchase_amount_cny) || 0) + (Number(form.shipping_cny) || 0) + (Number(form.fee_cny) || 0)
+    + (Number(form.domestic_shipping_cny) || 0);
   const costsChanged =
     (Number(form.purchase_amount_cny) || 0) !== (Number(orig.purchase_amount_cny) || 0) ||
     (Number(form.shipping_cny) || 0) !== (Number(orig.shipping_cny) || 0) ||
-    (Number(form.fee_cny) || 0) !== (Number(orig.fee_cny) || 0);
+    (Number(form.fee_cny) || 0) !== (Number(orig.fee_cny) || 0) ||
+    (Number(form.domestic_shipping_cny) || 0) !== (Number(orig.domestic_shipping_cny) || 0);
 
   if (costsChanged) {
     const balance = await getWalletRemainingTotal();
@@ -3886,6 +3914,7 @@ async function updateProductCore(form, original) {
     purchase_amount_cny: form.purchase_amount_cny,
     shipping_cny: form.shipping_cny,
     fee_cny: form.fee_cny,
+    domestic_shipping_cny: form.domestic_shipping_cny,
   };
   const { error } = await supabase.from("products").update(patch).eq("id", form.id);
   if (error) return { ok: false, message: "更新に失敗しました" };
@@ -3895,6 +3924,7 @@ async function updateProductCore(form, original) {
       purchaseCny: form.purchase_amount_cny,
       shippingCny: form.shipping_cny,
       feeCny: form.fee_cny,
+      domesticShippingCny: form.domestic_shipping_cny,
     });
     if (!consumeRes.ok) {
       return { ok: true, warning: `商品情報は更新されましたが、ウォレット再消化処理でエラーが発生しました: ${consumeRes.message}\nチャージ台帳・商品情報をご確認ください。` };
@@ -3930,7 +3960,7 @@ function ProductsPage() {
     setCodeSearching(true);
     const { data, error } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
       .ilike("product_code", `%${code}%`);
     setCodeSearching(false);
     setCodeSearchResult(error ? [] : (data || []));
@@ -3941,7 +3971,7 @@ function ProductsPage() {
     setError(null);
     const [productsRes, batchesRes, consumptionsRes, batchLinkRes] = await Promise.all([
       supabase.from("products")
-        .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+        .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
         .eq("created_via_sale", false) // ★2026-08-04実装: 販売登録からの新規仕入はサンプル・在庫の一覧から除外(2.30参照)
         .order("created_at", { ascending: false }),
       supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
@@ -4009,7 +4039,7 @@ function ProductsPage() {
   // 新規商品1点分の登録処理(ウォレット残高事前チェック→insert→FIFO消化確定)を共通化。
   // 単品の新規登録・カラーバリエーション一括登録(2.22参照)の両方から呼び出す。
   const insertNewProductCore = async (item) => {
-    const totalNeeded = (item.purchase_amount_cny || 0) + (item.shipping_cny || 0) + (item.fee_cny || 0);
+    const totalNeeded = (item.purchase_amount_cny || 0) + (item.shipping_cny || 0) + (item.fee_cny || 0) + (item.domestic_shipping_cny || 0);
     const balance = await getWalletRemainingTotal();
     if (!balance.ok) return { ok: false, message: "ウォレット残高の確認に失敗しました" };
     if (balance.total < totalNeeded) {
@@ -4033,6 +4063,7 @@ function ProductsPage() {
       purchase_amount_cny: item.purchase_amount_cny,
       shipping_cny: item.shipping_cny,
       fee_cny: item.fee_cny,
+      domestic_shipping_cny: item.domestic_shipping_cny || 0,
     }).select("id").single();
 
     if (error || !inserted) return { ok: false, message: `${item.product_name}: 登録に失敗しました` };
@@ -4041,6 +4072,7 @@ function ProductsPage() {
       purchaseCny: item.purchase_amount_cny,
       shippingCny: item.shipping_cny,
       feeCny: item.fee_cny,
+      domesticShippingCny: item.domestic_shipping_cny || 0,
     });
     if (!consumeRes.ok) {
       return { ok: true, warning: `${item.product_name}: 登録は完了しましたが、ウォレット消化処理でエラーが発生しました(${consumeRes.message})。チャージ台帳・商品情報をご確認ください。` };
@@ -4181,9 +4213,11 @@ function ProductsPage() {
       purchase_amount_cny: 0,
       shipping_cny: 0,
       fee_cny: 0,
+      domestic_shipping_cny: 0,
       purchase_amount_jpy: 0,
       shipping_jpy: 0,
       fee_jpy: 0,
+      domestic_shipping_jpy: 0,
     });
     if (error) { alert("返品登録に失敗しました"); return; }
     setReturnTarget(null);
@@ -4357,9 +4391,10 @@ function itemPretaxJpy(unitPriceInclJpy) {
   return Math.round(Number(unitPriceInclJpy) || 0);
 }
 
-/* ---- 商品の原価合計(仕入代+送料+手数料、JPY確定額) ---- */
+/* ---- 商品の原価合計(仕入代+国際送料+その他手数料+中国国内送料、JPY確定額) ---- */
 function productCostJpy(p) {
-  return (Number(p.purchase_amount_jpy) || 0) + (Number(p.shipping_jpy) || 0) + (Number(p.fee_jpy) || 0);
+  return (Number(p.purchase_amount_jpy) || 0) + (Number(p.shipping_jpy) || 0) + (Number(p.fee_jpy) || 0)
+    + (Number(p.domestic_shipping_jpy) || 0); // ★2026-08-17: 中国国内送料を原価に算入(2.36参照)
 }
 
 /* ---- 商品の表示ラベル(「商品名 - サイズ」形式、sale_items設計に準拠) ---- */
@@ -4540,6 +4575,8 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
   const [purchaseAmountCny, setPurchaseAmountCny] = useState("");
   const [shippingCny, setShippingCny] = useState("");
   const [feeCny, setFeeCny] = useState("");
+  // ★2026-08-17実装: 中国国内送料(1点ごと。ロットの按分対象外)。2.36参照
+  const [domesticShippingCny, setDomesticShippingCny] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
@@ -4624,7 +4661,8 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
     const purchaseCny = parseFloat(purchaseAmountCny) || 0;
     const shippingCnyVal = parseFloat(shippingCny) || 0;
     const feeCnyVal = parseFloat(feeCny) || 0;
-    const totalNeeded = purchaseCny + shippingCnyVal + feeCnyVal;
+    const domesticShippingCnyVal = parseFloat(domesticShippingCny) || 0;
+    const totalNeeded = purchaseCny + shippingCnyVal + feeCnyVal + domesticShippingCnyVal;
 
     setSaving(true);
 
@@ -4657,12 +4695,13 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
       purchase_amount_cny: purchaseCny,
       shipping_cny: shippingCnyVal,
       fee_cny: feeCnyVal,
+      domestic_shipping_cny: domesticShippingCnyVal,
     }).select("id").single();
 
     if (insertErr || !inserted) { setError("商品の登録に失敗しました"); setSaving(false); return; }
 
     const consumeRes = await consumeAndFinalizeProductCost(inserted.id, {
-      purchaseCny, shippingCny: shippingCnyVal, feeCny: feeCnyVal,
+      purchaseCny, shippingCny: shippingCnyVal, feeCny: feeCnyVal, domesticShippingCny: domesticShippingCnyVal,
     });
     if (!consumeRes.ok) {
       setSaving(false);
@@ -4673,7 +4712,7 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
     // 確定後の商品情報(原価JPY確定額込み)を取得し、そのまま販売明細へ追加する
     const { data: finalProduct, error: fetchErr } = await supabase
       .from("products")
-      .select("id,product_name,category,size,product_code,product_image_url,product_url,selling_price_jpy,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .select("id,product_name,category,size,product_code,product_image_url,product_url,selling_price_jpy,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
       .eq("id", inserted.id)
       .single();
 
@@ -4818,10 +4857,16 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入代(CNY)</label>
             <input type="number" min="0" step="0.01" value={purchaseAmountCny} onChange={(e) => setPurchaseAmountCny(e.target.value)}
+              className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          </div>
+          {/* ★2026-08-17実装: 中国国内送料。1点ごとに入力し、仕入れロットの按分対象には含めない(2.36参照) */}
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>中国国内送料(CNY)</label>
+            <input type="number" min="0" step="0.01" value={domesticShippingCny} onChange={(e) => setDomesticShippingCny(e.target.value)}
               className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
           </div>
           <div>
@@ -5065,6 +5110,7 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
           purchase_amount_jpy: si.products ? si.products.purchase_amount_jpy : 0,
           shipping_jpy: si.products ? si.products.shipping_jpy : 0,
           fee_jpy: si.products ? si.products.fee_jpy : 0,
+          domestic_shipping_jpy: si.products ? si.products.domestic_shipping_jpy : 0,
         },
         unitPrice: String(si.unit_price_jpy),
         // ★2026-07-19実装: 編集時に既存明細の発注確認状態を引き継ぐ(保存の都度リセットされる不具合の修正)
@@ -5098,7 +5144,7 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
     setCostEditLoading(true);
     const { data, error: fetchErr } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
       .eq("id", productId)
       .single();
     setCostEditLoading(false);
@@ -5114,13 +5160,13 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
     // 商品を再取得し、明細内のこの商品の原価表示(JPY確定額)を最新化する
     const { data: refreshed } = await supabase
       .from("products")
-      .select("id,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .select("id,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
       .eq("id", form.id)
       .single();
     if (refreshed) {
       setItems((prev) => prev.map((it) => (
         it.productId === form.id
-          ? { ...it, product: { ...it.product, purchase_amount_jpy: refreshed.purchase_amount_jpy, shipping_jpy: refreshed.shipping_jpy, fee_jpy: refreshed.fee_jpy } }
+          ? { ...it, product: { ...it.product, purchase_amount_jpy: refreshed.purchase_amount_jpy, shipping_jpy: refreshed.shipping_jpy, fee_jpy: refreshed.fee_jpy, domestic_shipping_jpy: refreshed.domestic_shipping_jpy } }
           : it
       )));
     }
@@ -5135,7 +5181,7 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
     let cancelled = false;
     supabase
       .from("products")
-      .select("id,type,sample_purpose,product_name,category,size,product_code,product_image_url,product_url,size_options,selling_price_jpy,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .select("id,type,sample_purpose,product_name,category,size,product_code,product_image_url,product_url,size_options,selling_price_jpy,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
       .eq("status", "未販売")
       .eq("created_via_sale", false) // ★2026-08-04実装: 販売登録からの新規仕入は「在庫から追加」候補から除外(2.30参照)
       .order("product_name")
@@ -6457,7 +6503,8 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
    ・仕入れロットは国際送料・手数料が確定してから登録する運用のため、商品(特に販売登録の
      「新規仕入で追加」で作られた受注商品)はロット未定のまま先に登録されている。後からロットだけを
      まとめて反映したい、という要望への対応。
-   ・仕入代(purchase_amount_cny)自体は一切変更しない。送料・手数料(shipping_cny/fee_cny)のみを
+   ・仕入代(purchase_amount_cny)と中国国内送料(domestic_shipping_cny)は一切変更しない。
+     国際送料・その他手数料(shipping_cny/fee_cny)のみを、
      選択したロットの配分ルール(computeBatchItemAmounts、1.9の「最終品吸収方式」)で自動計算し、
      既存の updateProductCore に通すことで、必要なウォレットFIFO再消化(2.18と同じロジック)も
      まとめて行う。
@@ -6552,7 +6599,7 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
       warns.push(`⚠️ 別のロット(${reassignFrom.join("、")})に紐付いている商品が含まれています。付け替えると、元のロット側は点数が減り、送料・手数料の合計が合わなくなります。`);
     }
     const warn = warns.length > 0 ? `\n\n${warns.join("\n\n")}` : "";
-    if (!window.confirm(`選択中の${items.length}件を、このロットへ紐付けます(送料・手数料は自動計算され、仕入代は変更しません)。よろしいですか?${warn}`)) return;
+    if (!window.confirm(`選択中の${items.length}件を、このロットへ紐付けます(国際送料・その他手数料は自動計算され、仕入代と中国国内送料は変更しません)。よろしいですか?${warn}`)) return;
 
     setProcessing(true);
     setErrorMessages([]);
@@ -6612,7 +6659,7 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
         style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
         <h2 className="font-display text-lg">仕入れロットへ一括登録</h2>
         <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-          選択中の{items.length}件に、同じ仕入れロットをまとめて割り当てます。仕入代(商品代)の入力値は変更せず、送料・手数料のみロットの配分から自動計算されます。
+          選択中の{items.length}件に、同じ仕入れロットをまとめて割り当てます。仕入代(商品代)と中国国内送料の入力値は変更せず、国際送料・その他手数料のみロットの配分から自動計算されます。
           既にロットが設定されている商品を含めると、そのロットの割り当ては上書きされます。
           金額が変わるため、各商品のウォレット消化は一度取り消して再消化されます(そのときのFIFO順で消化し直すため、
           適用される為替レート、つまり確定JPY原価が多少変わることがあります)。
@@ -6753,7 +6800,7 @@ function BatchLinkTab({ batches, onCreateBatch }) {
     setLoadError(null);
     let query = supabase
       .from("products")
-      .select("id,type,status,sample_purpose,created_via_sale,return_source_product_id,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .select("id,type,status,sample_purpose,created_via_sale,return_source_product_id,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
       // ★返品在庫(return_source_product_idあり)は常に除外する。返品登録はコスト0円・ウォレット消化なしで
       //   作られる行(1.10参照)で、batch_idが永久にnullのままのため、除外しないとこの一覧に residual として
       //   出続け、誤って選択するとウォレットから送料を二重に消化してしまう。
@@ -6846,7 +6893,7 @@ function BatchLinkTab({ batches, onCreateBatch }) {
       <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
         仕入れロットが確定した後で、そのロットに含まれる商品をまとめて紐付けるための画面です。販売登録済み(販売済み)の受注商品も、
         サンプル・在庫も、状態を問わずここに表示されます。チェックを入れて「仕入れロットへ一括登録」を押すと、選択した全商品に同じロットが割り当てられ、
-        送料・手数料が自動計算されます(仕入代は変更されません)。返品在庫はコスト0円で扱うため、この一覧には表示されません。
+        国際送料・その他手数料が自動計算されます(仕入代と中国国内送料は変更されません)。返品在庫はコスト0円で扱うため、この一覧には表示されません。
       </p>
 
       {loadError && (
@@ -6991,7 +7038,7 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
     setCodeSearching(true);
     const { data, error } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
       .ilike("product_code", `%${code}%`);
     setCodeSearching(false);
     setCodeSearchResult(error ? [] : (data || []));
@@ -7000,7 +7047,7 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
   const loadAll = useCallback(async () => {
     const { data: productsData, error } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,purchase_amount_jpy,shipping_jpy,fee_jpy")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
       .eq("created_via_sale", true)
       .eq("status", "未販売")
       .order("created_at", { ascending: false });
@@ -7181,7 +7228,7 @@ function SalesPage() {
     const [salesRes, clubsRes, batchesRes] = await Promise.all([
       supabase
         .from("sales")
-        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number,recipient_name,honorific,memo),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy))")
+        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number,recipient_name,honorific,memo),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
       supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
@@ -8948,7 +8995,7 @@ function ContractorInvoicesPage() {
       // 売上合計(税込)と、その月に売れた商品の原価合計(sale_items→productsの確定JPY原価)
       const { data: salesData, error: salesError } = await supabase
         .from("sales")
-        .select("id,transaction_date,total_amount_jpy,sale_items(product_id,products(purchase_amount_jpy,shipping_jpy,fee_jpy))")
+        .select("id,transaction_date,total_amount_jpy,sale_items(product_id,products(purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .gte("transaction_date", monthStart)
         .lt("transaction_date", monthEndExclusive);
       if (salesError) { setProfitError("売上データの取得に失敗しました"); setCalculating(false); return; }
@@ -8959,7 +9006,8 @@ function ContractorInvoicesPage() {
         totalSales += Number(s.total_amount_jpy) || 0;
         (s.sale_items || []).forEach((it) => {
           const p = it.products || {};
-          totalPurchaseCost += (Number(p.purchase_amount_jpy) || 0) + (Number(p.shipping_jpy) || 0) + (Number(p.fee_jpy) || 0);
+          totalPurchaseCost += (Number(p.purchase_amount_jpy) || 0) + (Number(p.shipping_jpy) || 0) + (Number(p.fee_jpy) || 0)
+            + (Number(p.domestic_shipping_jpy) || 0); // ★2026-08-17: 中国国内送料を算入(2.36参照)
         });
       });
 
