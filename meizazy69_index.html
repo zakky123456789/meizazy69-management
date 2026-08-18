@@ -2249,6 +2249,13 @@ function fmtJPY(n) {
   const v = Math.round(Number(n) || 0);
   return `¥${v.toLocaleString("ja-JP")}`;
 }
+/* ★2026-08-17実装: CNY金額を、桁を落とさずコンパクトに表示する(2.36参照)。
+   fmtCNYは小数2桁固定のため、ロット按分で入る4桁の値(例: 15.6857)が15.69に丸まって
+   実際の登録値と食い違って見えてしまう。こちらは最大4桁まで出し、余分な0は付けない。 */
+function fmtCnyCompact(n) {
+  const v = Number(n) || 0;
+  return v.toLocaleString("ja-JP", { maximumFractionDigits: 4 });
+}
 // ★2026-08-04実装: ロットの1点あたり金額(割り切れない場合が多い)を商品の入力欄へ自動セットする際、
 //   toFixed(2)で丸めて保存すると、点数が多いロットほど「商品ごとの丸め誤差 × 点数」が積み重なり、
 //   ロットの合計金額(total_shipping_cny/total_fee_cny)と実際に商品へ保存された金額の合計がズレる
@@ -2555,7 +2562,7 @@ function ConsumptionHistorySection({ consumptions, chargeMap }) {
           className="rounded-xl p-4 text-sm"
           style={{ background: "var(--mz-surface)", border: "1px dashed var(--mz-border)", color: "var(--mz-ink-muted)" }}
         >
-          まだ消化履歴はありません。サンプル・在庫登録(products)機能の実装後、商品を仕入れるたびにここへ自動記録されます(仕入代・国際送料・その他手数料は、いずれも仕入れ確定時にこのウォレットからFIFOで消化されます)。
+          まだ消化履歴はありません。サンプル・在庫登録(products)機能の実装後、商品を仕入れるたびにここへ自動記録されます(商品代・国際送料・その他手数料は、いずれも仕入れ確定時にこのウォレットからFIFOで消化されます)。
         </div>
       ) : (
         <div className="space-y-2">
@@ -3231,7 +3238,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
   // ★2026-07-10実装: AI自動抽出でカラーバリエーションが検出された場合の一括登録用state。
   //   colorOptions: 検出された色名の配列(例: ["黒","灰","白"])。isNewかつAI抽出時のみ使う。
   //   checkedColors: どの色を実際に仕入れるか(チェックボックスの選択状態)。
-  //   colorCostInputs: 色ごとの仕入代・送料・手数料(CNY)。色によって金額が異なる場合があるため個別入力。
+  //   colorCostInputs: 色ごとの商品代・送料・手数料(CNY)。色によって金額が異なる場合があるため個別入力。
   //   colorImages / uploadingColorImage: 色ごとの商品画像(未指定の場合は共通の商品画像を使う)。
   const [colorOptions, setColorOptions] = useState([]);
   const [checkedColors, setCheckedColors] = useState({});
@@ -3258,7 +3265,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
     return () => { cancelled = true; };
   }, [isNew, type]);
 
-  // ★2026-07-10変更: 仕入代・送料・手数料は、編集時(既に消化済み)でも変更可能とする。
+  // ★2026-07-10変更: 商品代・送料・手数料は、編集時(既に消化済み)でも変更可能とする。
   // 保存時にCNY金額が変わっていれば、旧消化を取り消して新金額で再消化する(ProductsPage側のhandleSaveProductで実施)。
 
   // 商品画像(アプリ上に表示する写真)のアップロード
@@ -3338,7 +3345,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
   // ★2026-07-10実装: カラーバリエーション一括登録用のチェック切り替え・金額入力ハンドラ
   const toggleColor = (color) => {
     setCheckedColors((prev) => ({ ...prev, [color]: !prev[color] }));
-    // 初めてチェックした色は、共通欄(AI自動抽出で入った仕入代等)の現在値をデフォルトとして引き継ぐ
+    // 初めてチェックした色は、共通欄(AI自動抽出で入った商品代等)の現在値をデフォルトとして引き継ぐ
     setColorCostInputs((prev) => (prev[color] ? prev : { ...prev, [color]: { purchaseAmountCny: purchaseAmountCny || "", shippingCny: shippingCny || "", feeCny: feeCny || "", domesticShippingCny: domesticShippingCny || "" } }));
   };
 
@@ -3367,7 +3374,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
       for (const c of activeColors) {
         const costs = colorCostInputs[c] || {};
         if (costs.purchaseAmountCny === undefined || costs.purchaseAmountCny === "" || isNaN(parseFloat(costs.purchaseAmountCny))) {
-          setFormError(`「${c}」の仕入代を入力してください`);
+          setFormError(`「${c}」の商品代を入力してください`);
           return;
         }
       }
@@ -3476,7 +3483,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
         {colorOptions.length > 0 && (
           <div className="rounded-lg p-3 space-y-2" style={{ background: "var(--mz-surface-hover)", border: "1px solid var(--mz-border)" }}>
             <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-              カラーバリエーションが検出されました。仕入れる色にチェックを入れ、色ごとの仕入代・送料・手数料を入力してください(チェックした色の数だけ商品が一括登録されます。商品名の末尾に色が自動で付きます)。
+              カラーバリエーションが検出されました。仕入れる色にチェックを入れ、色ごとの商品代・送料・手数料を入力してください(チェックした色の数だけ商品が一括登録されます。商品名の末尾に色が自動で付きます)。
             </p>
             {colorOptions.map((c) => (
               <div key={c} className="rounded-lg p-2" style={{ border: "1px solid var(--mz-border)" }}>
@@ -3495,7 +3502,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
                     />
                     <div className="grid grid-cols-2 gap-2">
                       <input
-                        type="number" min="0" step="any" placeholder="仕入代(CNY)"
+                        type="number" min="0" step="any" placeholder="商品代(CNY)"
                         value={(colorCostInputs[c] && colorCostInputs[c].purchaseAmountCny) || ""}
                         onChange={(e) => updateColorCost(c, "purchaseAmountCny", e.target.value)}
                         className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
@@ -3633,7 +3640,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
 
         {!isNew && (
           <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#2a2f3a", color: "#9fb8d6" }}>
-            仕入代・中国国内送料・国際送料・手数料を変更して保存すると、この商品の既存のウォレット消化を取り消し、新しい金額で改めてFIFO消化します(サンプル登録時点では未定で、後から仕入れが確定するケースに対応)。
+            商品代・中国国内送料・国際送料・手数料を変更して保存すると、この商品の既存のウォレット消化を取り消し、新しい金額で改めてFIFO消化します(サンプル登録時点では未定で、後から仕入れが確定するケースに対応)。
           </p>
         )}
 
@@ -3665,7 +3672,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           <>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入代(CNY)</label>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品代(CNY)</label>
                 <input type="number" min="0" step="any" value={purchaseAmountCny} onChange={(e) => setPurchaseAmountCny(e.target.value)} required
                   className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
               </div>
@@ -3744,7 +3751,7 @@ function ReturnFormModal({ sourceProduct, onClose, onSave }) {
       >
         <h2 className="font-display text-lg">返品として在庫に戻す</h2>
         <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>
-          「{sourceProduct.product_name}」の返品分を、新しい在庫として登録します(仕入代は既に支払い済みのため、ウォレットは消化されません)。
+          「{sourceProduct.product_name}」の返品分を、新しい在庫として登録します(商品代は既に支払い済みのため、ウォレットは消化されません)。
         </p>
         <div>
           <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>返品日</label>
@@ -4038,7 +4045,7 @@ async function reallocateBatchAmounts(batch) {
 
 /* ★2026-08-17実装: 仕入れロットを削除する(2.35参照)。
    ・紐付いている商品がある場合は「完全な取り消し」として、各商品の国際送料・その他手数料を0円に戻し、
-     消化済みのウォレットを払い戻してから削除する(仕入代・中国国内送料は1点ごとの費用なのでそのまま残す)。
+     消化済みのウォレットを払い戻してから削除する(商品代・中国国内送料は1点ごとの費用なのでそのまま残す)。
    ・**必ず全商品の batch_id を外し終えてから purchase_batches を削除すること。**
      products.batch_id のFKは ON DELETE SET NULL(2026-08-17 確認済み)。ロットを直接DELETEしても
      商品は消えないが、batch_id だけが黙って NULL になり、**商品側には配分済みの
@@ -4394,7 +4401,7 @@ function ProductsPage() {
     const message = linked > 0
       ? `仕入れロット「${label}」を削除します。\n\n`
         + `このロットには${linked}点の商品が紐付いています。削除すると、その${linked}点の国際送料・その他手数料を0円に戻し、`
-        + `消化済みのぶんをウォレットへ払い戻します(仕入代・中国国内送料は1点ごとの費用のため、そのまま残ります)。\n\n`
+        + `消化済みのぶんをウォレットへ払い戻します(商品代・中国国内送料は1点ごとの費用のため、そのまま残ります)。\n\n`
         + `この操作は取り消せません。よろしいですか?`
       : `仕入れロット「${label}」を削除します。よろしいですか?`;
     if (!window.confirm(message)) return;
@@ -4615,7 +4622,7 @@ function itemPretaxJpy(unitPriceInclJpy) {
   return Math.round(Number(unitPriceInclJpy) || 0);
 }
 
-/* ---- 商品の原価合計(仕入代+国際送料+その他手数料+中国国内送料、JPY確定額) ---- */
+/* ---- 商品の原価合計(商品代+国際送料+その他手数料+中国国内送料、JPY確定額) ---- */
 function productCostJpy(p) {
   return (Number(p.purchase_amount_jpy) || 0) + (Number(p.shipping_jpy) || 0) + (Number(p.fee_jpy) || 0)
     + (Number(p.domestic_shipping_jpy) || 0); // ★2026-08-17: 中国国内送料を原価に算入(2.36参照)
@@ -5083,7 +5090,7 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
 
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入代(CNY)</label>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品代(CNY)</label>
             <input type="number" min="0" step="any" value={purchaseAmountCny} onChange={(e) => setPurchaseAmountCny(e.target.value)}
               className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
           </div>
@@ -6141,7 +6148,18 @@ function SaleCard({ sale, onDelete, onEdit, onViewReceipt, onConfirmOrder }) {
   const itemsWithProfit = items.map((it) => {
     const costJpy = it.products ? productCostJpy(it.products) : 0;
     const profitJpy = itemPretaxJpy(it.unit_price_jpy) - costJpy;
-    return { ...it, costJpy, profitJpy };
+    // ★2026-08-17実装: 明細にCNYの内訳(商品代/中国国内送料/国際送料/その他手数料)も出す(2.36参照)。
+    //   JPYは「ウォレットのFIFO消化で確定した円建て原価」で、CNYは「実際に入力した元建ての金額」。
+    //   仕入先やBuckyDropの明細と突き合わせるのは元建てのほうなので、両方見えるようにする。
+    const pr = it.products || {};
+    const cny = {
+      purchase: Number(pr.purchase_amount_cny) || 0,
+      domestic: Number(pr.domestic_shipping_cny) || 0,
+      shipping: Number(pr.shipping_cny) || 0,
+      fee: Number(pr.fee_cny) || 0,
+    };
+    cny.total = cny.purchase + cny.domestic + cny.shipping + cny.fee;
+    return { ...it, costJpy, profitJpy, cny };
   });
   const totalProfitJpy = itemsWithProfit.reduce((sum, it) => sum + it.profitJpy, 0);
   return (
@@ -6207,6 +6225,16 @@ function SaleCard({ sale, onDelete, onEdit, onViewReceipt, onConfirmOrder }) {
                     <span>仕入 {fmtJPY(it.costJpy)}</span>
                     <span style={{ color: it.profitJpy >= 0 ? "var(--mz-gold-soft)" : "#f2b8bd" }}>利益 {fmtJPY(it.profitJpy)}</span>
                   </div>
+                  {/* ★2026-08-17実装: CNYの内訳。全て0円(返品在庫など)の場合は表示しない(2.36参照) */}
+                  {it.cny.total > 0 && (
+                    <div className="flex flex-wrap justify-end gap-x-2.5 gap-y-0.5 mt-0.5 text-[11px]" style={{ color: "var(--mz-ink-muted)" }}>
+                      <span>商品代 {fmtCnyCompact(it.cny.purchase)}</span>
+                      <span>国内送料 {fmtCnyCompact(it.cny.domestic)}</span>
+                      <span>国際送料 {fmtCnyCompact(it.cny.shipping)}</span>
+                      <span>手数料 {fmtCnyCompact(it.cny.fee)}</span>
+                      <span style={{ color: "var(--mz-ink)" }}>計 {fmtCnyCompact(it.cny.total)} CNY</span>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -6727,7 +6755,7 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
    ・仕入れロットは国際送料・手数料が確定してから登録する運用のため、商品(特に販売登録の
      「新規仕入で追加」で作られた受注商品)はロット未定のまま先に登録されている。後からロットだけを
      まとめて反映したい、という要望への対応。
-   ・仕入代(purchase_amount_cny)と中国国内送料(domestic_shipping_cny)は一切変更しない。
+   ・商品代(purchase_amount_cny)と中国国内送料(domestic_shipping_cny)は一切変更しない。
      国際送料・その他手数料(shipping_cny/fee_cny)のみを、
      選択したロットの配分ルール(computeBatchItemAmounts、1.9の「最終品吸収方式」)で自動計算し、
      既存の updateProductCore に通すことで、必要なウォレットFIFO再消化(2.18と同じロジック)も
@@ -6823,7 +6851,7 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
       warns.push(`⚠️ 別のロット(${reassignFrom.join("、")})に紐付いている商品が含まれています。付け替えると、元のロット側は点数が減り、送料・手数料の合計が合わなくなります。`);
     }
     const warn = warns.length > 0 ? `\n\n${warns.join("\n\n")}` : "";
-    if (!window.confirm(`選択中の${items.length}件を、このロットへ紐付けます(国際送料・その他手数料は自動計算され、仕入代と中国国内送料は変更しません)。よろしいですか?${warn}`)) return;
+    if (!window.confirm(`選択中の${items.length}件を、このロットへ紐付けます(国際送料・その他手数料は自動計算され、商品代と中国国内送料は変更しません)。よろしいですか?${warn}`)) return;
 
     setProcessing(true);
     setErrorMessages([]);
@@ -6883,7 +6911,7 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
         style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
         <h2 className="font-display text-lg">仕入れロットへ一括登録</h2>
         <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-          選択中の{items.length}件に、同じ仕入れロットをまとめて割り当てます。仕入代(商品代)と中国国内送料の入力値は変更せず、国際送料・その他手数料のみロットの配分から自動計算されます。
+          選択中の{items.length}件に、同じ仕入れロットをまとめて割り当てます。商品代と中国国内送料の入力値は変更せず、国際送料・その他手数料のみロットの配分から自動計算されます。
           既にロットが設定されている商品を含めると、そのロットの割り当ては上書きされます。
           金額が変わるため、各商品のウォレット消化は一度取り消して再消化されます(そのときのFIFO順で消化し直すため、
           適用される為替レート、つまり確定JPY原価が多少変わることがあります)。
@@ -7117,7 +7145,7 @@ function BatchLinkTab({ batches, onCreateBatch }) {
       <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
         仕入れロットが確定した後で、そのロットに含まれる商品をまとめて紐付けるための画面です。販売登録済み(販売済み)の受注商品も、
         サンプル・在庫も、状態を問わずここに表示されます。チェックを入れて「仕入れロットへ一括登録」を押すと、選択した全商品に同じロットが割り当てられ、
-        国際送料・その他手数料が自動計算されます(仕入代と中国国内送料は変更されません)。返品在庫はコスト0円で扱うため、この一覧には表示されません。
+        国際送料・その他手数料が自動計算されます(商品代と中国国内送料は変更されません)。返品在庫はコスト0円で扱うため、この一覧には表示されません。
       </p>
 
       {loadError && (
@@ -7452,7 +7480,7 @@ function SalesPage() {
     const [salesRes, clubsRes, batchesRes] = await Promise.all([
       supabase
         .from("sales")
-        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number,recipient_name,honorific,memo),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
+        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number,recipient_name,honorific,memo),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
       supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
@@ -9187,7 +9215,7 @@ function ContractorInvoicesPage() {
   }, []);
 
   /* ★2026-08-17実装: 月次損益は「集計ボタンを押した時点の数字を保存するスナップショット」であり、
-     あとから商品の原価(仕入代・国際送料・その他手数料・中国国内送料)や経費・売上を修正しても
+     あとから商品の原価(商品代・国際送料・その他手数料・中国国内送料)や経費・売上を修正しても
      自動では追随しない(2.14参照)。受注時は0円で登録し、返金確定後に金額を入れる運用(5章26番)では
      「集計 → あとから原価を入力」の順になりやすく、保存済みの粗利が古いまま放置されやすい。
      そこで保存値と「いまの実データから計算し直した値」を突き合わせ、ズレている月に警告を出す。
