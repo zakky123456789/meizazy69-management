@@ -2981,10 +2981,15 @@ function BatchFormModal({ batch, onClose, onSave }) {
         style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
       >
         <h2 className="font-display text-lg">{isEdit ? "仕入れロットを編集" : "新規仕入れロット"}</h2>
-        {/* ★2026-08-04実装: ロット編集機能を追加。総点数・合計金額を編集すると、まだ登録していない
-            商品への今後の自動按分(1点あたり金額)に反映される。既に登録済みの商品自体の金額は
-            自動では変わらないため、必要であれば個別に編集し直す(computeBatchItemAmountsの
-            「最終品吸収方式」で以後の登録は正しく揃う) */}
+        {/* ★2026-08-17変更: 総点数・合計金額を編集した場合、既に紐付いている商品があれば
+            保存時に「配分し直すか」を確認する(旧仕様では紐付け済みの商品は据え置きだったため、
+            ロットの数字だけ変わって商品側が古いまま残っていた)。2.35参照 */}
+        {isEdit && (
+          <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#2a2f3a", color: "#9fb8d6" }}>
+            合計金額・総点数を変更して保存すると、このロットに既に紐付いている商品の国際送料・その他手数料を
+            配分し直すかどうかを確認します。配分し直すと、各商品のウォレット消化もやり直されます。
+          </p>
+        )}
         <div>
           <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>ロット名(任意)</label>
           <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="例: 7月 BuckyDrop 6点分"
@@ -3027,7 +3032,7 @@ function BatchFormModal({ batch, onClose, onSave }) {
 }
 
 /* ---- 仕入れロット一覧 ---- */
-function BatchList({ batches, usageCountByBatch, onEdit }) {
+function BatchList({ batches, usageCountByBatch, onEdit, onDelete, deletingBatchId }) {
   if (batches.length === 0) {
     return <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>仕入れロットがありません</p>;
   }
@@ -3054,6 +3059,15 @@ function BatchList({ batches, usageCountByBatch, onEdit }) {
                 style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
               >
                 編集
+              </button>
+              {/* ★2026-08-17実装: ロットの削除(2.35参照) */}
+              <button
+                onClick={() => onDelete(b)}
+                disabled={deletingBatchId === b.id}
+                className="text-xs px-2.5 py-1 rounded-lg disabled:opacity-60"
+                style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}
+              >
+                {deletingBatchId === b.id ? "削除中..." : "削除"}
               </button>
             </div>
           </div>
@@ -3933,6 +3947,156 @@ async function updateProductCore(form, original) {
   return { ok: true };
 }
 
+/* ★2026-08-17実装: 仕入れロットの合計金額・総点数を編集したとき、既に紐付いている商品へ
+   国際送料・その他手数料を配分し直す(2.35参照)。
+
+   ・2026-08-04に入れたロット編集機能は「以後に登録する商品への按分」だけを変えるもので、
+     既に紐付け済みの商品の金額は据え置きだった。当時は「商品を登録してからロットを作る」流れが
+     無かったため問題にならなかったが、ロットを後から作って一括紐付けする運用(2.35)では、
+     ロットの金額を修正しても商品側が古い金額のまま残り、ロット合計と商品側の合計が食い違う。
+   ・配分規則は登録時とまったく同じにする(1.9「最終品吸収方式」)。総点数に達する最後の1点だけが
+     差額を吸収し、それ以外は preciseCny(1点あたり)。
+   ・**computeBatchItemAmounts を流用してはいけない**。あの関数は「DB上の"他の"商品の現在値」を数えて
+     最後の1点かどうかを判定するため、既に総点数ぶん紐付いている状態で全商品に対して呼ぶと、
+     どの商品も「最後の1点」と判定され、互いの古い値を参照し合って壊れる。ここでは配分表を
+     メモリ上で先に決めてから流し込む。
+   ・ウォレットは updateProductCore 経由で1点ずつ取り消し→再消化する(並列にすると残高が壊れる)。 */
+/* updateProductCore が書き込む列を漏れなく含んだ、商品編集用のSELECT列。
+   1列でも欠けると、その値が undefined としてDBに書き戻され、既存の値が消える(2.36参照)。 */
+const PRODUCT_EDIT_SELECT = "id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy";
+
+async function reallocateBatchAmounts(batch) {
+  const { data: rows, error } = await supabase
+    .from("products")
+    .select(PRODUCT_EDIT_SELECT)
+    .eq("batch_id", batch.id)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+  if (error) return { ok: false, message: "このロットに紐づく商品の取得に失敗しました" };
+
+  const list = rows || [];
+  if (list.length === 0) return { ok: true, updated: 0, total: 0, messages: [] };
+
+  const totalItems = Number(batch.total_items) || 0;
+  if (totalItems <= 0) return { ok: false, message: "ロットの総点数が未設定のため、配分し直せません。" };
+  if (list.length > totalItems) {
+    return {
+      ok: false,
+      message: `このロットには総点数(${totalItems}点)より多い${list.length}点が紐付いています。\n先にロットの総点数を実態に合わせて修正してください。`,
+    };
+  }
+
+  const totalShipping = Number(batch.total_shipping_cny) || 0;
+  const totalFee = Number(batch.total_fee_cny) || 0;
+  const perShipping = preciseCny(totalShipping / totalItems);
+  const perFee = preciseCny(totalFee / totalItems);
+
+  // 先に配分表を確定させる(i+1 が総点数に達する1点だけが差額を吸収する)
+  let sumShipping = 0;
+  let sumFee = 0;
+  const plan = list.map((product, i) => {
+    const isLast = (i + 1) === totalItems;
+    const shipping = isLast ? preciseCny(totalShipping - sumShipping) : perShipping;
+    const fee = isLast ? preciseCny(totalFee - sumFee) : perFee;
+    sumShipping += shipping;
+    sumFee += fee;
+    return { product, shipping, fee };
+  });
+
+  const messages = [];
+  const changedIds = [];
+  let failed = null;
+  for (const { product, shipping, fee } of plan) {
+    // 金額が変わらない商品はウォレットを触らない(無駄な取り消し→再消化でレートが変わるのを避ける)
+    if ((Number(product.shipping_cny) || 0) === shipping && (Number(product.fee_cny) || 0) === fee) continue;
+    const res = await updateProductCore({ ...product, shipping_cny: shipping, fee_cny: fee }, product);
+    const name = product.product_name || product.product_code || "(名称未設定)";
+    if (!res.ok) {
+      // ウォレットの払い戻し途中で失敗している可能性があるため、後続は処理せず中断する
+      failed = `${name}: ${res.message}`;
+      break;
+    }
+    if (res.warning) messages.push(`${name}: ${res.warning}`);
+    changedIds.push(product.id);
+  }
+
+  // 中断した場合でも、そこまでに原価が変わった商品の利益(sale_items.profit_jpy)は同期しておく
+  if (changedIds.length > 0) {
+    const sync = await syncSaleItemProfits(changedIds);
+    if (!sync.ok) messages.push(`販売明細の利益(profit_jpy)の再計算に失敗しました: ${sync.message}`);
+  }
+
+  if (failed) {
+    return {
+      ok: false,
+      message: `${failed}\n\n${changedIds.length}点まで反映した時点で中断しました。ウォレット残高と該当商品をご確認のうえ、もう一度お試しください。`,
+      updated: changedIds.length,
+    };
+  }
+  return { ok: true, updated: changedIds.length, total: list.length, messages };
+}
+
+/* ★2026-08-17実装: 仕入れロットを削除する(2.35参照)。
+   ・紐付いている商品がある場合は「完全な取り消し」として、各商品の国際送料・その他手数料を0円に戻し、
+     消化済みのウォレットを払い戻してから削除する(仕入代・中国国内送料は1点ごとの費用なのでそのまま残す)。
+   ・**必ず全商品の batch_id を外し終えてから purchase_batches を削除すること。**
+     products.batch_id のFKは ON DELETE SET NULL(2026-08-17 確認済み)。ロットを直接DELETEしても
+     商品は消えないが、batch_id だけが黙って NULL になり、**商品側には配分済みの
+     shipping_cny / fee_cny とウォレット消化が残ったまま**になる(どのロット由来か辿れない金額が残る)。
+     先に1点ずつ金額を0に戻してから削除することで、この取り残しを防ぐ。
+     なお運用中にFKを ON DELETE RESTRICT へ変更した場合も、この順序であれば正しく動作する
+     (削除時点で参照している行が無いため RESTRICT には引っかからない)。
+   ・ウォレットの整合性を壊さないよう、商品は1点ずつ順番に処理し、失敗したらロットは削除しない。 */
+async function deleteBatchWithUnlink(batch) {
+  const { data: rows, error } = await supabase
+    .from("products")
+    .select(PRODUCT_EDIT_SELECT)
+    .eq("batch_id", batch.id)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
+  if (error) return { ok: false, message: "このロットに紐づく商品の取得に失敗しました" };
+
+  const list = rows || [];
+  const messages = [];
+  const changedIds = [];
+  let failed = null;
+
+  for (const product of list) {
+    const res = await updateProductCore(
+      { ...product, batch_id: null, shipping_cny: 0, fee_cny: 0 },
+      product
+    );
+    const name = product.product_name || product.product_code || "(名称未設定)";
+    if (!res.ok) { failed = `${name}: ${res.message}`; break; }
+    if (res.warning) messages.push(`${name}: ${res.warning}`);
+    changedIds.push(product.id);
+  }
+
+  // 中断した場合も、そこまでに原価が変わった商品の利益は同期しておく
+  if (changedIds.length > 0) {
+    const sync = await syncSaleItemProfits(changedIds);
+    if (!sync.ok) messages.push(`販売明細の利益(profit_jpy)の再計算に失敗しました: ${sync.message}`);
+  }
+
+  if (failed) {
+    return {
+      ok: false,
+      message: `${failed}\n\n商品${changedIds.length}点まで処理した時点で中断し、ロットは削除していません。\nウォレット残高と該当商品をご確認のうえ、もう一度お試しください。`,
+    };
+  }
+
+  const { error: delErr } = await supabase.from("purchase_batches").delete().eq("id", batch.id);
+  if (delErr) {
+    return {
+      ok: false,
+      message: `商品${changedIds.length}点の紐付けは外して金額を0円に戻しましたが、ロット自体の削除に失敗しました。\n`
+        + `このロットをまだ参照している商品が残っている可能性があります(商品番号で検索して確認してください)。\nもう一度削除をお試しください。`,
+    };
+  }
+
+  return { ok: true, unlinked: changedIds.length, messages };
+}
+
 function ProductsPage() {
   const [view, setView] = useState("list"); // "list" | "batches"
   const [products, setProducts] = useState(null); // null = 読み込み中
@@ -3947,6 +4111,8 @@ function ProductsPage() {
   const [modalBatch, setModalBatch] = useState(false);
   // ★2026-08-04実装: 仕入れロット編集用。nullなら非表示、ロットオブジェクトがセットされていれば編集モーダルを開く
   const [editingBatch, setEditingBatch] = useState(null);
+  // ★2026-08-17実装: 削除処理中のロットid(処理中はボタンを無効化する)
+  const [deletingBatchId, setDeletingBatchId] = useState(null);
   const [returnTarget, setReturnTarget] = useState(null);
   // ★2026-08-04実装: 商品番号で直接検索して編集する機能。販売済み(=通常の一覧には出ない)商品でも、
   //   仕入原価が未登録・修正が必要な場合にここから編集できるようにする(2.30参照)
@@ -4175,18 +4341,76 @@ function ProductsPage() {
     loadAll();
   };
 
-  // ★2026-08-04実装: 既存の仕入れロットを編集する。総点数・合計金額を編集すると、
-  //   以後まだ登録していない商品への自動按分(1点あたり金額)に反映される。
+  /* ★2026-08-17変更: 既存の仕入れロットを編集する。
+     従来は purchase_batches の行を書き換えるだけで、既に紐付いている商品の金額はそのままだったため、
+     「ロットの国際送料を直したのに、1商品ごとの金額が変わらない」状態になっていた(2.35参照)。
+     合計金額・総点数を変更した場合は、紐付け済みの商品へ配分し直すかどうかを確認する。 */
   const handleUpdateBatch = async (form) => {
     const { id, ...patch } = form;
+    const before = editingBatch || {};
+    const amountsChanged =
+      (Number(patch.total_shipping_cny) || 0) !== (Number(before.total_shipping_cny) || 0) ||
+      (Number(patch.total_fee_cny) || 0) !== (Number(before.total_fee_cny) || 0) ||
+      (Number(patch.total_items) || 0) !== (Number(before.total_items) || 0);
+
     const { error } = await supabase.from("purchase_batches").update(patch).eq("id", id);
     if (error) { alert("ロットの更新に失敗しました"); return; }
+
+    const linkedCount = usageCountByBatch[id] || 0;
+    if (amountsChanged && linkedCount > 0) {
+      const proceed = window.confirm(
+        `このロットには既に${linkedCount}点の商品が紐付いています。\n\n` +
+        `変更後の金額で、この${linkedCount}点の国際送料・その他手数料を配分し直しますか?\n\n` +
+        `［OK］各商品の金額を上書きし、ウォレットの消化もやり直します(推奨)。\n` +
+        `　　　商品側の合計がロット合計とぴったり一致します。\n` +
+        `　　　※再消化はそのときのFIFO順で行うため、確定JPY原価が多少変わることがあります。\n\n` +
+        `［キャンセル］ロットの数字だけ変更し、商品側は今の金額のまま残します。\n` +
+        `　　　　　　　この場合、ロット合計と商品側の合計が食い違ったままになります。`
+      );
+      if (proceed) {
+        const res = await reallocateBatchAmounts({ id, ...patch });
+        if (!res.ok) {
+          alert(res.message);
+        } else if (res.messages && res.messages.length > 0) {
+          alert(`${res.updated}点の金額を配分し直しました。\n\n以下は確認が必要です:\n${res.messages.join("\n")}`);
+        } else if (res.updated === 0) {
+          alert("配分し直す必要のある商品はありませんでした(各商品の金額は既に変更後の配分と一致しています)。");
+        } else {
+          alert(`${res.updated}点の国際送料・その他手数料を配分し直しました。`);
+        }
+      }
+    }
+
     setEditingBatch(null);
     loadAll();
   };
 
   // 商品登録モーダル内の「+ 新規ロット登録」から呼ばれる。一覧(batches state)はバックグラウンドで
   // 更新しつつ、作成結果はモーダル側にもそのまま返して即座に選択・自動入力できるようにする。
+  // ★2026-08-17実装: 仕入れロットの削除(2.35参照)
+  const handleDeleteBatch = async (batch) => {
+    const linked = usageCountByBatch[batch.id] || 0;
+    const label = batch.name ? `${batch.name}(${batch.purchase_date})` : batch.purchase_date;
+    const message = linked > 0
+      ? `仕入れロット「${label}」を削除します。\n\n`
+        + `このロットには${linked}点の商品が紐付いています。削除すると、その${linked}点の国際送料・その他手数料を0円に戻し、`
+        + `消化済みのぶんをウォレットへ払い戻します(仕入代・中国国内送料は1点ごとの費用のため、そのまま残ります)。\n\n`
+        + `この操作は取り消せません。よろしいですか?`
+      : `仕入れロット「${label}」を削除します。よろしいですか?`;
+    if (!window.confirm(message)) return;
+
+    setDeletingBatchId(batch.id);
+    const res = await deleteBatchWithUnlink(batch);
+    setDeletingBatchId(null);
+    if (!res.ok) { alert(res.message); loadAll(); return; }
+    if (res.messages && res.messages.length > 0) {
+      alert(`ロットを削除しました(商品${res.unlinked}点の国際送料・その他手数料を0円に戻しました)。\n\n以下は確認が必要です:\n${res.messages.join("\n")}`);
+    } else if (res.unlinked > 0) {
+      alert(`ロットを削除し、商品${res.unlinked}点の国際送料・その他手数料を0円に戻しました。`);
+    }
+    loadAll();
+  };
+
   const handleCreateBatchInline = async (form) => {
     const res = await createBatch(form);
     if (res.ok) loadAll();
@@ -4342,7 +4566,7 @@ function ProductsPage() {
       )}
 
       {products !== null && view === "batches" && (
-        <BatchList batches={batches} usageCountByBatch={usageCountByBatch} onEdit={setEditingBatch} />
+        <BatchList batches={batches} usageCountByBatch={usageCountByBatch} onEdit={setEditingBatch} onDelete={handleDeleteBatch} deletingBatchId={deletingBatchId} />
       )}
 
       {modalProduct && (
@@ -8759,7 +8983,7 @@ function CommissionRateFormModal({ rate, staffList, onClose, onSave }) {
 }
 
 /* ---- 月次損益 一覧表示(対象月の新しい順) ---- */
-function MonthlyProfitList({ profits, onDelete }) {
+function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, recalculating }) {
   if (profits.length === 0) {
     return <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>月次損益がまだ集計されていません</p>;
   }
@@ -8770,11 +8994,13 @@ function MonthlyProfitList({ profits, onDelete }) {
         // ★2026-08-06実装: 繰越損失(前月までの赤字の繰越分)を加味した、報酬の実際の計算基準額
         const carriedLoss = Number(p.carried_loss_in_jpy) || 0;
         const commissionBase = gross + carriedLoss;
+        // ★2026-08-17実装: 集計後に原価・経費・売上が変わっていないかの判定結果(2.36参照)
+        const stale = (staleProfits || {})[p.id] || null;
         return (
           <div
             key={p.id}
             className="rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3"
-            style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+            style={{ background: "var(--mz-surface)", border: `1px solid ${stale ? "#7a5a3a" : "var(--mz-border)"}` }}
           >
             <div className="flex-1 min-w-0">
               <p className="font-display text-base">{formatMonthLabel(p.target_month)}</p>
@@ -8791,11 +9017,39 @@ function MonthlyProfitList({ profits, onDelete }) {
               <p className="text-xs mt-1" style={{ color: "var(--mz-ink-muted)" }}>
                 算出日時: {(p.calculated_at || "").slice(0, 16).replace("T", " ")}
               </p>
+              {/* ★2026-08-17実装: 集計したあとで原価・経費・売上が変わった月に警告を出す(2.36参照) */}
+              {stale && (
+                <div className="text-xs mt-2 rounded-lg px-2.5 py-2 space-y-1" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
+                  {stale.diffs.length > 0 && (
+                    <p>⚠️ この月を集計したあとに{stale.diffs.join("・")}が変更されています。表示中の数字は古い可能性があります。</p>
+                  )}
+                  {/* 前の月が古いことによる連鎖ズレ。この月だけ再集計しても直らない点を明示する */}
+                  {stale.cascade && (
+                    <p>⚠️ 前の月の集計が古いため、この月の繰越損失も古くなっています。<strong>この月だけ再集計しても直りません。</strong>前の月から順に集計し直してください。</p>
+                  )}
+                  {stale.savedGross !== stale.currentGross && (
+                    <p>粗利益: {fmtJPY(stale.savedGross)} → <strong>{fmtJPY(stale.currentGross)}</strong></p>
+                  )}
+                  {stale.savedBase !== stale.currentBase && (
+                    <p>報酬の計算基準額(繰越損失を差し引いた後): {fmtJPY(stale.savedBase)} → <strong>{fmtJPY(stale.currentBase)}</strong></p>
+                  )}
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-3 shrink-0">
               <span className="font-display text-lg" style={{ color: gross >= 0 ? "var(--mz-gold-soft)" : "#f2b8bd" }}>
                 粗利益 {fmtJPY(gross)}
               </span>
+              {stale && stale.diffs.length > 0 && onRecalculate && (
+                <button
+                  onClick={() => onRecalculate(String(p.target_month).slice(0, 7))}
+                  disabled={recalculating}
+                  className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap disabled:opacity-60"
+                  style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+                >
+                  {recalculating ? "集計中..." : "この月を再集計"}
+                </button>
+              )}
               <button
                 onClick={() => onDelete(p.id)}
                 className="text-xs px-2.5 py-1.5 rounded-lg"
@@ -8885,6 +9139,11 @@ function ContractorInvoicesPage() {
   const [profitError, setProfitError] = useState(null);
   const [calcTargetMonth, setCalcTargetMonth] = useState(todayISO().slice(0, 7));
   const [calculating, setCalculating] = useState(false);
+  // ★2026-08-17実装: 保存済みの月次損益が、いまの実データと食い違っている月の一覧
+  //   { [monthly_profits.id]: { diffs: ["仕入原価",...], currentGross, savedGross } }(2.36参照)
+  const [staleProfits, setStaleProfits] = useState({});
+  // 通信エラー・取得件数上限などで鮮度を判定できなかった場合(警告が無い=最新、と誤解させないため)
+  const [staleCheckError, setStaleCheckError] = useState(false);
 
   const [invoices, setInvoices] = useState(null); // null = 読み込み中
   const [invoiceError, setInvoiceError] = useState(null);
@@ -8926,6 +9185,130 @@ function ContractorInvoicesPage() {
       setMonthlyProfits(data || []);
     }
   }, []);
+
+  /* ★2026-08-17実装: 月次損益は「集計ボタンを押した時点の数字を保存するスナップショット」であり、
+     あとから商品の原価(仕入代・国際送料・その他手数料・中国国内送料)や経費・売上を修正しても
+     自動では追随しない(2.14参照)。受注時は0円で登録し、返金確定後に金額を入れる運用(5章26番)では
+     「集計 → あとから原価を入力」の順になりやすく、保存済みの粗利が古いまま放置されやすい。
+     そこで保存値と「いまの実データから計算し直した値」を突き合わせ、ズレている月に警告を出す。
+     ・全月まとめて2クエリ(sales / expenses)で取得し、クライアント側で月ごとに集計して比較する。
+       計算式・期間の切り方はhandleCalculateMonthlyProfitと完全に一致させること(片方だけ直すと、
+       実際はズレていないのに毎回「古い」と警告が出続ける)。
+     ・繰越損失には2種類のズレがある。両方を区別して扱う(2.33・2.36参照):
+       ① この月自体のズレ … 前月の「保存値」から求めた期待値と、この月の保存値が違う場合。
+          この月を再集計すれば直る。
+       ② 前月から連鎖したズレ(cascade) … この月の保存値は前月の「保存値」とは整合しているが、
+          その前月自体が古い場合。**この月を再集計しても直らず、前の月から順に集計し直す必要がある**。
+          ①だけを見ていると、前月が赤字に変わったのに今月は「最新」と表示され、繰越損失を
+          差し引かないまま報酬を発行してしまう(commission_base_jpyが本来より高くなる)。 */
+  const staleRunRef = useRef(0);
+  const checkStaleMonthlyProfits = useCallback(async (profits) => {
+    // 実行の追い越し対策: 「6月を再集計 → すぐ7月を再集計」のように連続実行すると、
+    // 先に投げた古い判定が後から返って新しい結果を上書きしうる。最後に開始した実行だけを採用する。
+    const runId = ++staleRunRef.current;
+    const isCurrent = () => runId === staleRunRef.current;
+
+    if (!profits || profits.length === 0) {
+      if (isCurrent()) { setStaleProfits({}); setStaleCheckError(false); }
+      return;
+    }
+    const monthsAsc = profits.map((x) => String(x.target_month).slice(0, 7)).sort();
+    const rangeStart = `${monthsAsc[0]}-01`;
+    const rangeEnd = nextMonthFirstDay(monthsAsc[monthsAsc.length - 1]);
+
+    const ROW_CAP = 1000; // Supabase(PostgREST)のMax rows既定値
+    const [salesRes, expenseRes] = await Promise.all([
+      supabase.from("sales")
+        .select("transaction_date,total_amount_jpy,sale_items(product_id,products(purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
+        .gte("transaction_date", rangeStart).lt("transaction_date", rangeEnd),
+      supabase.from("expenses")
+        .select("amount_incl_tax,payment_date")
+        .gte("payment_date", rangeStart).lt("payment_date", rangeEnd),
+    ]);
+    if (!isCurrent()) return;
+
+    /* 判定不能のケースは「警告なし(=最新)」ではなく「判定できなかった」として明示する。
+       この画面には「最新です」という肯定表示が無く、警告が出ていないこと自体が最新の合図になるため、
+       黙って警告を消すと、古い粗利のまま報酬を発行してしまう。
+       行数上限に達している場合も、取得漏れのぶんだけ必ずズレて見えるので同じ扱いにする
+       (この状態で警告を出すと、再集計しても消えない警告が延々と出続けてしまう)。 */
+    const truncated = (salesRes.data || []).length >= ROW_CAP || (expenseRes.data || []).length >= ROW_CAP;
+    if (salesRes.error || expenseRes.error || truncated) {
+      setStaleCheckError(true); // 直前の判定結果(staleProfits)はあえて消さずに残す
+      return;
+    }
+
+    const byMonth = {};
+    const bucket = (m) => (byMonth[m] = byMonth[m] || { sales: 0, cost: 0, expenses: 0 });
+    (salesRes.data || []).forEach((sale) => {
+      const b = bucket(String(sale.transaction_date).slice(0, 7));
+      b.sales += Number(sale.total_amount_jpy) || 0;
+      (sale.sale_items || []).forEach((it) => {
+        const pr = it.products || {};
+        b.cost += (Number(pr.purchase_amount_jpy) || 0) + (Number(pr.shipping_jpy) || 0)
+          + (Number(pr.fee_jpy) || 0) + (Number(pr.domestic_shipping_jpy) || 0);
+      });
+    });
+    (expenseRes.data || []).forEach((e) => {
+      bucket(String(e.payment_date).slice(0, 7)).expenses += Number(e.amount_incl_tax) || 0;
+    });
+
+    /* 注意: 前月の参照はこの配列(profits)の中から引いている。loadMonthlyProfitsが
+       monthly_profitsを全件取得している前提。将来この一覧に「直近12か月だけ」等の絞り込みを
+       入れる場合は、一覧の最古月の前月だけは別途DBから取得しないと、その月に消せない
+       繰越損失の警告が出続けるので注意すること。 */
+    const profitByMonth = {};
+    profits.forEach((x) => { profitByMonth[String(x.target_month).slice(0, 7)] = x; });
+
+    // 月の若い順に「いまの実データで集計し直した場合の値」を連鎖計算する(繰越損失の連鎖を再現するため)
+    const liveByMonth = {};
+    monthsAsc.forEach((m) => {
+      const cur = byMonth[m] || { sales: 0, cost: 0, expenses: 0 };
+      const gross = cur.sales - cur.cost - cur.expenses;
+      const prevM = String(prevMonthFirstDay(m)).slice(0, 7);
+      const prevLive = liveByMonth[prevM];
+      const prevLiveBase = prevLive ? prevLive.gross + prevLive.carried : 0;
+      const carried = profitByMonth[prevM] && prevLiveBase < 0 ? prevLiveBase : 0;
+      liveByMonth[m] = { gross, carried };
+    });
+
+    const result = {};
+    profits.forEach((x) => {
+      const m = String(x.target_month).slice(0, 7);
+      const cur = byMonth[m] || { sales: 0, cost: 0, expenses: 0 };
+      const live = liveByMonth[m] || { gross: 0, carried: 0 };
+      const savedGross = Math.round(Number(x.gross_profit_jpy) || 0);
+      const savedCarried = Math.round(Number(x.carried_loss_in_jpy) || 0);
+
+      // ① この月を再集計すれば直るズレ(前月の「保存値」を基準にした期待値との比較)
+      const prev = profitByMonth[String(prevMonthFirstDay(m)).slice(0, 7)];
+      const prevSavedBase = prev ? (Number(prev.gross_profit_jpy) || 0) + (Number(prev.carried_loss_in_jpy) || 0) : 0;
+      const expectedCarried = Math.round(prevSavedBase < 0 ? prevSavedBase : 0);
+
+      const diffs = [];
+      if (Math.round(cur.sales) !== Math.round(Number(x.total_sales_jpy) || 0)) diffs.push("売上");
+      if (Math.round(cur.cost) !== Math.round(Number(x.total_purchase_cost_jpy) || 0)) diffs.push("仕入原価");
+      if (Math.round(cur.expenses) !== Math.round(Number(x.total_general_expenses_jpy) || 0)) diffs.push("経費");
+      if (expectedCarried !== savedCarried) diffs.push("繰越損失");
+
+      // ② 前の月が古いせいで連鎖しているズレ(この月だけ再集計しても直らない)
+      const cascade = Math.round(live.carried) !== savedCarried && expectedCarried === savedCarried;
+
+      if (diffs.length > 0 || cascade) {
+        result[x.id] = {
+          diffs, cascade,
+          savedGross,
+          currentGross: Math.round(live.gross),
+          savedBase: savedGross + savedCarried,
+          currentBase: Math.round(live.gross + live.carried),
+        };
+      }
+    });
+    if (isCurrent()) { setStaleProfits(result); setStaleCheckError(false); }
+  }, []);
+
+  // monthlyProfitsが読み込まれ/更新されるたびに、保存値が最新かどうかを再判定する
+  useEffect(() => { checkStaleMonthlyProfits(monthlyProfits); }, [monthlyProfits, checkStaleMonthlyProfits]);
 
   const loadInvoices = useCallback(async () => {
     setInvoiceError(null);
@@ -8984,13 +9367,16 @@ function ContractorInvoicesPage() {
   };
 
   /* ---- 月次損益の集計(売上合計・仕入原価合計・一般経費合計を算出し、既存行があれば再計算=update、なければinsert) ---- */
-  const handleCalculateMonthlyProfit = async () => {
-    if (!calcTargetMonth) return;
+  // ★2026-08-17変更: 一覧の各行から「この月を再集計」できるよう、対象月を引数で受け取れるようにした
+  //   (引数なしの場合は従来どおり画面上部で選択中の月を使う)
+  const handleCalculateMonthlyProfit = async (monthArg) => {
+    const targetMonth = typeof monthArg === "string" && monthArg ? monthArg : calcTargetMonth;
+    if (!targetMonth) return;
     setCalculating(true);
     setProfitError(null);
     try {
-      const monthStart = `${calcTargetMonth}-01`;
-      const monthEndExclusive = nextMonthFirstDay(calcTargetMonth);
+      const monthStart = `${targetMonth}-01`;
+      const monthEndExclusive = nextMonthFirstDay(targetMonth);
 
       // 売上合計(税込)と、その月に売れた商品の原価合計(sale_items→productsの確定JPY原価)
       const { data: salesData, error: salesError } = await supabase
@@ -9028,7 +9414,7 @@ function ContractorInvoicesPage() {
       const { data: prevMp, error: prevMpError } = await supabase
         .from("monthly_profits")
         .select("gross_profit_jpy,carried_loss_in_jpy")
-        .eq("target_month", prevMonthFirstDay(calcTargetMonth))
+        .eq("target_month", prevMonthFirstDay(targetMonth))
         .maybeSingle();
       if (prevMpError) { setProfitError("前月の月次損益データの確認に失敗しました"); setCalculating(false); return; }
       const prevBase = prevMp ? (Number(prevMp.gross_profit_jpy) || 0) + (Number(prevMp.carried_loss_in_jpy) || 0) : 0;
@@ -9228,7 +9614,7 @@ function ContractorInvoicesPage() {
               />
             </div>
             <button
-              onClick={handleCalculateMonthlyProfit}
+              onClick={() => handleCalculateMonthlyProfit()}
               disabled={calculating || !calcTargetMonth}
               className="rounded-lg px-4 py-2 text-sm font-medium whitespace-nowrap disabled:opacity-60"
               style={{ background: "var(--mz-gold)", color: "#1a1710" }}
@@ -9240,10 +9626,25 @@ function ContractorInvoicesPage() {
             </p>
           </div>
 
+          {/* ★2026-08-17実装: 鮮度チェック自体が失敗した場合。警告が出ていないこと=最新、と
+              誤解されないよう明示する(2.36参照) */}
+          {staleCheckError && (
+            <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
+              ⚠️ 集計内容が最新かどうかの確認ができませんでした(通信エラー、または対象データが多すぎます)。
+              下の警告表示は最新でない可能性があります。報酬を発行する前に、対象月を一度集計し直すことをおすすめします。
+            </p>
+          )}
+
           {monthlyProfits === null ? (
             <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
           ) : (
-            <MonthlyProfitList profits={monthlyProfits} onDelete={handleDeleteMonthlyProfit} />
+            <MonthlyProfitList
+              profits={monthlyProfits}
+              onDelete={handleDeleteMonthlyProfit}
+              staleProfits={staleProfits}
+              recalculating={calculating}
+              onRecalculate={(month) => handleCalculateMonthlyProfit(month)}
+            />
           )}
         </>
       )}
