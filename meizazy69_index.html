@@ -3002,6 +3002,15 @@ function BatchFormModal({ batch, onClose, onSave }) {
           <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="例: 7月 BuckyDrop 6点分"
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
         </div>
+        {/* ★2026-08-18実装: BuckyDropの明細と自動で突き合わせるためのキー(2.37参照) */}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>BuckyDropの注文番号(任意)</label>
+          <input type="text" value={bdOrderNo} onChange={(e) => setBdOrderNo(e.target.value)} placeholder="例: S3113317892001"
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+          <p className="text-xs mt-1" style={{ color: "var(--mz-ink-muted)" }}>
+            入れておくと、BuckyDropの明細ファイルを取り込んだときに、このロットと自動で突き合わせて差額を確認できます。
+          </p>
+        </div>
         <div>
           <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入れ日</label>
           <input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required
@@ -3034,6 +3043,424 @@ function BatchFormModal({ batch, onClose, onSave }) {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/* ============================================================
+   BuckyDrop突き合わせ(BuckyDropReconcileCard) ★2026-08-18実装
+   ・BuckyDropは注文したあとで「実際は安かった」という差額返金(Purchase ordered auto refund)や
+     交換・サービス返金を数日遅れで返してくる。そのためシステムに入れた金額が実費とズレていき、
+     ウォレット残高が合わなくなる(2026-08-18に8.00 CNYのズレとして実際に発生。5章35番参照)。
+   ・返金を1件ずつ追いかけるのは非現実的なので、「注文ごとの確定純額」で突き合わせる方式にした。
+     BuckyDropの明細エクスポート(Transaction Statement)から、返金・交換・凍結解除まで含めた
+     純額を注文単位で再計算できることを実データで検証済み(費用統計画面の数字と完全一致)。
+   ・対応関係:
+       調達(注文支払い − 注文返金)      ⇔ 商品代 + 中国国内送料 の合計(商品ごと)
+       物流(荷物支払い − 荷物返金)      ⇔ ロットの国際送料合計
+       サービス(サービス購入 − サービス返金) ⇔ ロットのその他手数料合計
+   ・交換費用の凍結/解除は必ず相殺されるため合計には影響しないが、内訳としては表示する。
+   ・**この画面はDBを一切書き換えない**(差額を表示するだけ)。どの商品を直すかは人が判断する。
+   ============================================================ */
+
+// 取引タイプ → 支出の符号(支払い/購入=+1、返金/解除=-1)と、集計区分
+const BD_TX_SIGN = {
+  "注文支払い": 1, "注文返金": -1,
+  "荷物支払い": 1, "荷物返金": -1, "荷物追加支払い": 1,
+  "サービス購入": 1, "サービス返金": -1,
+  "交換費用凍結": 1, "交換費用解除": -1,
+  "返品・交換追加支払い": 1, "売り手手数料決済": 1,
+};
+const BD_TX_CATEGORY = {
+  "注文支払い": "procure", "注文返金": "procure",
+  "荷物支払い": "logistics", "荷物返金": "logistics", "荷物追加支払い": "logistics",
+  "サービス購入": "service", "サービス返金": "service",
+  "交換費用凍結": "exchange", "交換費用解除": "exchange",
+  "返品・交換追加支払い": "other", "売り手手数料決済": "other",
+};
+
+/* 明細1行の金額文字列("CN ¥ 57.25" 等)を数値にする */
+function parseBdAmount(v) {
+  if (v == null) return 0;
+  if (typeof v === "number") return v;
+  const cleaned = String(v).replace(/[^\d.]/g, "");
+  return cleaned ? parseFloat(cleaned) : 0;
+}
+
+/* 業務伝票番号("S3113317892001,P3113317892005-OH2086..." 等)から代購注文番号を取り出す */
+function extractBdOrderNo(v) {
+  const first = String(v == null ? "" : v).split(/[,\-]/)[0].trim();
+  return first;
+}
+
+/* 明細シートの配列(オブジェクト)から、注文ごとの確定純額を集計する */
+function aggregateBdStatement(rows) {
+  const byOrder = {};
+  let matched = 0;
+  rows.forEach((r) => {
+    const type = String(r["取引タイプ"] || "").trim();
+    const sign = BD_TX_SIGN[type];
+    const cat = BD_TX_CATEGORY[type];
+    if (!sign || !cat) return; // 未知の取引タイプは無視(将来BuckyDrop側が増やしても壊れないように)
+    const order = extractBdOrderNo(r["業務伝票番号"]);
+    if (!order) return;
+    matched += 1;
+    const b = byOrder[order] || (byOrder[order] = { order, procure: 0, logistics: 0, service: 0, exchange: 0, other: 0 });
+    b[cat] += sign * parseBdAmount(r["金額"]);
+  });
+  Object.values(byOrder).forEach((b) => {
+    b.procure = preciseCny(b.procure);
+    b.logistics = preciseCny(b.logistics);
+    b.service = preciseCny(b.service);
+    b.exchange = preciseCny(b.exchange);
+    b.other = preciseCny(b.other);
+    b.total = preciseCny(b.procure + b.logistics + b.service + b.exchange + b.other);
+  });
+  return { orders: Object.values(byOrder).sort((a, b) => b.total - a.total), matched };
+}
+
+/* ★2026-08-18実装: BuckyDropの注文管理画面「購入注文」の部分をコピー&ペーストしてもらい、
+   商品ごとの金額を読み取る(2.37参照)。
+   ・明細エクスポートには部分返金がどの商品のものか記録されないため、金額のズレを商品単位まで
+     特定できない。一方この画面には商品ごとの確定金額が出ているので、貼り付けてもらえば照合できる。
+   ・画面にエクスポート機能が無いため、貼り付けという手段を採っている。
+   ・書式に依存しすぎないよう、「購入注文番号(P+数字)」「ステータス」「CN ¥ 金額」の3つだけを
+     出現順に拾う。行の並びやタブ/空白の入り方が変わっても壊れにくい。
+   ・配送注文の番号(PG…)は数字が続かないため P\d+ にはマッチしない。履行注文(S…)・店舗注文(M…)も同様。 */
+function parseBdPurchaseOrders(text) {
+  if (!text || !text.trim()) return [];
+  const re = /(P\d{8,})|(返品済み)|(入庫成功)|CN\s*[¥￥]\s*([\d,]+(?:\.\d+)?)/g;
+  const out = [];
+  let currentNo = null;
+  let currentStatus = null;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[1]) { currentNo = m[1]; currentStatus = null; continue; }
+    if (m[2]) { currentStatus = "返品済み"; continue; }
+    if (m[3]) { currentStatus = "入庫成功"; continue; }
+    if (m[4]) {
+      // 購入注文番号が出てくる前の金額(注文コストの合計など)は対象外
+      if (!currentNo) continue;
+      out.push({ orderNo: currentNo, status: currentStatus, price: preciseCny(parseFloat(m[4].replace(/,/g, ""))) });
+    }
+  }
+  return out;
+}
+
+/* 2つの金額リストを多重集合として比較し、片方にしか無いものを返す */
+function diffPriceMultisets(listA, listB) {
+  const countB = {};
+  listB.forEach((v) => { const k = String(preciseCny(v)); countB[k] = (countB[k] || 0) + 1; });
+  const onlyA = [];
+  listA.forEach((v) => {
+    const k = String(preciseCny(v));
+    if (countB[k] > 0) countB[k] -= 1; else onlyA.push(preciseCny(v));
+  });
+  const onlyB = [];
+  Object.keys(countB).forEach((k) => { for (let i = 0; i < countB[k]; i++) onlyB.push(Number(k)); });
+  return { onlyA, onlyB };
+}
+
+/* 貼り付けたBuckyDropの購入注文と、システムの商品代を1点ずつ突き合わせる */
+function BdItemPasteCompare({ systemItems }) {
+  const [text, setText] = useState("");
+  const [excludeReturned, setExcludeReturned] = useState(true);
+
+  const parsed = useMemo(() => parseBdPurchaseOrders(text), [text]);
+  const bdItems = useMemo(
+    () => (excludeReturned ? parsed.filter((x) => x.status !== "返品済み") : parsed),
+    [parsed, excludeReturned]
+  );
+
+  const sysPrices = systemItems.map((p) => preciseCny(Number(p.purchase_amount_cny) || 0));
+  const bdPrices = bdItems.map((x) => x.price);
+  const bdSum = preciseCny(bdPrices.reduce((a, b) => a + b, 0));
+  const sysSum = preciseCny(sysPrices.reduce((a, b) => a + b, 0));
+  const { onlyA: onlyBd, onlyB: onlySys } = diffPriceMultisets(bdPrices, sysPrices);
+
+  // システム側の「BuckyDropに無い金額」がどの商品か引けるようにする
+  const productsByPrice = {};
+  systemItems.forEach((p) => {
+    const k = String(preciseCny(Number(p.purchase_amount_cny) || 0));
+    (productsByPrice[k] = productsByPrice[k] || []).push(p);
+  });
+
+  const oneToOne = onlyBd.length === 1 && onlySys.length === 1;
+
+  return (
+    <div className="space-y-2 mt-2">
+      <p style={{ color: "var(--mz-ink-muted)" }}>
+        BuckyDropの注文管理画面で「購入注文」の部分を範囲選択してコピーし、ここに貼り付けてください。
+        商品ごとの金額を読み取って、システムの商品代と1点ずつ突き合わせます。
+      </p>
+      <textarea
+        value={text} onChange={(e) => setText(e.target.value)} rows={4}
+        placeholder="ここに貼り付け(P3113317892001 … CN ¥ 163 のような内容)"
+        className="w-full rounded-lg px-2 py-1.5 text-xs bg-transparent"
+        style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+      />
+
+      {parsed.length > 0 && (
+        <>
+          <label className="flex items-center gap-2 cursor-pointer" style={{ color: "var(--mz-ink-muted)" }}>
+            <input type="checkbox" checked={excludeReturned} onChange={() => setExcludeReturned((v) => !v)} />
+            <span>「返品済み」の商品を除外する(交換前の商品はシステムに残らないため、通常はオン)</span>
+          </label>
+
+          <div className="flex flex-wrap gap-x-4 gap-y-1" style={{ color: "var(--mz-ink-muted)" }}>
+            <span>読み取り: {parsed.length}点(除外後 {bdItems.length}点)</span>
+            <span>BuckyDrop合計: {fmtCnyCompact(bdSum)}</span>
+            <span>システム合計: {fmtCnyCompact(sysSum)}({systemItems.length}点)</span>
+            <span style={{ color: Math.abs(bdSum - sysSum) > 0.0001 ? "#d6a98f" : "#8fd19e" }}>
+              差額: {fmtCnyCompact(preciseCny(sysSum - bdSum))}
+            </span>
+          </div>
+
+          {bdItems.length !== systemItems.length && (
+            <p style={{ color: "#d6a98f" }}>
+              ⚠️ 点数が違います(BuckyDrop {bdItems.length}点 / システム {systemItems.length}点)。
+              貼り付け範囲が足りていないか、交換前の商品の扱いがずれている可能性があります。
+            </p>
+          )}
+
+          {onlyBd.length === 0 && onlySys.length === 0 ? (
+            <p style={{ color: "#8fd19e" }}>✓ 金額の内訳が完全に一致しています</p>
+          ) : (
+            <div className="rounded-lg px-2.5 py-2 space-y-1" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
+              {onlyBd.length > 0 && (
+                <p>BuckyDrop側にあって、システムに無い金額: <strong>{onlyBd.map((v) => fmtCnyCompact(v)).join(" / ")}</strong></p>
+              )}
+              {onlySys.length > 0 && (
+                <div>
+                  <p>システム側にあって、BuckyDropに無い金額:</p>
+                  {onlySys.map((v, i) => {
+                    const cands = productsByPrice[String(v)] || [];
+                    return (
+                      <p key={i} className="pl-3">
+                        ・{fmtCnyCompact(v)} — {cands.map((p) => `${p.product_name || "(名称未設定)"}(No.${p.product_code || "-"})`).join(" / ") || "該当商品不明"}
+                      </p>
+                    );
+                  })}
+                </div>
+              )}
+              {oneToOne && (
+                <p className="pt-1" style={{ color: "var(--mz-gold-soft)" }}>
+                  → <strong>
+                    {(productsByPrice[String(onlySys[0])] || []).map((p) => `${p.product_name || "(名称未設定)"}(No.${p.product_code || "-"})`).join(" / ")}
+                    の商品代を {fmtCnyCompact(onlySys[0])} → {fmtCnyCompact(onlyBd[0])} に直してください
+                  </strong>
+                </p>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function BuckyDropReconcileCard({ batches }) {
+  const [open, setOpen] = useState(false);
+  const [parsing, setParsing] = useState(false);
+  const [error, setError] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const [result, setResult] = useState(null); // { orders, matched }
+  const [systemTotals, setSystemTotals] = useState({}); // { [batchId]: {procure, logistics, service} }
+  const inputRef = useRef(null);
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    if (typeof XLSX === "undefined") { setError("表計算ライブラリの読み込みに失敗しました。通信環境を確認して、ページを再読み込みしてください。"); return; }
+    setParsing(true); setError(null); setResult(null); setFileName(file.name);
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+      if (rows.length === 0) throw new Error("シートに行がありません");
+      if (!("取引タイプ" in rows[0]) || !("業務伝票番号" in rows[0]) || !("金額" in rows[0])) {
+        throw new Error("「取引タイプ」「業務伝票番号」「金額」の列が見つかりません。BuckyDropの Transaction Statement のファイルか確認してください");
+      }
+      const agg = aggregateBdStatement(rows);
+      if (agg.orders.length === 0) throw new Error("集計できる取引が1件もありませんでした");
+
+      // システム側の金額を、突き合わせ対象のロットぶんだけ取得する
+      const orderNos = new Set(agg.orders.map((o) => o.order));
+      const targets = batches.filter((b) => b.bd_order_no && orderNos.has(String(b.bd_order_no).trim()));
+      const totals = {};
+      for (const b of targets) {
+        const { data, error: qErr } = await supabase
+          .from("products")
+          .select("id,product_code,product_name,size,status,purchase_amount_cny,domestic_shipping_cny,shipping_cny,fee_cny")
+          .eq("batch_id", b.id)
+          .order("product_code", { ascending: true });
+        if (qErr) throw new Error("システム側の商品金額の取得に失敗しました");
+        const procure = (data || []).reduce((sum, x) =>
+          sum + (Number(x.purchase_amount_cny) || 0) + (Number(x.domestic_shipping_cny) || 0), 0);
+        totals[b.id] = {
+          procure: preciseCny(procure),
+          logistics: preciseCny(Number(b.total_shipping_cny) || 0),
+          service: preciseCny(Number(b.total_fee_cny) || 0),
+          count: (data || []).length,
+          // ★2026-08-18: 差額が出たときに「どの商品か」を探す範囲を示すため、商品ごとの内訳も保持する。
+          //   BuckyDropの部分返金は明細上どの商品か記録されないため、機械的な特定は不可能。
+          //   BuckyDropの注文一覧(商品ごとの金額が出る画面)と見比べてもらうための一覧(2.37参照)。
+          items: data || [],
+        };
+      }
+      setSystemTotals(totals);
+      setResult(agg);
+    } catch (e) {
+      setError(e.message || "ファイルの読み込みに失敗しました");
+    }
+    setParsing(false);
+  };
+
+  const rowsForOrder = (o) => {
+    const batch = batches.find((b) => b.bd_order_no && String(b.bd_order_no).trim() === o.order);
+    const sys = batch ? systemTotals[batch.id] : null;
+    return { batch, sys };
+  };
+
+  return (
+    <div className="rounded-xl p-4 space-y-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+      <button type="button" onClick={() => setOpen((v) => !v)} className="text-sm w-full text-left" style={{ color: "var(--mz-gold-soft)" }}>
+        {open ? "▲ " : "▼ "}BuckyDropと突き合わせる
+      </button>
+
+      {open && (
+        <div className="space-y-3">
+          <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+            BuckyDropの「明細」→ Transaction Statement をエクスポートして、ここに読み込ませてください。
+            返金・交換まで含めた<strong>確定後の純額</strong>を注文ごとに計算し、システムの金額と並べて差額を表示します。
+            ロットの編集画面で「BuckyDropの注文番号」を入れておくと自動で対応づきます。
+            <br />
+            この画面はデータを書き換えません。差額が出た場合は、どの商品を直すかご自身で判断してください。
+          </p>
+
+          <div
+            onClick={() => inputRef.current && inputRef.current.click()}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files && e.dataTransfer.files[0]); }}
+            className="rounded-lg px-4 py-6 text-center text-xs cursor-pointer"
+            style={{ border: "1px dashed var(--mz-border)", color: "var(--mz-ink-muted)" }}
+          >
+            {parsing ? "読み込み中..." : (fileName || "明細ファイル(.xlsx)をドラッグ&ドロップ、またはクリックして選択")}
+          </div>
+          <input
+            ref={inputRef} type="file" accept=".xlsx,.xls" className="hidden"
+            onChange={(e) => handleFile(e.target.files && e.target.files[0])}
+          />
+
+          {error && <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
+
+          {result && (
+            <div className="space-y-3">
+              <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                {result.orders.length}件の注文を集計しました(対象取引 {result.matched}件)
+              </p>
+              {result.orders.map((o) => {
+                const { batch, sys } = rowsForOrder(o);
+                const lines = sys ? [
+                  { label: "調達(商品代+国内送料)", bd: o.procure, sysv: sys.procure },
+                  { label: "国際送料", bd: o.logistics, sysv: sys.logistics },
+                  { label: "その他手数料", bd: o.service, sysv: sys.service },
+                ] : [];
+                const anyDiff = lines.some((l) => Math.abs(l.bd - l.sysv) > 0.0001);
+                return (
+                  <div key={o.order} className="rounded-lg p-3 space-y-2"
+                    style={{ border: `1px solid ${sys && anyDiff ? "#7a5a3a" : "var(--mz-border)"}`, background: "var(--mz-surface-hover)" }}>
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-sm">{o.order}</span>
+                      <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                        {batch ? `⇄ ${batch.name ? batch.name : batch.purchase_date}(${sys ? sys.count : 0}点)` : "対応するロット未設定"}
+                      </span>
+                    </div>
+
+                    {!batch ? (
+                      <p className="text-xs" style={{ color: "#d6a98f" }}>
+                        この注文番号を持つロットがありません。ロットの編集画面で「BuckyDropの注文番号」に <strong>{o.order}</strong> を入れると突き合わせできます。
+                        (BuckyDrop側の確定純額: 調達 {fmtCnyCompact(o.procure)} / 国際送料 {fmtCnyCompact(o.logistics)} / 手数料 {fmtCnyCompact(o.service)} / 合計 {fmtCnyCompact(o.total)} CNY)
+                      </p>
+                    ) : (
+                      <>
+                        <div className="text-xs space-y-1">
+                          <div className="flex justify-between gap-2" style={{ color: "var(--mz-ink-muted)" }}>
+                            <span className="flex-1">項目</span>
+                            <span className="w-24 text-right">BuckyDrop</span>
+                            <span className="w-24 text-right">システム</span>
+                            <span className="w-20 text-right">差額</span>
+                          </div>
+                          {lines.map((l) => {
+                            const diff = preciseCny(l.sysv - l.bd);
+                            const ng = Math.abs(diff) > 0.0001;
+                            return (
+                              <div key={l.label} className="flex justify-between gap-2" style={{ color: ng ? "#d6a98f" : "var(--mz-ink)" }}>
+                                <span className="flex-1">{l.label}</span>
+                                <span className="w-24 text-right">{fmtCnyCompact(l.bd)}</span>
+                                <span className="w-24 text-right">{fmtCnyCompact(l.sysv)}</span>
+                                <span className="w-20 text-right">{ng ? `${diff > 0 ? "+" : ""}${fmtCnyCompact(diff)}` : "一致"}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {anyDiff ? (
+                          <>
+                            <p className="text-xs rounded-lg px-2.5 py-1.5" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
+                              ⚠️ 差額があります。「システム」が多い(+)ならウォレットを使いすぎ、少ない(−)なら使い足りていない状態です。
+                            </p>
+                            {Math.abs(sys.procure - o.procure) > 0.0001 && (
+                              <details className="text-xs">
+                                <summary className="cursor-pointer py-1" style={{ color: "var(--mz-gold-soft)" }}>
+                                  この{sys.count}点のどれかがズレています(クリックで一覧)
+                                </summary>
+                                <p className="mt-1 mb-2" style={{ color: "var(--mz-ink-muted)" }}>
+                                  BuckyDropの明細には「どの商品の返金か」が記録されていないため、システム側では特定できません。
+                                  BuckyDropの注文一覧(商品ごとの金額が出る画面)と、下の商品代を見比べてください。
+                                  差額は <strong>{fmtCnyCompact(preciseCny(sys.procure - o.procure))} CNY</strong> です。
+                                </p>
+                                <div className="rounded-lg divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+                                  {sys.items.map((it) => {
+                                    const gap = preciseCny(sys.procure - o.procure);
+                                    const after = preciseCny((Number(it.purchase_amount_cny) || 0) - gap);
+                                    return (
+                                      <div key={it.id} className="flex items-center gap-2 px-2 py-1.5">
+                                        <span className="flex-1 truncate">
+                                          {it.product_name || "(名称未設定)"}{it.size ? ` - ${it.size}` : ""}
+                                          <span style={{ color: "var(--mz-ink-muted)" }}> (No.{it.product_code || "-"}{it.status === "販売済み" ? "・販売済み" : ""})</span>
+                                        </span>
+                                        <span className="w-20 text-right">{fmtCnyCompact(it.purchase_amount_cny)}</span>
+                                        <span className="w-20 text-right" style={{ color: "var(--mz-ink-muted)" }}>→ {fmtCnyCompact(after)}</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                <p className="mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+                                  右端は「この商品が原因だった場合の正しい金額」です。BuckyDrop側と一致する行が見つかれば、それが犯人です。
+                                </p>
+                                {/* ★2026-08-18実装: 目視で探さずに済むよう、BuckyDropの購入注文を貼り付けて
+                                    1点ずつ突き合わせる(2.37参照) */}
+                                <BdItemPasteCompare systemItems={sys.items} />
+                              </details>
+                            )}
+                          </>
+                        ) : (
+                          <p className="text-xs" style={{ color: "#8fd19e" }}>✓ 3項目とも一致しています</p>
+                        )}
+                        {Math.abs(o.exchange) > 0.0001 && (
+                          <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                            ※ 交換費用の凍結/解除が {fmtCnyCompact(o.exchange)} CNY 残っています(通常は相殺されて0になります)
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -4573,7 +5000,11 @@ function ProductsPage() {
       )}
 
       {products !== null && view === "batches" && (
-        <BatchList batches={batches} usageCountByBatch={usageCountByBatch} onEdit={setEditingBatch} onDelete={handleDeleteBatch} deletingBatchId={deletingBatchId} />
+        <div className="space-y-3">
+          {/* ★2026-08-18実装: BuckyDropの明細と突き合わせて差額を確認する(2.37参照) */}
+          <BuckyDropReconcileCard batches={batches} />
+          <BatchList batches={batches} usageCountByBatch={usageCountByBatch} onEdit={setEditingBatch} onDelete={handleDeleteBatch} deletingBatchId={deletingBatchId} />
+        </div>
       )}
 
       {modalProduct && (
