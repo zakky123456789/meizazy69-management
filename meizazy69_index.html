@@ -4322,7 +4322,15 @@ async function syncSaleItemProfits(productIds) {
   return { ok: true };
 }
 
-async function updateProductCore(form, original) {
+/* options.syncProfits:
+   ★2026-08-22追加。CNY金額が変わった場合に、その商品が売れている販売明細の利益
+   (sale_items.profit_jpy)も自動で同期するかどうか(既定: する)。
+   ロット一括紐付け・ロット編集時の再配分・ロット削除のように、多数の商品をループで処理して
+   最後にまとめて syncSaleItemProfits を呼ぶ側は false を渡すこと(1点ごとに呼ぶと
+   同じ更新を何度も往復することになり無駄に遅くなるため)。 */
+async function updateProductCore(form, original, options) {
+  const opts = options || {};
+  const syncProfits = opts.syncProfits !== false;
   const orig = original || {};
   const oldTotalCny = (Number(orig.purchase_amount_cny) || 0) + (Number(orig.shipping_cny) || 0) + (Number(orig.fee_cny) || 0)
     + (Number(orig.domestic_shipping_cny) || 0);
@@ -4376,6 +4384,23 @@ async function updateProductCore(form, original) {
     });
     if (!consumeRes.ok) {
       return { ok: true, warning: `商品情報は更新されましたが、ウォレット再消化処理でエラーが発生しました: ${consumeRes.message}\nチャージ台帳・商品情報をご確認ください。` };
+    }
+  }
+
+  /* ★2026-08-22実装: 原価(CNY)が変わったら、この商品が売れている販売明細に保存済みの利益
+     (sale_items.profit_jpy)も再計算して同期する(1.12・2.18参照)。
+     profit_jpyは販売登録時点のスナップショットで、原価修正に自動追随しない。販売一覧・月次損益は
+     都度再計算するため画面上は正しく見えるが、ダッシュボードとホストクラブ詳細の利益合計だけは
+     この保存値を合算するため、直さないと数字が食い違う。
+     2026-08-17時点ではロット関連の一括処理でのみ同期していたが、商品を個別に編集した場合
+     (ProductFormModal からの保存)も同じズレが起きるため、共通処理であるここへ移した。 */
+  if (costsChanged && syncProfits) {
+    const sync = await syncSaleItemProfits([form.id]);
+    if (!sync.ok) {
+      return {
+        ok: true,
+        warning: `商品情報は更新されましたが、販売明細の利益(profit_jpy)の再計算に失敗しました: ${sync.message}\nダッシュボード・ホストクラブ別の利益合計が古い値のままになっている可能性があります。`,
+      };
     }
   }
   return { ok: true };
@@ -4443,7 +4468,8 @@ async function reallocateBatchAmounts(batch) {
   for (const { product, shipping, fee } of plan) {
     // 金額が変わらない商品はウォレットを触らない(無駄な取り消し→再消化でレートが変わるのを避ける)
     if ((Number(product.shipping_cny) || 0) === shipping && (Number(product.fee_cny) || 0) === fee) continue;
-    const res = await updateProductCore({ ...product, shipping_cny: shipping, fee_cny: fee }, product);
+    // 利益(profit_jpy)の同期はループの後でまとめて行うため、ここでは個別同期を止める
+    const res = await updateProductCore({ ...product, shipping_cny: shipping, fee_cny: fee }, product, { syncProfits: false });
     const name = product.product_name || product.product_code || "(名称未設定)";
     if (!res.ok) {
       // ウォレットの払い戻し途中で失敗している可能性があるため、後続は処理せず中断する
@@ -4496,9 +4522,11 @@ async function deleteBatchWithUnlink(batch) {
   let failed = null;
 
   for (const product of list) {
+    // 利益(profit_jpy)の同期はループの後でまとめて行うため、ここでは個別同期を止める
     const res = await updateProductCore(
       { ...product, batch_id: null, shipping_cny: 0, fee_cny: 0 },
-      product
+      product,
+      { syncProfits: false }
     );
     const name = product.product_name || product.product_code || "(名称未設定)";
     if (!res.ok) { failed = `${name}: ${res.message}`; break; }
@@ -7296,7 +7324,8 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
       setRowStatus((prev) => ({ ...prev, [p.id]: "pending" }));
       const amounts = await computeBatchItemAmounts(batch, p.id);
       const form = { ...p, batch_id: batch.id, shipping_cny: amounts.shipping, fee_cny: amounts.fee };
-      const res = await updateProductCore(form, p);
+      // 利益(profit_jpy)の同期はループの後でまとめて行うため、ここでは個別同期を止める
+      const res = await updateProductCore(form, p, { syncProfits: false });
 
       if (!res.ok) {
         // ★updateProductCoreは「ウォレットの旧消化を払い戻してからUPDATE」の順で動くため、
@@ -8695,6 +8724,13 @@ const EXPENSE_TAX_CATEGORY_OPTIONS = ["課税10%", "課税8%(軽減)", "非課�
 const EXPENSE_PAYMENT_METHOD_OPTIONS = ["立替(悟)", "小口", "法人銀行口座", "法人クレジットカード", "立替(公洋)", "立替(裕之)"];
 const EXPENSE_REIMBURSEMENT_STATUS_OPTIONS = ["未精算", "精算済み"];
 
+/* ★2026-08-22追加: 支払方法のうち「立替」に当たるもの(2.39参照)。
+   外注費請求書の立替精算で「どの担当者の立替か」を判定するキーとして使う。
+   EXPENSE_PAYMENT_METHOD_OPTIONS から派生させているため、Supabase側のCHECK制約に
+   立替の種類を追加したときは、上の定数を直すだけでこちらも自動的に追従する。 */
+const EXPENSE_ADVANCE_PAYMENT_METHODS = EXPENSE_PAYMENT_METHOD_OPTIONS.filter((m) => m.startsWith("立替"));
+const isAdvancePaymentMethod = (pm) => EXPENSE_ADVANCE_PAYMENT_METHODS.includes(pm);
+
 function ExpenseReimbursementBadge({ status }) {
   if (!status) return null;
   const styles = {
@@ -8864,7 +8900,11 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
     payment_date: expense.payment_date || todayISO(),
     payee: expense.payee || "",
     payment_method: expense.payment_method || EXPENSE_PAYMENT_METHOD_OPTIONS[0],
-    reimbursement_status: expense.reimbursement_status || "",
+    /* ★2026-08-22変更: 支払方法が「立替(◯)」なら、精算状況の初期値を「未精算」にする。
+       従来は初期値が空("(立替なし)")だったため、立替を選んでもこちらを選び直さないと null のまま
+       保存され、請求書の立替精算から静かに漏れる状態だった(実際に9件中6件がそうなっていた。2.39参照)。 */
+    reimbursement_status: expense.reimbursement_status
+      || (isAdvancePaymentMethod(expense.payment_method || EXPENSE_PAYMENT_METHOD_OPTIONS[0]) ? "未精算" : ""),
     invoice_number: expense.invoice_number || "",
     item_name: expense.item_name || "",
     account_category: expense.account_category || EXPENSE_ACCOUNT_CATEGORY_OPTIONS[0],
@@ -8988,7 +9028,16 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
           <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払方法</label>
           <select
             value={form.payment_method}
-            onChange={(e) => setForm((f) => ({ ...f, payment_method: e.target.value }))}
+            onChange={(e) => {
+              const pm = e.target.value;
+              setForm((f) => {
+                /* 立替に切り替えたら精算状況を自動で「未精算」に、立替以外に戻したら空に戻す。
+                   ただし既に「精算済み」にしてある場合は触らない(手で付けた確定情報を消さないため) */
+                let rs = f.reimbursement_status;
+                if (rs !== "精算済み") rs = isAdvancePaymentMethod(pm) ? "未精算" : "";
+                return { ...f, payment_method: pm, reimbursement_status: rs };
+              });
+            }}
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           >
@@ -9256,6 +9305,29 @@ function isCommissionRateActive(rate, dateStr) {
 
 /* ---- 担当者・対象月(YYYY-MM)から適用すべき歩合率を1件返す(外注費請求書ページで使用予定) ----
    対象月の1日を基準日として判定し、複数該当する場合は適用開始日が最も新しいものを優先する。 */
+/* ★2026-08-22実装: 外注費請求書に含める「未精算の立替経費」を取得する(2.39参照)。
+   ・paymentMethod は staff.expense_payment_method(例: "立替(悟)")。未設定の担当者では呼ばない。
+   ・対象範囲は「対象月に支払った未精算分のみ」。payment_date が対象月の範囲にあるものだけを見る。
+   ・**精算済みの除外はクライアント側で行う**。`.neq("reimbursement_status","精算済み")` を使うと
+     SQLの比較規則により reimbursement_status が NULL の行まで一緒に除外され、
+     「立替なのに精算状況が未入力の経費」が静かに漏れる(実際に9件中6件が該当していた)。
+     支払方法が立替である時点で立替なので、NULL は未精算として扱う。
+   ・reimbursed_invoice_id が既に入っている行は、別の請求書で精算済み(または精算予定)なので除外する。 */
+async function fetchReimbursableExpenses(paymentMethod, targetMonth) {
+  const { data, error } = await supabase
+    .from("expenses")
+    .select("id,payment_date,payee,item_name,account_category,amount_incl_tax,reimbursement_status,reimbursed_invoice_id")
+    .eq("payment_method", paymentMethod)
+    .gte("payment_date", `${targetMonth}-01`)
+    .lt("payment_date", nextMonthFirstDay(targetMonth))
+    .is("reimbursed_invoice_id", null)
+    .order("payment_date", { ascending: true });
+  if (error) return { ok: false, message: "立替経費の取得に失敗しました" };
+  const rows = (data || []).filter((r) => r.reimbursement_status !== "精算済み");
+  const total = rows.reduce((sum, r) => sum + (Number(r.amount_incl_tax) || 0), 0);
+  return { ok: true, rows, total };
+}
+
 function getApplicableCommissionRate(staffId, targetMonth, rates) {
   const refDate = `${targetMonth}-01`;
   const candidates = (rates || []).filter(
@@ -9534,6 +9606,12 @@ function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete }) {
       {invoices.map((inv) => {
         const staffName = (inv.staff || {}).name || "(不明な担当者)";
         const paid = inv.status === "支払済み";
+        // ★2026-08-22: 金額は「歩合報酬 + 立替精算」の合計で表示し、内訳も併記する(2.39参照)。
+        //   支払いを外注費として経費計上する際、外注費に当たるのは歩合報酬の方だけなので、
+        //   内訳が見えないと立替分まで二重に経費計上してしまう。
+        const commission = Number(inv.amount_jpy) || 0;
+        const reimbursement = Number(inv.reimbursement_jpy) || 0;
+        const totalAmount = commission + reimbursement;
         return (
           <div
             key={inv.id}
@@ -9559,10 +9637,15 @@ function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete }) {
                 <span>適用歩合率: {inv.rate_percent}%</span>
                 <span>発行日: {inv.issue_date}</span>
               </div>
+              {reimbursement > 0 && (
+                <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+                  内訳: 歩合報酬 {fmtJPY(commission)} ＋ 立替精算 {fmtJPY(reimbursement)}
+                </p>
+              )}
             </div>
             <div className="flex items-center gap-3 shrink-0">
               <span className="font-display text-lg" style={{ color: "var(--mz-gold-soft)" }}>
-                {fmtJPY(inv.amount_jpy)}
+                {fmtJPY(totalAmount)}
               </span>
               <button
                 onClick={() => onUpdateStatus(inv.id, paid ? "未払い" : "支払済み")}
@@ -9613,7 +9696,8 @@ function ContractorInvoicesPage() {
   const [issuing, setIssuing] = useState(false);
 
   const loadStaff = useCallback(async () => {
-    const { data, error } = await supabase.from("staff").select("id,name,is_active").order("name");
+    // expense_payment_method: この担当者がどの「立替(◯)」に対応するか(★2026-08-22追加。2.39参照)
+    const { data, error } = await supabase.from("staff").select("id,name,is_active,expense_payment_method").order("name");
     if (!error) setStaffList(data || []);
   }, []);
 
@@ -9773,7 +9857,7 @@ function ContractorInvoicesPage() {
     setInvoiceError(null);
     const { data, error } = await supabase
       .from("contractor_invoices")
-      .select("id,invoice_number,staff_id,target_month,monthly_profit_id,rate_percent,amount_jpy,issue_date,status,staff(name)")
+      .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,issue_date,status,staff(name)")
       .order("target_month", { ascending: false })
       .order("created_at", { ascending: false });
     if (error) {
@@ -9914,10 +9998,13 @@ function ContractorInvoicesPage() {
   /* ---- 請求内容の計算(実際のinsertは行わず、プレビューをstateに保持するだけ) ----
      1) 同一担当者・同一対象月の請求書が既に発行済みでないか確認(重複発行防止)
      2) monthly_profitsから対象月の粗利益・繰越損失を取得(未集計ならエラー)
-     3) getApplicableCommissionRateで適用歩合率を取得(未設定ならエラー)
-     4) 報酬基準額 = 粗利益 + 繰越損失(★2026-08-06実装。前月までの赤字を引き継いで相殺する)。
-        基準額が0以下の月は報酬が発生しないため、発行不可としてエラー表示する。
-     5) 請求金額 = 報酬基準額 × 歩合率 ÷ 100(円未満四捨五入) */
+     3) getApplicableCommissionRateで適用歩合率を取得
+     4) 報酬基準額 = 粗利益 + 繰越損失(★2026-08-06実装。前月までの赤字を引き継いで相殺する)
+     5) 歩合報酬 = 報酬基準額 × 歩合率 ÷ 100(円未満四捨五入)。報酬基準額が0以下、または歩合率が
+        未設定の場合は歩合報酬0円として扱う(★2026-08-22変更。従来はどちらもエラーにして発行自体を止めていた)
+     6) 立替精算額 = 対象月に支払った、その担当者の未精算の立替経費の合計(★2026-08-22追加。2.39参照)
+     7) 歩合報酬・立替精算額がどちらも0円のときだけ発行不可とする。
+        **赤字の月でも立替があれば発行できる**のがこの変更の主目的(赤字自体は従来どおり翌月へ繰り越す) */
   const handlePreviewInvoice = async () => {
     if (!issueStaffId || !issueTargetMonth) return;
     setPreviewing(true);
@@ -9946,43 +10033,105 @@ function ContractorInvoicesPage() {
       if (!mp) { setInvoicePreview({ error: "この対象月の月次損益がまだ集計されていません。先に「月次損益」タブで集計してください。" }); return; }
 
       const rate = getApplicableCommissionRate(issueStaffId, issueTargetMonth, rates || []);
-      if (!rate) { setInvoicePreview({ error: "この担当者・対象月に適用できる歩合率が設定されていません。先に「歩合率設定」タブで登録してください。" }); return; }
-
       const carriedLoss = Number(mp.carried_loss_in_jpy) || 0;
       const commissionBase = (Number(mp.gross_profit_jpy) || 0) + carriedLoss;
-      if (commissionBase <= 0) {
+
+      // 歩合報酬。歩合率が未設定、または報酬基準額が0以下(赤字)の月は0円として続行する
+      const notes = [];
+      let amount = 0;
+      if (!rate) {
+        notes.push("この担当者・対象月に適用できる歩合率が設定されていないため、歩合報酬は¥0として計算しています(「歩合率設定」タブで登録できます)。");
+      } else if (commissionBase <= 0) {
+        notes.push(`報酬基準額が${fmtJPY(commissionBase)}(粗利益${fmtJPY(mp.gross_profit_jpy)} + 繰越損失${fmtJPY(carriedLoss)})のため、この月の歩合報酬は発生しません。この赤字は翌月以降に自動で繰り越されます。`);
+      } else {
+        amount = Math.round(commissionBase * (Number(rate.rate_percent) || 0) / 100);
+      }
+
+      // 立替精算額。担当者に立替区分(staff.expense_payment_method)が設定されている場合のみ集計する
+      const staffRow = (staffList || []).find((s) => s.id === issueStaffId) || {};
+      const advanceMethod = staffRow.expense_payment_method || null;
+      let reimbursementRows = [];
+      let reimbursementTotal = 0;
+      if (advanceMethod) {
+        const rres = await fetchReimbursableExpenses(advanceMethod, issueTargetMonth);
+        if (!rres.ok) { setInvoicePreview({ error: rres.message }); return; }
+        reimbursementRows = rres.rows;
+        reimbursementTotal = rres.total;
+
+        // 支払日が未来の経費(支払予定日を先に入力してあるもの)は、まだ立て替えていない可能性がある。
+        // 黙って除外も黙って加算もせず、明示して人に判断してもらう。
+        const today = todayISO();
+        const future = reimbursementRows.filter((r) => String(r.payment_date) > today);
+        if (future.length > 0) {
+          const futureTotal = future.reduce((s, r) => s + (Number(r.amount_incl_tax) || 0), 0);
+          notes.push(`⚠️ 支払日が未来の立替経費が${future.length}件(${fmtJPY(futureTotal)})含まれています(${future.map((r) => r.payment_date).join("、")})。まだ実際に立て替えていない場合は、支払後に発行してください。`);
+        }
+      } else {
+        notes.push("この担当者には立替区分(「立替(◯)」との対応)が設定されていないため、立替精算は含まれていません。「歩合率設定」タブの「立替区分の対応」で設定できます。");
+      }
+
+      const total = amount + reimbursementTotal;
+      if (total <= 0) {
         setInvoicePreview({
-          error: `前月までの繰越損失(${fmtJPY(carriedLoss)})を差し引くと報酬基準額が${fmtJPY(commissionBase)}のため、この月の報酬は発生しません。この赤字は翌月以降に自動で繰り越されます。`,
+          error: `歩合報酬・立替精算ともに¥0のため、この月に請求できる金額がありません。\n${notes.join("\n")}`,
         });
         return;
       }
 
-      const amount = Math.round(commissionBase * (Number(rate.rate_percent) || 0) / 100);
-      setInvoicePreview({ monthlyProfit: mp, rate, amount, commissionBase, carriedLoss });
+      setInvoicePreview({
+        monthlyProfit: mp, rate, amount, commissionBase, carriedLoss,
+        advanceMethod, reimbursementRows, reimbursementTotal, total, notes,
+      });
     } finally {
       setPreviewing(false);
     }
   };
 
-  /* ---- プレビュー内容でcontractor_invoicesにinsertし、実際に発行する ---- */
+  /* ---- プレビュー内容でcontractor_invoicesにinsertし、実際に発行する ----
+     ★2026-08-22変更: 立替精算を含む場合は、発行した請求書のidを対象の経費へ書き戻して
+     「この立替はこの請求書で精算する」という紐付けを作る(expenses.reimbursed_invoice_id)。
+     ・この時点では reimbursement_status は「未精算」のまま。実際に支払った(請求書を「支払済み」に
+       した)タイミングで「精算済み」に変える(2.39参照)。
+     ・紐付けの更新には `.is("reimbursed_invoice_id", null)` を付ける。プレビューを開いたまま
+       別の操作で同じ経費が他の請求書に紐付いた場合に、二重に奪ってしまわないため。
+     ・Supabaseはクライアント側でトランザクションを張れないため、請求書のinsertは成功したが
+       紐付けに失敗する場合がありうる。その場合は黙って進めず、何が起きたかを明示する。 */
   const handleIssueInvoice = async () => {
     if (!invoicePreview || invoicePreview.error) return;
     setIssuing(true);
     try {
       const issueDate = todayISO();
       const invoiceNumber = await generateInvoiceNumber(issueDate);
-      const { error } = await supabase.from("contractor_invoices").insert({
+      const { data: inserted, error } = await supabase.from("contractor_invoices").insert({
         invoice_number: invoiceNumber,
         staff_id: issueStaffId,
         target_month: `${issueTargetMonth}-01`,
         monthly_profit_id: invoicePreview.monthlyProfit.id,
         commission_base_jpy: invoicePreview.commissionBase,
-        rate_percent: invoicePreview.rate.rate_percent,
+        // 歩合率が未設定の月は0%として記録する(rate_percentはNOT NULLのため)
+        rate_percent: invoicePreview.rate ? invoicePreview.rate.rate_percent : 0,
         amount_jpy: invoicePreview.amount,
+        reimbursement_jpy: invoicePreview.reimbursementTotal || 0,
         issue_date: issueDate,
         status: "未払い",
-      });
-      if (error) { alert("請求書の発行に失敗しました"); return; }
+      }).select("id").single();
+      if (error || !inserted) { alert("請求書の発行に失敗しました"); return; }
+
+      const targetIds = (invoicePreview.reimbursementRows || []).map((r) => r.id);
+      if (targetIds.length > 0) {
+        const { data: linked, error: linkErr } = await supabase
+          .from("expenses")
+          .update({ reimbursed_invoice_id: inserted.id })
+          .in("id", targetIds)
+          .is("reimbursed_invoice_id", null)
+          .select("id");
+        if (linkErr) {
+          alert(`請求書(${invoiceNumber})は発行されましたが、立替経費との紐付けに失敗しました。\nこの請求書を削除してから、もう一度発行し直してください。`);
+        } else if ((linked || []).length !== targetIds.length) {
+          alert(`請求書(${invoiceNumber})は発行されましたが、立替経費${targetIds.length}件のうち${(linked || []).length}件しか紐付けられませんでした。\n他の請求書で先に精算された可能性があります。この請求書を削除してから計算し直してください。`);
+        }
+      }
+
       setInvoicePreview(null);
       setIssueStaffId("");
       await loadInvoices();
@@ -9991,17 +10140,65 @@ function ContractorInvoicesPage() {
     }
   };
 
+  /* ★2026-08-22変更: 支払済み/未払いの切り替えに合わせて、その請求書で精算する立替経費の
+     reimbursement_status も追従させる(2.39参照)。実際にお金を払った時点で「精算済み」になる。 */
   const handleUpdateInvoiceStatus = async (id, status) => {
     const { error } = await supabase.from("contractor_invoices").update({ status }).eq("id", id);
     if (error) { alert("ステータスの更新に失敗しました"); return; }
+
+    const nextExpenseStatus = status === "支払済み" ? "精算済み" : "未精算";
+    const { error: expErr } = await supabase
+      .from("expenses")
+      .update({ reimbursement_status: nextExpenseStatus })
+      .eq("reimbursed_invoice_id", id);
+    if (expErr) {
+      alert(`請求書のステータスは「${status}」に変更しましたが、紐づく立替経費の精算状況を「${nextExpenseStatus}」へ更新できませんでした。\n経費ページで手動で変更してください。`);
+    }
     loadInvoices();
   };
 
+  /* ★2026-08-22変更: 削除の前に、紐づく立替経費を必ず「未精算」に戻して紐付けを外す。
+     先に請求書を消すとFKが ON DELETE SET NULL で紐付けだけ消え、「精算済み」の状態が
+     取り残されて、その立替が二度と請求書に載らなくなる(静かに払い漏れる)。 */
   const handleDeleteInvoice = async (id) => {
-    if (!window.confirm("この請求書を削除しますか?")) return;
+    const inv = (invoices || []).find((x) => x.id === id) || {};
+    const reimb = Number(inv.reimbursement_jpy) || 0;
+    const confirmMsg = reimb > 0
+      ? `この請求書を削除しますか?\n\n含まれている立替精算 ${fmtJPY(reimb)} は「未精算」に戻り、次回以降の請求書で改めて精算できるようになります。`
+      : "この請求書を削除しますか?";
+    if (!window.confirm(confirmMsg)) return;
+
+    const { error: revertErr } = await supabase
+      .from("expenses")
+      .update({ reimbursement_status: "未精算", reimbursed_invoice_id: null })
+      .eq("reimbursed_invoice_id", id);
+    if (revertErr) {
+      alert("紐づく立替経費を未精算へ戻せなかったため、請求書の削除を中止しました。\nもう一度お試しください。");
+      return;
+    }
+
     const { error } = await supabase.from("contractor_invoices").delete().eq("id", id);
     if (error) { alert("削除に失敗しました"); return; }
     loadInvoices();
+  };
+
+  /* ★2026-08-22実装: 担当者と「立替(◯)」の対応づけ(staff.expense_payment_method)を保存する。
+     同じ立替区分を2人が持つと同じ経費が二重に請求されるため、DB側にも部分UNIQUEインデックスを
+     張ってある。違反時(23505)は分かりやすい文言に置き換えて伝える。 */
+  const handleSaveStaffAdvanceMethod = async (staffId, method) => {
+    const { error } = await supabase
+      .from("staff")
+      .update({ expense_payment_method: method || null })
+      .eq("id", staffId);
+    if (error) {
+      if (error.code === "23505") {
+        alert(`「${method}」は既に別の担当者に設定されています。\n同じ立替区分を2人に設定すると、同じ経費が二重に請求されてしまうため、先にもう一方の設定を外してください。`);
+      } else {
+        alert("立替区分の保存に失敗しました");
+      }
+      return;
+    }
+    await loadStaff();
   };
 
   const handleDeleteMonthlyProfit = async (id) => {
@@ -10036,6 +10233,40 @@ function ContractorInvoicesPage() {
 
       {tab === "rates" && (
         <>
+          {/* ★2026-08-22実装: 担当者と経費の「立替(◯)」の対応づけ(2.39参照)。
+              経費側には誰が立て替えたかが payment_method として入っているが、それがどの staff 行かは
+              システムには分からないため、ここで対応づける。未設定の担当者は立替精算が請求書に入らない。 */}
+          <div
+            className="rounded-xl p-4 space-y-3"
+            style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+          >
+            <div>
+              <p className="font-display text-base">立替区分の対応</p>
+              <p className="text-xs mt-1" style={{ color: "var(--mz-ink-muted)" }}>
+                経費の支払方法「立替(◯)」と担当者を紐付けます。設定すると、その担当者の請求書に未精算の立替経費が自動で加算されます。
+              </p>
+            </div>
+            <div className="space-y-2">
+              {staffList.map((s) => (
+                <div key={s.id} className="flex flex-wrap items-center gap-3">
+                  <span className="text-sm min-w-24">{s.name}</span>
+                  <select
+                    value={s.expense_payment_method || ""}
+                    onChange={(e) => handleSaveStaffAdvanceMethod(s.id, e.target.value)}
+                    className="rounded-lg px-3 py-2 text-sm bg-transparent"
+                    style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                  >
+                    <option value="">(立替なし)</option>
+                    {EXPENSE_ADVANCE_PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+              ))}
+              {staffList.length === 0 && (
+                <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>担当者が登録されていません</p>
+              )}
+            </div>
+          </div>
+
           <div className="flex justify-end">
             <button
               onClick={() => setModalRate({})}
@@ -10168,10 +10399,30 @@ function ContractorInvoicesPage() {
                     <p>前月までの繰越損失: {fmtJPY(invoicePreview.carriedLoss)}</p>
                   )}
                   <p>報酬基準額: {fmtJPY(invoicePreview.commissionBase)}</p>
-                  <p>適用歩合率: {invoicePreview.rate.rate_percent}%</p>
-                  <p className="text-sm font-display" style={{ color: "var(--mz-ink)" }}>
-                    請求金額: {fmtJPY(invoicePreview.amount)}
+                  <p>適用歩合率: {invoicePreview.rate ? `${invoicePreview.rate.rate_percent}%` : "(未設定)"}</p>
+                  <p>歩合報酬: {fmtJPY(invoicePreview.amount)}</p>
+
+                  {/* ★2026-08-22: 立替精算の内訳。金額だけ出すと「何が入っているか」が分からず、
+                      入れ忘れ・入れ過ぎに気づけないため、対象の経費を必ず明細で出す(2.39参照) */}
+                  <p>立替精算: {fmtJPY(invoicePreview.reimbursementTotal || 0)}
+                    {invoicePreview.advanceMethod ? `(${invoicePreview.advanceMethod})` : ""}</p>
+                  {(invoicePreview.reimbursementRows || []).length > 0 && (
+                    <ul className="pl-3 space-y-0.5" style={{ listStyleType: "disc" }}>
+                      {invoicePreview.reimbursementRows.map((r) => (
+                        <li key={r.id}>
+                          {r.payment_date} {r.payee || "(支払先未入力)"}
+                          {r.item_name ? ` / ${r.item_name}` : ""} … {fmtJPY(r.amount_incl_tax)}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  <p className="text-sm font-display pt-1" style={{ color: "var(--mz-ink)" }}>
+                    請求金額(合計): {fmtJPY(invoicePreview.total)}
                   </p>
+                  {(invoicePreview.notes || []).map((n, i) => (
+                    <p key={i} style={{ color: "#e3c489" }}>{n}</p>
+                  ))}
                 </div>
                 <button
                   onClick={handleIssueInvoice}
