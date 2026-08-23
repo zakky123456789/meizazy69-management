@@ -5069,7 +5069,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-22c";
+const BUILD_VERSION = "2026-08-22d";
 
 const ISSUER_INFO_DEFAULT = "〒012-0055\n秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
@@ -10017,6 +10017,7 @@ function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete, onViewInvoi
    住所入力は既存のAddressFieldsBlock(郵便番号検索込み)をそのまま再利用する(2.34参照)。 */
 function StaffProfileFormModal({ staff, onClose, onSave }) {
   const [form, setForm] = useState({
+    name: staff.name || "",
     expense_payment_method: staff.expense_payment_method || "",
     postal_code: staff.postal_code || "",
     prefecture: staff.prefecture || "",
@@ -10042,6 +10043,14 @@ function StaffProfileFormModal({ staff, onClose, onSave }) {
         <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
           住所・連絡先・振込先は請求書PDFに印字されます。未入力の項目は印字されません。
         </p>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>担当者名</label>
+          <input value={form.name} onChange={(e) => set("name")(e.target.value)} className={inputCls} style={inputStyle} />
+          <p className="text-[11px] mt-1" style={{ color: "var(--mz-ink-muted)" }}>
+            請求書の請求者名として印字されます。経費側の「立替(◯)」の表記は変わりません(下の立替区分で紐付けているため)。
+          </p>
+        </div>
 
         <div>
           <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>立替区分(経費の支払方法との対応)</label>
@@ -10636,6 +10645,7 @@ function ContractorInvoicesPage() {
      patchの列は STAFF_PROFILE_SELECT と対応させること(片方だけ増やすと保存されない/消える。5章38番参照)。 */
   const handleSaveStaffProfile = async (staffId, form) => {
     const patch = {
+      name: (form.name || "").trim(),
       expense_payment_method: form.expense_payment_method || null,
       postal_code: form.postal_code || null,
       prefecture: form.prefecture || null,
@@ -10649,6 +10659,7 @@ function ContractorInvoicesPage() {
       bank_account_number: form.bank_account_number || null,
       bank_account_holder: form.bank_account_holder || null,
     };
+    if (!patch.name) { alert("担当者名は必須です"); return; }
     const { error } = await supabase.from("staff").update(patch).eq("id", staffId);
     if (error) {
       if (error.code === "23505") {
@@ -11157,11 +11168,35 @@ function App() {
   // (これにより2回目以降のアクセスでは合言葉・名前選択が自動スキップされる)
   useEffect(() => {
     if (session) {
+      let stored = null;
       try {
         const raw = localStorage.getItem(STAFF_STORAGE_KEY);
-        setStaff(raw ? JSON.parse(raw) : null);
+        stored = raw ? JSON.parse(raw) : null;
       } catch {
-        setStaff(null);
+        stored = null;
+      }
+      setStaff(stored);
+
+      /* ★2026-08-22追加: localStorageに入っているのは選択時点の担当者情報のスナップショットのため、
+         あとから担当者名を変更すると、右上の表示だけが古い名前のまま残る(2.40参照)。
+         セッション確定時にidでDBから読み直し、名前が変わっていれば保存内容ごと更新する。
+         ・行が消えている場合は選択を解除して担当者選択画面へ戻す(退職・誤削除の考慮)。
+         ・通信エラー時は何もしない(オフラインで使えなくならないよう、保存済みの内容をそのまま使う)。 */
+      if (stored && stored.id) {
+        (async () => {
+          const { data, error } = await supabase.from("staff").select("id,name,is_active").eq("id", stored.id).maybeSingle();
+          if (error) return;
+          if (!data) {
+            localStorage.removeItem(STAFF_STORAGE_KEY);
+            setStaff(null);
+            return;
+          }
+          if (data.name !== stored.name) {
+            const refreshed = { ...stored, ...data };
+            localStorage.setItem(STAFF_STORAGE_KEY, JSON.stringify(refreshed));
+            setStaff(refreshed);
+          }
+        })();
       }
     } else if (session === null) {
       setStaff(null);
