@@ -5069,7 +5069,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-22e";
+const BUILD_VERSION = "2026-08-22f";
 
 const ISSUER_INFO_DEFAULT = "〒012-0055\n秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
@@ -10369,8 +10369,14 @@ function ContractorInvoicesPage() {
       .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,tax_rate_percent,commission_tax_jpy,issue_date,status,staff(name)")
       .order("target_month", { ascending: false })
       .order("created_at", { ascending: false });
+    /* ★2026-08-22: 列不足(42703)は「マイグレーション未実行」が原因と断定できるため、
+       汎用の失敗メッセージではなく、実行すべきSQLの内容まで名指しで出す(5章42番参照)。 */
     if (error) {
-      setInvoiceError("請求書データの取得に失敗しました");
+      setInvoiceError(
+        error.code === "42703"
+          ? "請求書データの取得に失敗しました。contractor_invoicesに必要な列がありません。設計書2.42のマイグレーションSQL(tax_rate_percent / commission_tax_jpy の追加)を実行してください。"
+          : `請求書データの取得に失敗しました(${error.message || error.code || "原因不明"})`
+      );
       setInvoices([]);
     } else {
       setInvoices(data || []);
