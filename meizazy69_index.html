@@ -5069,7 +5069,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-22g";
+const BUILD_VERSION = "2026-08-22h";
 
 const ISSUER_INFO_DEFAULT = "〒012-0055\n秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
@@ -9906,7 +9906,11 @@ function ContractorInvoicePreviewModal({ invoice, onClose }) {
     setSharingPdf(true);
     try {
       const canvas = await html2canvas(captureRef.current, { scale: 2, backgroundColor: "#ffffff" });
-      const imgData = canvas.toDataURL("image/png");
+      /* ★2026-08-22: PNGではなくJPEGで埋め込む(2.43参照)。
+         PNGだと1枚の請求書でもPDFが8MB前後になり、LINE・メール等での送信時に容量制限に
+         引っかかりやすい。請求書は白背景に文字だけで透過も不要なため、品質0.92のJPEGで
+         見た目を保ったまま1MB未満に収まる。 */
+      const imgData = canvas.toDataURL("image/jpeg", 0.92);
       const { jsPDF } = window.jspdf;
       const pdf = new jsPDF({ unit: "mm", format: "a4" });
       const pageWidth = pdf.internal.pageSize.getWidth();
@@ -9920,21 +9924,21 @@ function ContractorInvoicePreviewModal({ invoice, onClose }) {
       let imgH = (canvas.height * imgW) / canvas.width;
 
       if (imgH <= availH) {
-        pdf.addImage(imgData, "PNG", margin, margin, imgW, imgH);
+        pdf.addImage(imgData, "JPEG", margin, margin, imgW, imgH);
       } else if (availH / imgH >= 0.7) {
         // 少しはみ出しただけなら、読める範囲で縮小して1枚に収める(左右中央寄せ)
         const shrink = availH / imgH;
         imgW = imgW * shrink;
         imgH = availH;
-        pdf.addImage(imgData, "PNG", margin + (availW - imgW) / 2, margin, imgW, imgH);
+        pdf.addImage(imgData, "JPEG", margin + (availW - imgW) / 2, margin, imgW, imgH);
       } else {
         // 立替明細が非常に多い場合のみ複数ページへ分割する
         let heightLeft = imgH;
-        pdf.addImage(imgData, "PNG", margin, margin, imgW, imgH);
+        pdf.addImage(imgData, "JPEG", margin, margin, imgW, imgH);
         heightLeft -= availH;
         while (heightLeft > 0) {
           pdf.addPage();
-          pdf.addImage(imgData, "PNG", margin, margin - (imgH - heightLeft), imgW, imgH);
+          pdf.addImage(imgData, "JPEG", margin, margin - (imgH - heightLeft), imgW, imgH);
           heightLeft -= availH;
         }
       }
