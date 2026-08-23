@@ -415,7 +415,8 @@ function SidebarContent({ activeKey, onNavigate }) {
       </nav>
 
       <div className="px-5 py-4 text-[11px]" style={{ color: "var(--mz-ink-muted)", borderTop: "1px solid var(--mz-border)" }}>
-        無在庫販売管理 v0.1(骨組み)
+        無在庫販売管理 v0.1(骨組み)<br />
+        build {BUILD_VERSION}
       </div>
     </div>
   );
@@ -5065,6 +5066,11 @@ function ProductsPage() {
      ・ダッシュボードの売上・利益連携
    ============================================================ */
 
+/* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
+   GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
+   画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
+const BUILD_VERSION = "2026-08-22c";
+
 const ISSUER_INFO_DEFAULT = "〒012-0055\n秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
 /* ---- 領収書の金額計算(★2026-08-05変更: 消費税免税事業者のため、税抜・消費税額への分割をやめ、税込合計金額のみを扱う。
@@ -9597,7 +9603,338 @@ function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, rec
 }
 
 /* ---- 請求書 一覧表示(対象月降順・同月内は発行順)。ステータス切替・削除ボタンを持つ ---- */
-function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete }) {
+/* ============================================================
+   外注費請求書のPDF出力(★2026-08-22実装。2.40参照)
+   領収書(2.7)と同じ2段構え:
+     ① html2canvas+jsPDFでPDFを直接生成し navigator.share() で共有シートへ渡す
+     ② 非対応環境では請求書だけの独立した静的HTMLを別タブで開いて印刷する
+   window.print() に依存する方向の実装は増やさないこと(iOS Safariの制限。5章31番参照)。
+   ============================================================ */
+
+const CONTRACTOR_INVOICE_BILL_TO = "IMPORT PRIME合同会社";
+
+/* 全ての請求書列を漏れなく含んだ、担当者情報の取得用SELECT。
+   請求書PDFに刷る項目を増やしたら、必ずこの定数と保存時のpatchの両方に追加すること
+   (片方だけだと値が保存されない/消える。商品編集のPRODUCT_EDIT_SELECTと同じ考え方。5章38番参照) */
+const STAFF_PROFILE_SELECT = "id,name,is_active,expense_payment_method,postal_code,prefecture,city,address_line,building,phone,bank_name,bank_branch,bank_account_type,bank_account_number,bank_account_holder";
+
+const STAFF_BANK_ACCOUNT_TYPE_OPTIONS = ["普通", "当座"];
+
+function staffAddressLines(staff) {
+  const s = staff || {};
+  const lines = [];
+  if (s.postal_code) lines.push(`〒${s.postal_code}`);
+  const addr = [s.prefecture, s.city, s.address_line].filter(Boolean).join("");
+  if (addr) lines.push(addr);
+  if (s.building) lines.push(s.building);
+  if (s.phone) lines.push(`TEL: ${s.phone}`);
+  return lines;
+}
+
+function staffBankLine(staff) {
+  const s = staff || {};
+  if (!s.bank_name && !s.bank_account_number) return null;
+  const head = [s.bank_name, s.bank_branch, s.bank_account_type, s.bank_account_number].filter(Boolean).join(" ");
+  return s.bank_account_holder ? `${head}(${s.bank_account_holder})` : head;
+}
+
+function contractorInvoiceTotal(invoice) {
+  return (Number(invoice.amount_jpy) || 0) + (Number(invoice.reimbursement_jpy) || 0);
+}
+
+/* 電子帳簿保存法の検索要件(取引年月日・取引金額・取引先)に合わせ、領収書(3.7)と同じ並びにする。
+   例: "20260822_悟_3385円_請求書_INV-2026-0001" */
+function buildContractorInvoiceFileName(invoice, staffName) {
+  const date = (invoice.issue_date || "").replace(/-/g, "");
+  const safeName = String(staffName || "担当者未設定").trim().replace(/[\\/:*?"<>|]/g, "");
+  return `${date}_${safeName}_${contractorInvoiceTotal(invoice)}円_請求書_${invoice.invoice_number}`;
+}
+
+/* 請求書の明細行を組み立てる(画面プレビュー・印刷用HTMLの両方から使う共通ロジック)。
+   歩合報酬は0円でも必ず1行出す(「立替だけの請求書である」ことが読み手に伝わるようにするため)。 */
+function contractorInvoiceRows(invoice, expenses) {
+  const rows = [];
+  const commission = Number(invoice.amount_jpy) || 0;
+  const base = invoice.commission_base_jpy != null ? Number(invoice.commission_base_jpy) : null;
+  const rateLabel = Number(invoice.rate_percent) > 0
+    ? `報酬基準額 ${base != null ? fmtJPY(base) : "-"} × ${invoice.rate_percent}%`
+    : "対象月の報酬基準額が0以下、または歩合率が未設定のため0円";
+  rows.push({ key: "commission", label: `歩合報酬(${formatMonthLabel(invoice.target_month)}分)`, note: rateLabel, amount: commission });
+  (expenses || []).forEach((e) => {
+    rows.push({
+      key: `exp-${e.id}`,
+      label: `立替経費精算 ${e.payment_date}`,
+      note: [e.payee, e.item_name].filter(Boolean).join(" / ") || "(内容未入力)",
+      amount: Number(e.amount_incl_tax) || 0,
+    });
+  });
+  return rows;
+}
+
+function ContractorInvoiceDocument({ invoice, staff, expenses }) {
+  const rows = contractorInvoiceRows(invoice, expenses);
+  const addressLines = staffAddressLines(staff);
+  const bankLine = staffBankLine(staff);
+  return (
+    <div className="rounded-xl p-6" style={{ background: "#ffffff", color: "#1a1710" }}>
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h3 className="font-display" style={{ fontSize: "22px" }}>請求書</h3>
+          <p className="text-base mt-5" style={{ borderBottom: "1px solid #1a1710", display: "inline-block", paddingBottom: "2px" }}>
+            {CONTRACTOR_INVOICE_BILL_TO} 御中
+          </p>
+          <div className="mt-4">
+            <p className="font-display" style={{ fontSize: "24px" }}>{fmtJPY(contractorInvoiceTotal(invoice))} -</p>
+            <p className="text-xs mt-1">下記の通りご請求申し上げます。</p>
+          </div>
+        </div>
+        <div className="text-right text-xs" style={{ maxWidth: "240px" }}>
+          <p>No. {invoice.invoice_number}</p>
+          <p>発行日: {invoice.issue_date}</p>
+          <p>対象月: {formatMonthLabel(invoice.target_month)}</p>
+          <div className="mt-3 pt-2 text-left" style={{ borderTop: "1px solid #ccc" }}>
+            <p className="mb-1" style={{ color: "#888" }}>請求者</p>
+            <p style={{ color: "#333" }}>{(staff || {}).name || "(担当者未設定)"}</p>
+            {addressLines.map((l, i) => (
+              <p key={i} style={{ color: "#555" }}>{l}</p>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <table className="w-full text-xs mb-4" style={{ borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid #ccc" }}>
+            <th className="text-left py-1">内容</th>
+            <th className="text-right py-1">金額</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.key} style={{ borderBottom: "1px solid #eee" }}>
+              <td className="py-1">
+                <span>{r.label}</span>
+                {r.note && <span style={{ color: "#888" }}> … {r.note}</span>}
+              </td>
+              <td className="text-right py-1 align-top whitespace-nowrap">{fmtJPY(r.amount)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <div className="text-xs space-y-1 mb-4" style={{ borderTop: "1px solid #ccc", paddingTop: "8px" }}>
+        <div className="flex justify-between"><span>歩合報酬</span><span>{fmtJPY(invoice.amount_jpy)}</span></div>
+        <div className="flex justify-between"><span>立替経費精算({(expenses || []).length}件)</span><span>{fmtJPY(invoice.reimbursement_jpy)}</span></div>
+        <div className="flex justify-between font-medium" style={{ borderTop: "1px solid #ccc", paddingTop: "4px" }}>
+          <span>合計金額</span><span>{fmtJPY(contractorInvoiceTotal(invoice))}</span>
+        </div>
+      </div>
+
+      {bankLine && (
+        <div className="text-xs" style={{ borderTop: "1px solid #ccc", paddingTop: "8px" }}>
+          <p style={{ color: "#888" }}>お振込先</p>
+          <p style={{ color: "#333" }}>{bankLine}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* 印刷用の完全に独立した静的HTML(アプリ本体を一切含まない)。buildReceiptPrintHtmlと同じ方針。 */
+function buildContractorInvoicePrintHtml(invoice, staff, expenses) {
+  const rows = contractorInvoiceRows(invoice, expenses).map((r) => `
+    <tr style="border-bottom:1px solid #eee;">
+      <td style="padding:4px 0;">${escapeHtml(r.label)}${r.note ? `<span style="color:#888;"> … ${escapeHtml(r.note)}</span>` : ""}</td>
+      <td style="padding:4px 0; text-align:right; white-space:nowrap;">${escapeHtml(fmtJPY(r.amount))}</td>
+    </tr>`).join("");
+
+  const addressHtml = staffAddressLines(staff).map((l) => `<p style="margin:0; color:#555;">${escapeHtml(l)}</p>`).join("");
+  const bankLine = staffBankLine(staff);
+  const bankHtml = bankLine ? `
+    <div style="border-top:1px solid #ccc; padding-top:8px; font-size:12px;">
+      <p style="margin:0; color:#888;">お振込先</p>
+      <p style="margin:2px 0 0; color:#333;">${escapeHtml(bankLine)}</p>
+    </div>` : "";
+
+  return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(buildContractorInvoiceFileName(invoice, (staff || {}).name))}</title>
+<style>
+  @page { size: A4; margin: 12mm; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
+         color:#1a1710; background:#fff; margin:0; padding:16px; }
+  .head { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:24px; }
+  .to { font-size:16px; border-bottom:1px solid #1a1710; display:inline-block; padding-bottom:2px; margin-top:20px; }
+  .total { font-size:24px; margin:16px 0 4px; }
+  table { width:100%; font-size:12px; border-collapse:collapse; margin-bottom:16px; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div>
+      <h1 style="font-size:22px; margin:0;">請求書</h1>
+      <p class="to">${escapeHtml(CONTRACTOR_INVOICE_BILL_TO)} 御中</p>
+      <p class="total">${escapeHtml(fmtJPY(contractorInvoiceTotal(invoice)))} -</p>
+      <p style="font-size:12px; margin:0;">下記の通りご請求申し上げます。</p>
+    </div>
+    <div style="text-align:right; font-size:12px; max-width:240px;">
+      <p style="margin:0;">No. ${escapeHtml(invoice.invoice_number)}</p>
+      <p style="margin:0;">発行日: ${escapeHtml(invoice.issue_date)}</p>
+      <p style="margin:0;">対象月: ${escapeHtml(formatMonthLabel(invoice.target_month))}</p>
+      <div style="border-top:1px solid #ccc; margin-top:12px; padding-top:8px; text-align:left;">
+        <p style="margin:0; color:#888;">請求者</p>
+        <p style="margin:0; color:#333;">${escapeHtml((staff || {}).name || "(担当者未設定)")}</p>
+        ${addressHtml}
+      </div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr style="border-bottom:1px solid #ccc;">
+        <th style="text-align:left; padding:4px 0;">内容</th>
+        <th style="text-align:right; padding:4px 0;">金額</th>
+      </tr>
+    </thead>
+    <tbody>${rows}</tbody>
+  </table>
+
+  <div style="border-top:1px solid #ccc; padding-top:8px; font-size:12px; margin-bottom:16px;">
+    <div style="display:flex; justify-content:space-between;"><span>歩合報酬</span><span>${escapeHtml(fmtJPY(invoice.amount_jpy))}</span></div>
+    <div style="display:flex; justify-content:space-between;"><span>立替経費精算(${(expenses || []).length}件)</span><span>${escapeHtml(fmtJPY(invoice.reimbursement_jpy))}</span></div>
+    <div style="display:flex; justify-content:space-between; border-top:1px solid #ccc; margin-top:4px; padding-top:4px; font-weight:600;">
+      <span>合計金額</span><span>${escapeHtml(fmtJPY(contractorInvoiceTotal(invoice)))}</span>
+    </div>
+  </div>
+
+  ${bankHtml}
+</body>
+</html>`;
+}
+
+function ContractorInvoicePreviewModal({ invoice, onClose }) {
+  const [staff, setStaff] = useState(null);
+  const [expenses, setExpenses] = useState(null);
+  const [error, setError] = useState(null);
+  const [shareError, setShareError] = useState(null);
+  const [sharingPdf, setSharingPdf] = useState(false);
+  const captureRef = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      const [staffRes, expRes] = await Promise.all([
+        supabase.from("staff").select(STAFF_PROFILE_SELECT).eq("id", invoice.staff_id).maybeSingle(),
+        supabase.from("expenses")
+          .select("id,payment_date,payee,item_name,amount_incl_tax")
+          .eq("reimbursed_invoice_id", invoice.id)
+          .order("payment_date", { ascending: true }),
+      ]);
+      if (staffRes.error || expRes.error) { setError("請求書の内容を取得できませんでした"); return; }
+      setStaff(staffRes.data || {});
+      setExpenses(expRes.data || []);
+    })();
+  }, [invoice.id, invoice.staff_id]);
+
+  const loading = staff === null || expenses === null;
+  const missingIssuerInfo = !loading && staffAddressLines(staff).length === 0 && !staffBankLine(staff);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <div className="w-full max-w-lg rounded-2xl p-5 my-8 space-y-4" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+        <div className="flex items-center justify-between">
+          <p className="font-display text-lg">請求書</p>
+          <button onClick={onClose} className="text-sm px-3 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>閉じる</button>
+        </div>
+
+        {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
+        {loading && !error && <p className="text-sm text-center py-8" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>}
+
+        {!loading && !error && (
+          <>
+            {missingIssuerInfo && (
+              <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#3a2f1f", color: "#e3c489" }}>
+                この担当者の住所・振込先が未登録のため、請求書に印字されません。「歩合率設定」タブの「担当者情報」から登録できます。
+              </p>
+            )}
+
+            <div ref={captureRef}>
+              <ContractorInvoiceDocument invoice={invoice} staff={staff} expenses={expenses} />
+            </div>
+
+            {shareError && (
+              <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{shareError}</p>
+            )}
+
+            <button
+              onClick={async () => {
+                if (!captureRef.current || sharingPdf) return;
+                setShareError(null);
+                setSharingPdf(true);
+                try {
+                  const canvas = await html2canvas(captureRef.current, { scale: 2, backgroundColor: "#ffffff" });
+                  const imgData = canvas.toDataURL("image/png");
+                  const { jsPDF } = window.jspdf;
+                  const pdf = new jsPDF({ unit: "mm", format: "a4" });
+                  const pageWidth = pdf.internal.pageSize.getWidth();
+                  const pageHeight = pdf.internal.pageSize.getHeight();
+                  const imgWidth = pageWidth;
+                  const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+                  // 立替の明細が多いとA4 1枚に収まらないため、領収書と同じ方式で複数ページに分割する
+                  let heightLeft = imgHeight;
+                  let position = 0;
+                  pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+                  heightLeft -= pageHeight;
+                  while (heightLeft > 0) {
+                    position = heightLeft - imgHeight;
+                    pdf.addPage();
+                    pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+                    heightLeft -= pageHeight;
+                  }
+
+                  const fileName = `${buildContractorInvoiceFileName(invoice, staff.name)}.pdf`;
+                  const blob = pdf.output("blob");
+                  const file = new File([blob], fileName, { type: "application/pdf" });
+
+                  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    await navigator.share({ files: [file], title: fileName });
+                  } else {
+                    const printWindow = window.open("", "_blank");
+                    if (!printWindow) {
+                      alert("ポップアップがブロックされました。ブラウザの設定でこのサイトのポップアップを許可してから、もう一度お試しください。");
+                      return;
+                    }
+                    const html = buildContractorInvoicePrintHtml(invoice, staff, expenses);
+                    printWindow.document.open();
+                    printWindow.document.write(html);
+                    printWindow.document.close();
+                    printWindow.onload = () => { printWindow.focus(); printWindow.print(); };
+                  }
+                } catch (e) {
+                  if (e && e.name !== "AbortError") {
+                    setShareError("PDFの生成/共有に失敗しました。時間をおいて再度お試しください。");
+                  }
+                } finally {
+                  setSharingPdf(false);
+                }
+              }}
+              disabled={sharingPdf}
+              className="w-full rounded-lg py-2.5 text-sm font-medium disabled:opacity-60"
+              style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+            >
+              {sharingPdf ? "PDFを生成中..." : "PDFを共有/保存"}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete, onViewInvoice }) {
   if (invoices.length === 0) {
     return <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>請求書がまだ発行されていません</p>;
   }
@@ -9648,6 +9985,13 @@ function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete }) {
                 {fmtJPY(totalAmount)}
               </span>
               <button
+                onClick={() => onViewInvoice(inv)}
+                className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+                style={{ border: "1px solid var(--mz-gold)", color: "var(--mz-gold-soft)" }}
+              >
+                請求書
+              </button>
+              <button
                 onClick={() => onUpdateStatus(inv.id, paid ? "未払い" : "支払済み")}
                 className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap"
                 style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
@@ -9665,6 +10009,94 @@ function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/* ★2026-08-22実装: 担当者の請求書用プロフィール(立替区分・住所・連絡先・振込先)の編集(2.40参照)。
+   住所入力は既存のAddressFieldsBlock(郵便番号検索込み)をそのまま再利用する(2.34参照)。 */
+function StaffProfileFormModal({ staff, onClose, onSave }) {
+  const [form, setForm] = useState({
+    expense_payment_method: staff.expense_payment_method || "",
+    postal_code: staff.postal_code || "",
+    prefecture: staff.prefecture || "",
+    city: staff.city || "",
+    address_line: staff.address_line || "",
+    building: staff.building || "",
+    phone: staff.phone || "",
+    bank_name: staff.bank_name || "",
+    bank_branch: staff.bank_branch || "",
+    bank_account_type: staff.bank_account_type || "",
+    bank_account_number: staff.bank_account_number || "",
+    bank_account_holder: staff.bank_account_holder || "",
+  });
+  const [saving, setSaving] = useState(false);
+  const set = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
+  const inputStyle = { border: "1px solid var(--mz-border)", color: "var(--mz-ink)" };
+  const inputCls = "w-full rounded-lg px-3 py-2.5 text-sm bg-transparent";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <div className="w-full max-w-lg rounded-2xl p-5 my-8 space-y-4" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+        <p className="font-display text-lg">{staff.name} の担当者情報</p>
+        <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+          住所・連絡先・振込先は請求書PDFに印字されます。未入力の項目は印字されません。
+        </p>
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>立替区分(経費の支払方法との対応)</label>
+          <select
+            value={form.expense_payment_method}
+            onChange={(e) => set("expense_payment_method")(e.target.value)}
+            className={inputCls}
+            style={inputStyle}
+          >
+            <option value="">(立替なし)</option>
+            {EXPENSE_ADVANCE_PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+
+        <AddressFieldsBlock
+          postalCode={form.postal_code} setPostalCode={set("postal_code")}
+          prefecture={form.prefecture} setPrefecture={set("prefecture")}
+          city={form.city} setCity={set("city")}
+          addressLine={form.address_line} setAddressLine={set("address_line")}
+          building={form.building} setBuilding={set("building")}
+        />
+
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>電話番号</label>
+          <input value={form.phone} onChange={(e) => set("phone")(e.target.value)} className={inputCls} style={inputStyle} />
+        </div>
+
+        <div className="pt-2" style={{ borderTop: "1px solid var(--mz-border)" }}>
+          <p className="text-xs mb-2" style={{ color: "var(--mz-ink-muted)" }}>振込先</p>
+          <div className="grid grid-cols-2 gap-3">
+            <input placeholder="銀行名" value={form.bank_name} onChange={(e) => set("bank_name")(e.target.value)} className={inputCls} style={inputStyle} />
+            <input placeholder="支店名" value={form.bank_branch} onChange={(e) => set("bank_branch")(e.target.value)} className={inputCls} style={inputStyle} />
+            <select value={form.bank_account_type} onChange={(e) => set("bank_account_type")(e.target.value)} className={inputCls} style={inputStyle}>
+              <option value="">種別(未選択)</option>
+              {STAFF_BANK_ACCOUNT_TYPE_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <input placeholder="口座番号" value={form.bank_account_number} onChange={(e) => set("bank_account_number")(e.target.value)} className={inputCls} style={inputStyle} />
+          </div>
+          <input placeholder="口座名義" value={form.bank_account_holder} onChange={(e) => set("bank_account_holder")(e.target.value)} className={`${inputCls} mt-3`} style={inputStyle} />
+        </div>
+
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={async () => { setSaving(true); await onSave(staff.id, form); setSaving(false); }}
+            disabled={saving}
+            className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60"
+            style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+          >
+            {saving ? "保存中..." : "保存"}
+          </button>
+          <button onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+            キャンセル
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -9692,13 +10124,28 @@ function ContractorInvoicesPage() {
   const [issueStaffId, setIssueStaffId] = useState("");
   const [issueTargetMonth, setIssueTargetMonth] = useState(todayISO().slice(0, 7));
   const [invoicePreview, setInvoicePreview] = useState(null); // null=未計算, {error}=計算不可, {monthlyProfit,rate,amount}=計算済み
+  const [profileStaff, setProfileStaff] = useState(null);   // 担当者情報の編集モーダル(★2026-08-22。2.40参照)
+  const [viewInvoice, setViewInvoice] = useState(null);     // 請求書PDFのプレビューモーダル(★2026-08-22。2.40参照)
   const [previewing, setPreviewing] = useState(false);
   const [issuing, setIssuing] = useState(false);
 
   const loadStaff = useCallback(async () => {
-    // expense_payment_method: この担当者がどの「立替(◯)」に対応するか(★2026-08-22追加。2.39参照)
-    const { data, error } = await supabase.from("staff").select("id,name,is_active,expense_payment_method").order("name");
-    if (!error) setStaffList(data || []);
+    // ★2026-08-22: 請求書PDFに印字する担当者情報(住所・連絡先・振込先)まで一式取得する(2.40参照)
+    const { data, error } = await supabase.from("staff").select(STAFF_PROFILE_SELECT).order("name");
+    /* ★2026-08-22変更: 取得に失敗したら黙って空にせず、必ず画面に理由を出す。
+       従来は `if (!error)` で握りつぶしていたため、マイグレーション未適用で staff の新しい列が
+       無い場合(42703 column does not exist)に、担当者一覧が理由も出ずに空になり、
+       「担当者情報が全然出てこない」という原因の分からない不具合に見えていた(5章42番参照)。 */
+    if (error) {
+      setStaffList([]);
+      setError(
+        error.code === "42703"
+          ? "担当者情報の取得に失敗しました。staffテーブルに必要な列がありません。設計書2.40のマイグレーションSQL(住所・振込先の列追加)を実行してください。"
+          : `担当者データの取得に失敗しました(${error.message || error.code || "原因不明"})`
+      );
+      return;
+    }
+    setStaffList(data || []);
   }, []);
 
   const loadRates = useCallback(async () => {
@@ -10185,19 +10632,33 @@ function ContractorInvoicesPage() {
   /* ★2026-08-22実装: 担当者と「立替(◯)」の対応づけ(staff.expense_payment_method)を保存する。
      同じ立替区分を2人が持つと同じ経費が二重に請求されるため、DB側にも部分UNIQUEインデックスを
      張ってある。違反時(23505)は分かりやすい文言に置き換えて伝える。 */
-  const handleSaveStaffAdvanceMethod = async (staffId, method) => {
-    const { error } = await supabase
-      .from("staff")
-      .update({ expense_payment_method: method || null })
-      .eq("id", staffId);
+  /* ★2026-08-22変更: 立替区分に加えて、請求書PDFに印字する住所・連絡先・振込先もまとめて保存する(2.40参照)。
+     patchの列は STAFF_PROFILE_SELECT と対応させること(片方だけ増やすと保存されない/消える。5章38番参照)。 */
+  const handleSaveStaffProfile = async (staffId, form) => {
+    const patch = {
+      expense_payment_method: form.expense_payment_method || null,
+      postal_code: form.postal_code || null,
+      prefecture: form.prefecture || null,
+      city: form.city || null,
+      address_line: form.address_line || null,
+      building: form.building || null,
+      phone: form.phone || null,
+      bank_name: form.bank_name || null,
+      bank_branch: form.bank_branch || null,
+      bank_account_type: form.bank_account_type || null,
+      bank_account_number: form.bank_account_number || null,
+      bank_account_holder: form.bank_account_holder || null,
+    };
+    const { error } = await supabase.from("staff").update(patch).eq("id", staffId);
     if (error) {
       if (error.code === "23505") {
-        alert(`「${method}」は既に別の担当者に設定されています。\n同じ立替区分を2人に設定すると、同じ経費が二重に請求されてしまうため、先にもう一方の設定を外してください。`);
+        alert(`「${form.expense_payment_method}」は既に別の担当者に設定されています。\n同じ立替区分を2人に設定すると、同じ経費が二重に請求されてしまうため、先にもう一方の設定を外してください。`);
       } else {
-        alert("立替区分の保存に失敗しました");
+        alert("担当者情報の保存に失敗しました");
       }
       return;
     }
+    setProfileStaff(null);
     await loadStaff();
   };
 
@@ -10233,34 +10694,47 @@ function ContractorInvoicesPage() {
 
       {tab === "rates" && (
         <>
-          {/* ★2026-08-22実装: 担当者と経費の「立替(◯)」の対応づけ(2.39参照)。
-              経費側には誰が立て替えたかが payment_method として入っているが、それがどの staff 行かは
-              システムには分からないため、ここで対応づける。未設定の担当者は立替精算が請求書に入らない。 */}
+          {/* ★2026-08-22実装: 担当者情報(立替区分・住所・連絡先・振込先)。2.39・2.40参照。
+              ・立替区分: 経費の支払方法「立替(◯)」と担当者を紐付ける。未設定だと立替精算が請求書に入らない。
+              ・住所/連絡先/振込先: 請求書PDFの請求者欄に印字する。 */}
           <div
             className="rounded-xl p-4 space-y-3"
             style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
           >
             <div>
-              <p className="font-display text-base">立替区分の対応</p>
+              <p className="font-display text-base">担当者情報</p>
               <p className="text-xs mt-1" style={{ color: "var(--mz-ink-muted)" }}>
-                経費の支払方法「立替(◯)」と担当者を紐付けます。設定すると、その担当者の請求書に未精算の立替経費が自動で加算されます。
+                立替区分(経費の「立替(◯)」との対応)と、請求書に印字する住所・連絡先・振込先を登録します。
               </p>
             </div>
             <div className="space-y-2">
-              {staffList.map((s) => (
-                <div key={s.id} className="flex flex-wrap items-center gap-3">
-                  <span className="text-sm min-w-24">{s.name}</span>
-                  <select
-                    value={s.expense_payment_method || ""}
-                    onChange={(e) => handleSaveStaffAdvanceMethod(s.id, e.target.value)}
-                    className="rounded-lg px-3 py-2 text-sm bg-transparent"
-                    style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+              {staffList.map((s) => {
+                const hasAddress = staffAddressLines(s).length > 0;
+                const hasBank = !!staffBankLine(s);
+                return (
+                  <div
+                    key={s.id}
+                    className="rounded-lg p-3 flex flex-wrap items-center justify-between gap-3"
+                    style={{ border: "1px solid var(--mz-border)" }}
                   >
-                    <option value="">(立替なし)</option>
-                    {EXPENSE_ADVANCE_PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                </div>
-              ))}
+                    <div className="min-w-0">
+                      <p className="text-sm">{s.name}</p>
+                      <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1 text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                        <span>立替区分: {s.expense_payment_method || "(未設定)"}</span>
+                        <span>住所: {hasAddress ? "登録済み" : "未登録"}</span>
+                        <span>振込先: {hasBank ? "登録済み" : "未登録"}</span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setProfileStaff(s)}
+                      className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+                      style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+                    >
+                      編集
+                    </button>
+                  </div>
+                );
+              })}
               {staffList.length === 0 && (
                 <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>担当者が登録されていません</p>
               )}
@@ -10439,9 +10913,21 @@ function ContractorInvoicesPage() {
           {invoices === null ? (
             <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
           ) : (
-            <ContractorInvoiceList invoices={invoices} onUpdateStatus={handleUpdateInvoiceStatus} onDelete={handleDeleteInvoice} />
+            <ContractorInvoiceList invoices={invoices} onUpdateStatus={handleUpdateInvoiceStatus} onDelete={handleDeleteInvoice} onViewInvoice={setViewInvoice} />
           )}
         </>
+      )}
+
+      {profileStaff && (
+        <StaffProfileFormModal
+          staff={profileStaff}
+          onClose={() => setProfileStaff(null)}
+          onSave={handleSaveStaffProfile}
+        />
+      )}
+
+      {viewInvoice && (
+        <ContractorInvoicePreviewModal invoice={viewInvoice} onClose={() => setViewInvoice(null)} />
       )}
 
       {modalRate && (
