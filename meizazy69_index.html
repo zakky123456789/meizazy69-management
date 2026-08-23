@@ -5069,7 +5069,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-22d";
+const BUILD_VERSION = "2026-08-22e";
 
 const ISSUER_INFO_DEFAULT = "〒012-0055\n秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
@@ -9613,6 +9613,34 @@ function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, rec
 
 const CONTRACTOR_INVOICE_BILL_TO = "IMPORT PRIME合同会社";
 
+/* ★2026-08-22実装: 外注費請求書の消費税(内税)。2.42参照。
+   ・**課税対象は歩合報酬のみ**。立替経費精算は「立替金」として消費税の対象外として扱う。
+     立替経費は担当者が支払った時点で既に消費税を含んでおり(expenses.amount_incl_taxは税込)、
+     それをそのまま返しているだけなので、ここで再度10%を抽出すると同じ消費税を二重に見積もることになる。
+   ・担当者は免税事業者のため、**適格請求書と誤認されるおそれのある表示(T+13桁の登録番号等)は一切出さない**。
+     免税事業者が消費税額を記載すること自体は罰則対象ではない(国税庁インボイスQ&A問26-2)。2.3と同じ考え方。
+   ・税率は請求書ごとに contractor_invoices.tax_rate_percent へ保存して固定する
+     (発行時点の内容で確定した文書として扱うため。rate_percentをコピーして固定するのと同じ理由)。 */
+const CONSUMPTION_TAX_RATE_PERCENT = 10;
+
+/* 税込金額から税抜・消費税額を割り戻す。
+   税抜は切り捨て、消費税額は「税込 − 税抜」で求めることで、内訳の合計が必ず税込金額と一致するようにする
+   (両方を独立に丸めると1円ずれることがあるため)。 */
+function splitTaxIncluded(amountInclTax, ratePercent) {
+  const total = Math.round(Number(amountInclTax) || 0);
+  const rate = Number(ratePercent);
+  const r = Number.isFinite(rate) ? rate : CONSUMPTION_TAX_RATE_PERCENT;
+  if (r <= 0) return { excluded: total, tax: 0 };
+  const excluded = Math.floor(total / (1 + r / 100));
+  return { excluded, tax: total - excluded };
+}
+
+function contractorInvoiceTaxRate(invoice) {
+  // 古い請求書(この機能より前に発行した分)は列が無い/nullのため、既定値で補う
+  const r = Number((invoice || {}).tax_rate_percent);
+  return Number.isFinite(r) ? r : CONSUMPTION_TAX_RATE_PERCENT;
+}
+
 /* 全ての請求書列を漏れなく含んだ、担当者情報の取得用SELECT。
    請求書PDFに刷る項目を増やしたら、必ずこの定数と保存時のpatchの両方に追加すること
    (片方だけだと値が保存されない/消える。商品編集のPRODUCT_EDIT_SELECTと同じ考え方。5章38番参照) */
@@ -9659,11 +9687,11 @@ function contractorInvoiceRows(invoice, expenses) {
   const rateLabel = Number(invoice.rate_percent) > 0
     ? `報酬基準額 ${base != null ? fmtJPY(base) : "-"} × ${invoice.rate_percent}%`
     : "対象月の報酬基準額が0以下、または歩合率が未設定のため0円";
-  rows.push({ key: "commission", label: `歩合報酬(${formatMonthLabel(invoice.target_month)}分)`, note: rateLabel, amount: commission });
+  rows.push({ key: "commission", label: `歩合報酬(${formatMonthLabel(invoice.target_month)}分)〔税込〕`, note: rateLabel, amount: commission });
   (expenses || []).forEach((e) => {
     rows.push({
       key: `exp-${e.id}`,
-      label: `立替経費精算 ${e.payment_date}`,
+      label: `立替経費精算〔対象外〕 ${e.payment_date}`,
       note: [e.payee, e.item_name].filter(Boolean).join(" / ") || "(内容未入力)",
       amount: Number(e.amount_incl_tax) || 0,
     });
@@ -9673,6 +9701,9 @@ function contractorInvoiceRows(invoice, expenses) {
 
 function ContractorInvoiceDocument({ invoice, staff, expenses }) {
   const rows = contractorInvoiceRows(invoice, expenses);
+  const taxRate = contractorInvoiceTaxRate(invoice);
+  // 課税対象は歩合報酬のみ(立替経費は対象外)。2.42参照
+  const taxSplit = splitTaxIncluded(invoice.amount_jpy, taxRate);
   const addressLines = staffAddressLines(staff);
   const bankLine = staffBankLine(staff);
   return (
@@ -9723,12 +9754,22 @@ function ContractorInvoiceDocument({ invoice, staff, expenses }) {
       </table>
 
       <div className="text-xs space-y-1 mb-4" style={{ borderTop: "1px solid #ccc", paddingTop: "8px" }}>
-        <div className="flex justify-between"><span>歩合報酬</span><span>{fmtJPY(invoice.amount_jpy)}</span></div>
-        <div className="flex justify-between"><span>立替経費精算({(expenses || []).length}件)</span><span>{fmtJPY(invoice.reimbursement_jpy)}</span></div>
+        <div className="flex justify-between"><span>歩合報酬(税込)</span><span>{fmtJPY(invoice.amount_jpy)}</span></div>
+        <div className="flex justify-between" style={{ color: "#888" }}>
+          <span className="pl-3">うち税抜金額</span><span>{fmtJPY(taxSplit.excluded)}</span>
+        </div>
+        <div className="flex justify-between" style={{ color: "#888" }}>
+          <span className="pl-3">うち消費税({taxRate}%)</span><span>{fmtJPY(taxSplit.tax)}</span>
+        </div>
+        <div className="flex justify-between"><span>立替経費精算({(expenses || []).length}件・消費税対象外)</span><span>{fmtJPY(invoice.reimbursement_jpy)}</span></div>
         <div className="flex justify-between font-medium" style={{ borderTop: "1px solid #ccc", paddingTop: "4px" }}>
           <span>合計金額</span><span>{fmtJPY(contractorInvoiceTotal(invoice))}</span>
         </div>
       </div>
+
+      <p className="text-[10px] mb-4" style={{ color: "#888" }}>
+        ※ 立替経費は当方が立て替えて支払ったものを精算するもので、消費税の対象外(立替金)として記載しています。
+      </p>
 
       {bankLine && (
         <div className="text-xs" style={{ borderTop: "1px solid #ccc", paddingTop: "8px" }}>
@@ -9742,6 +9783,8 @@ function ContractorInvoiceDocument({ invoice, staff, expenses }) {
 
 /* 印刷用の完全に独立した静的HTML(アプリ本体を一切含まない)。buildReceiptPrintHtmlと同じ方針。 */
 function buildContractorInvoicePrintHtml(invoice, staff, expenses) {
+  const taxRate = contractorInvoiceTaxRate(invoice);
+  const taxSplit = splitTaxIncluded(invoice.amount_jpy, taxRate);
   const rows = contractorInvoiceRows(invoice, expenses).map((r) => `
     <tr style="border-bottom:1px solid #eee;">
       <td style="padding:4px 0;">${escapeHtml(r.label)}${r.note ? `<span style="color:#888;"> … ${escapeHtml(r.note)}</span>` : ""}</td>
@@ -9802,13 +9845,19 @@ function buildContractorInvoicePrintHtml(invoice, staff, expenses) {
     <tbody>${rows}</tbody>
   </table>
 
-  <div style="border-top:1px solid #ccc; padding-top:8px; font-size:12px; margin-bottom:16px;">
-    <div style="display:flex; justify-content:space-between;"><span>歩合報酬</span><span>${escapeHtml(fmtJPY(invoice.amount_jpy))}</span></div>
-    <div style="display:flex; justify-content:space-between;"><span>立替経費精算(${(expenses || []).length}件)</span><span>${escapeHtml(fmtJPY(invoice.reimbursement_jpy))}</span></div>
+  <div style="border-top:1px solid #ccc; padding-top:8px; font-size:12px; margin-bottom:8px;">
+    <div style="display:flex; justify-content:space-between;"><span>歩合報酬(税込)</span><span>${escapeHtml(fmtJPY(invoice.amount_jpy))}</span></div>
+    <div style="display:flex; justify-content:space-between; color:#888;"><span style="padding-left:12px;">うち税抜金額</span><span>${escapeHtml(fmtJPY(taxSplit.excluded))}</span></div>
+    <div style="display:flex; justify-content:space-between; color:#888;"><span style="padding-left:12px;">うち消費税(${escapeHtml(taxRate)}%)</span><span>${escapeHtml(fmtJPY(taxSplit.tax))}</span></div>
+    <div style="display:flex; justify-content:space-between;"><span>立替経費精算(${(expenses || []).length}件・消費税対象外)</span><span>${escapeHtml(fmtJPY(invoice.reimbursement_jpy))}</span></div>
     <div style="display:flex; justify-content:space-between; border-top:1px solid #ccc; margin-top:4px; padding-top:4px; font-weight:600;">
       <span>合計金額</span><span>${escapeHtml(fmtJPY(contractorInvoiceTotal(invoice)))}</span>
     </div>
   </div>
+
+  <p style="font-size:10px; color:#888; margin:0 0 16px;">
+    ※ 立替経費は当方が立て替えて支払ったものを精算するもので、消費税の対象外(立替金)として記載しています。
+  </p>
 
   ${bankHtml}
 </body>
@@ -9949,6 +9998,10 @@ function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete, onViewInvoi
         const commission = Number(inv.amount_jpy) || 0;
         const reimbursement = Number(inv.reimbursement_jpy) || 0;
         const totalAmount = commission + reimbursement;
+        // 消費税は歩合報酬のみが対象(2.42参照)。発行時に保存した税額があればそれを正とする
+        const invoiceTax = inv.commission_tax_jpy != null
+          ? Number(inv.commission_tax_jpy)
+          : splitTaxIncluded(commission, contractorInvoiceTaxRate(inv)).tax;
         return (
           <div
             key={inv.id}
@@ -9976,7 +10029,7 @@ function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete, onViewInvoi
               </div>
               {reimbursement > 0 && (
                 <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>
-                  内訳: 歩合報酬 {fmtJPY(commission)} ＋ 立替精算 {fmtJPY(reimbursement)}
+                  内訳: 歩合報酬 {fmtJPY(commission)}(うち消費税 {fmtJPY(invoiceTax)}) ＋ 立替精算 {fmtJPY(reimbursement)}
                 </p>
               )}
             </div>
@@ -10313,7 +10366,7 @@ function ContractorInvoicesPage() {
     setInvoiceError(null);
     const { data, error } = await supabase
       .from("contractor_invoices")
-      .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,issue_date,status,staff(name)")
+      .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,tax_rate_percent,commission_tax_jpy,issue_date,status,staff(name)")
       .order("target_month", { ascending: false })
       .order("created_at", { ascending: false });
     if (error) {
@@ -10568,6 +10621,9 @@ function ContractorInvoicesPage() {
         rate_percent: invoicePreview.rate ? invoicePreview.rate.rate_percent : 0,
         amount_jpy: invoicePreview.amount,
         reimbursement_jpy: invoicePreview.reimbursementTotal || 0,
+        // 発行時点の税率と、そこから割り戻した消費税額を固定して保存する(2.42参照)
+        tax_rate_percent: CONSUMPTION_TAX_RATE_PERCENT,
+        commission_tax_jpy: splitTaxIncluded(invoicePreview.amount, CONSUMPTION_TAX_RATE_PERCENT).tax,
         issue_date: issueDate,
         status: "未払い",
       }).select("id").single();
@@ -10885,7 +10941,12 @@ function ContractorInvoicesPage() {
                   )}
                   <p>報酬基準額: {fmtJPY(invoicePreview.commissionBase)}</p>
                   <p>適用歩合率: {invoicePreview.rate ? `${invoicePreview.rate.rate_percent}%` : "(未設定)"}</p>
-                  <p>歩合報酬: {fmtJPY(invoicePreview.amount)}</p>
+                  <p>歩合報酬(税込): {fmtJPY(invoicePreview.amount)}
+                    <span style={{ color: "#8b8578" }}>
+                      {" "}(税抜 {fmtJPY(splitTaxIncluded(invoicePreview.amount, CONSUMPTION_TAX_RATE_PERCENT).excluded)}
+                      {" / "}消費税{CONSUMPTION_TAX_RATE_PERCENT}% {fmtJPY(splitTaxIncluded(invoicePreview.amount, CONSUMPTION_TAX_RATE_PERCENT).tax)})
+                    </span>
+                  </p>
 
                   {/* ★2026-08-22: 立替精算の内訳。金額だけ出すと「何が入っているか」が分からず、
                       入れ忘れ・入れ過ぎに気づけないため、対象の経費を必ず明細で出す(2.39参照) */}
