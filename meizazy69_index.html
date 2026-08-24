@@ -5069,7 +5069,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-22h";
+const BUILD_VERSION = "2026-08-22k";
 
 const ISSUER_INFO_DEFAULT = "〒012-0055\n秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
@@ -8312,7 +8312,7 @@ function generateShareToken() {
 }
 
 /* ---- カタログ カード(一覧表示) ---- */
-function CatalogCard({ catalog, itemCount, onEdit, onDelete, onShare }) {
+function CatalogCard({ catalog, itemCount, onEdit, onDuplicate, onDelete, onShare }) {
   return (
     <div
       className="rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3"
@@ -8341,6 +8341,13 @@ function CatalogCard({ catalog, itemCount, onEdit, onDelete, onShare }) {
           編集
         </button>
         <button
+          onClick={() => onDuplicate(catalog)}
+          className="text-xs px-2.5 py-1.5 rounded-lg"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+        >
+          複製
+        </button>
+        <button
           onClick={() => onDelete(catalog.id)}
           className="text-xs px-2.5 py-1.5 rounded-lg"
           style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}
@@ -8364,9 +8371,19 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
 
   useEffect(() => {
     let cancelled = false;
+    /* ★2026-08-22変更: 掲載候補から「もう提供できない商品」を除外する(2.44参照)。
+       ・status = "販売済み" のみを除外する。**「返品済み」は除外しない**
+         (返品された商品は現物が手元に在庫として残っており、そのまま売れるため。2026-08-22訂正)。
+       ・created_via_sale = true … 販売登録の「新規仕入で追加」で作られた受注商品。
+         特定のホストの受注のために仕入れた1点物であり、そもそもカタログに載せる対象ではない
+         (サンプル・在庫一覧や在庫検索では2026-08-04に除外済みだったが、ここだけ漏れていた。2.30参照)。
+       既にカタログへ追加済みの商品は、この一覧ではなく openEdit がidで取得するため、
+       あとから売れてもカタログから勝手に消えることはない(代わりに選択済み一覧側にバッジで警告する)。 */
     supabase
       .from("products")
-      .select("id,type,sample_purpose,product_name,category,size,product_code,selling_price_jpy,size_options,product_image_url,created_at")
+      .select("id,type,status,sample_purpose,product_name,category,size,product_code,selling_price_jpy,size_options,product_image_url,created_at")
+      .neq("status", "販売済み")
+      .eq("created_via_sale", false)
       .order("created_at", { ascending: false })
       .then(({ data, error }) => {
         if (cancelled) return;
@@ -8391,6 +8408,22 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
 
   const addProduct = (p) => { setSelectedProducts((prev) => [...prev, p]); setProductSearch(""); };
   const removeProduct = (id) => setSelectedProducts((prev) => prev.filter((p) => p.id !== id));
+
+  /* ★2026-08-22実装: 候補の一括追加/一括解除(2.44参照)。
+     ・追加するのは**いま候補として表示されている分だけ**(検索で絞り込んでいればその結果のみ)。
+       「全商品」と称して画面に出ていないものまで入れると、何を入れたのか分からなくなるため。
+     ・候補は既に選択済みのものを除いた配列なので、そのまま末尾に足せば重複しない。
+     ・一括解除は並び順の作業がまとめて消えるため、確認を挟む(1件ずつの×は確認なしのまま)。 */
+  const addAllCandidates = () => {
+    if (candidates.length === 0) return;
+    setSelectedProducts((prev) => [...prev, ...candidates]);
+    setProductSearch("");
+  };
+  const removeAllProducts = () => {
+    if (selectedProducts.length === 0) return;
+    if (!window.confirm(`掲載商品${selectedProducts.length}点をすべて外しますか?\n並び順もリセットされます。`)) return;
+    setSelectedProducts([]);
+  };
   const moveProduct = (index, dir) => {
     setSelectedProducts((prev) => {
       const next = [...prev];
@@ -8449,15 +8482,26 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
             <label className="block text-xs" style={{ color: "var(--mz-ink-muted)" }}>
               掲載商品{selectedProducts.length > 0 ? `(${selectedProducts.length}点)` : ""}
             </label>
-            {selectedProducts.length > 1 && (
-              <button
-                type="button" onClick={sortSelectedByCategory}
-                className="text-[11px] px-2 py-1 rounded-md shrink-0"
-                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
-              >
-                カテゴリ順に並べ替え
-              </button>
-            )}
+            <div className="flex items-center gap-2 shrink-0">
+              {selectedProducts.length > 1 && (
+                <button
+                  type="button" onClick={sortSelectedByCategory}
+                  className="text-[11px] px-2 py-1 rounded-md"
+                  style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+                >
+                  カテゴリ順に並べ替え
+                </button>
+              )}
+              {selectedProducts.length > 0 && (
+                <button
+                  type="button" onClick={removeAllProducts}
+                  className="text-[11px] px-2 py-1 rounded-md"
+                  style={{ border: "1px solid var(--mz-border)", color: "#f2b8bd" }}
+                >
+                  すべて外す
+                </button>
+              )}
+            </div>
           </div>
 
           {selectedProducts.length > 0 && (
@@ -8477,6 +8521,15 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
                   {p.type === "sample" && p.sample_purpose === "処分用" && (
                     <span className="text-[9px] px-1.5 py-0.5 rounded-full shrink-0" style={{ background: "#3a2a1f", color: "#d6a98f" }}>処分用</span>
                   )}
+                  {/* ★2026-08-22: 掲載後に売れた商品への気づき(2.44参照)。候補からは除外しているが、
+                      既に掲載済みの商品は勝手に外さないため、ここで明示して人に判断してもらう。
+                      「返品済み」は現物が手元にあり販売可能なので、警告色にはしない。 */}
+                  {p.status === "販売済み" && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full shrink-0" style={{ background: "#3a1f22", color: "#f2b8bd" }}>販売済み</span>
+                  )}
+                  {p.status === "返品済み" && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full shrink-0" style={{ background: "#3a2a1f", color: "#d6a98f" }}>返品済み</span>
+                  )}
                   <button type="button" onClick={() => moveProduct(idx, -1)} disabled={idx === 0} className="disabled:opacity-30" style={{ color: "var(--mz-ink-muted)" }}>↑</button>
                   <button type="button" onClick={() => moveProduct(idx, 1)} disabled={idx === selectedProducts.length - 1} className="disabled:opacity-30" style={{ color: "var(--mz-ink-muted)" }}>↓</button>
                   <button
@@ -8493,10 +8546,22 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
 
           <input
             type="text" value={productSearch} onChange={(e) => setProductSearch(e.target.value)}
-            placeholder="商品名・商品番号で絞り込み(未入力時は登録日の新しい順に一覧表示・ステータス問わず)"
+            placeholder="商品名・商品番号で絞り込み(未入力時は登録日の新しい順に一覧表示・販売済みと受注商品は除く)"
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           />
+
+          {candidates.length > 0 && (
+            <button
+              type="button" onClick={addAllCandidates}
+              className="w-full mt-2 rounded-lg py-2 text-xs font-medium"
+              style={{ border: "1px solid var(--mz-gold)", color: "var(--mz-gold-soft)" }}
+            >
+              {productSearch.trim()
+                ? `絞り込み中の${candidates.length}点をすべて追加`
+                : `候補の${candidates.length}点をすべて追加`}
+            </button>
+          )}
 
           {allProducts === null ? (
             <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
@@ -8630,7 +8695,7 @@ function CatalogsPage() {
   const openEdit = async (catalog) => {
     const { data, error } = await supabase
       .from("catalog_items")
-      .select("sort_order,products(id,type,sample_purpose,product_name,category,size,product_code,selling_price_jpy,size_options,product_image_url)")
+      .select("sort_order,products(id,type,status,sample_purpose,product_name,category,size,product_code,selling_price_jpy,size_options,product_image_url)")
       .eq("catalog_id", catalog.id)
       .order("sort_order");
     if (error) { alert("掲載商品の取得に失敗しました"); return; }
@@ -8660,6 +8725,51 @@ function CatalogsPage() {
     }
     setModalCatalog(null);
     loadAll();
+  };
+
+  /* ★2026-08-22実装: カタログの複製(2.44参照)。
+     同じ商品構成のカタログを店舗ごとに配りたいケース向け。
+     ・**共有トークンは必ず新規に発行する**(share_tokenを複製すると、複製元と同じURLになり、
+       片方を削除したときにもう片方まで見られなくなる/どの店舗に渡したURLか区別できなくなる)。
+     ・掲載商品はsort_orderごとそのままコピーする(並べ替えの手間を繰り返さないため)。
+     ・カタログ本体だけ作られて商品のコピーに失敗した場合は、中途半端な複製を残さず削除して元に戻す。 */
+  const handleDuplicate = async (catalog) => {
+    const suggested = `${catalog.name} のコピー`;
+    const newName = window.prompt("複製後のカタログ名を入力してください(社内管理用。ホストには表示されません)", suggested);
+    if (newName === null) return;                       // キャンセル
+    const name = newName.trim();
+    if (!name) { alert("カタログ名を入力してください"); return; }
+
+    const { data: srcItems, error: srcErr } = await supabase
+      .from("catalog_items")
+      .select("product_id,sort_order")
+      .eq("catalog_id", catalog.id)
+      .order("sort_order");
+    if (srcErr) { alert("複製元の掲載商品を取得できませんでした"); return; }
+
+    const { data: inserted, error: insErr } = await supabase
+      .from("catalogs")
+      .insert({ name, share_token: generateShareToken() })
+      .select("id")
+      .single();
+    if (insErr || !inserted) { alert("カタログの複製に失敗しました"); return; }
+
+    const rows = (srcItems || []).map((r, idx) => ({
+      catalog_id: inserted.id,
+      product_id: r.product_id,
+      sort_order: r.sort_order != null ? r.sort_order : idx,
+    }));
+    if (rows.length > 0) {
+      const { error: itemsErr } = await supabase.from("catalog_items").insert(rows);
+      if (itemsErr) {
+        // 商品のコピーに失敗したら、空のカタログを残さず取り消す
+        await supabase.from("catalogs").delete().eq("id", inserted.id);
+        alert("掲載商品の複製に失敗したため、複製を取り消しました。もう一度お試しください。");
+        return;
+      }
+    }
+    await loadAll();
+    alert(`「${name}」として複製しました(掲載商品${rows.length}点)。\n共有リンクは複製元とは別の新しいURLになります。`);
   };
 
   const handleDelete = async (id) => {
@@ -8695,6 +8805,7 @@ function CatalogsPage() {
               catalog={c}
               itemCount={c.catalog_items?.[0]?.count || 0}
               onEdit={openEdit}
+              onDuplicate={handleDuplicate}
               onDelete={handleDelete}
               onShare={setShareTarget}
             />
