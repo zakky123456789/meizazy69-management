@@ -2734,6 +2734,28 @@ const PRODUCT_IMAGE_BUCKET = "product-images";
 const PRODUCT_IMAGE_MAX_DIMENSION = 1280; // 長辺の最大px(Storage無料枠節約のため)
 const PRODUCT_IMAGE_JPEG_QUALITY = 0.72;
 const PRODUCT_STATUS_OPTIONS = ["未販売", "販売済み", "返品済み"];
+
+/* ★2026-08-23追加: 仕入れ代金の支払い経路(2.46参照)。
+   ・"ウォレット" … 従来どおり転送業者へのチャージ(agent_charges)からFIFOで消化し、
+     消化時のレートでJPY確定額が決まる。
+   ・"直接支払い" … タオバオ・微店から直接仕入れ、いつもと違う転送業者を使う等で
+     ウォレットを経由しないケース。CNYとJPYを**そのまま手入力**し、ウォレットは一切触らない。
+   COST_SOURCE_WALLET を既定にしているため、既存商品・既存の登録経路は挙動が変わらない。 */
+const COST_SOURCE_WALLET = "ウォレット";
+const COST_SOURCE_DIRECT = "直接支払い";
+/* ★2026-08-23追加: まだ仕入れていない、カタログ掲載用にだけ登録するサンプル(2.47参照)。
+   金額は全て0・仕入れ日なし・ウォレット未使用。実際に仕入れたら経路を切り替えて金額と日付を入れる。 */
+const COST_SOURCE_NONE = "仕入れなし";
+const COST_SOURCE_OPTIONS = [COST_SOURCE_WALLET, COST_SOURCE_DIRECT, COST_SOURCE_NONE];
+const COST_SOURCE_LABELS = {
+  [COST_SOURCE_WALLET]: "ウォレット(転送業者チャージ)",
+  [COST_SOURCE_DIRECT]: "直接支払い(タオバオ直・別の転送業者など)",
+  [COST_SOURCE_NONE]: "仕入れなし(カタログ用のみ)",
+};
+const costSourceOf = (p) => {
+  const v = (p || {}).cost_source;
+  return v === COST_SOURCE_DIRECT || v === COST_SOURCE_NONE ? v : COST_SOURCE_WALLET;
+};
 /* サンプルの「目的」区分(type: "sample" のみ意味を持つ。stockはnull固定)
    ・展示用: ホストに見せる目的で持参する通常のサンプル(デフォルト)
    ・処分用: 取り扱い中止・売れ行き不振等で、現物をそのまま売ってしまいたいサンプル
@@ -3656,6 +3678,16 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
   const [purchaseDate, setPurchaseDate] = useState(product.purchase_date || todayISO());
   const [batchId, setBatchId] = useState(product.batch_id || "");
   const [purchaseAmountCny, setPurchaseAmountCny] = useState(product.purchase_amount_cny != null ? String(product.purchase_amount_cny) : "");
+  /* ★2026-08-23: 支払い経路と、直接支払い時のJPY手入力(2.46参照)。
+     直接支払いのときだけJPY欄を出し、入力値をそのまま確定原価として保存する。 */
+  const [costSource, setCostSource] = useState(costSourceOf(product));
+  /* ★2026-08-23: 仕入れ予想価格(2.47参照)。まだ仕入れていない商品が「いくらで仕入れられるか」の目安。
+     販売価格を決める材料になるが、実際の原価ではないため productCostJpy には一切含めない。 */
+  const [estimatedPurchaseCny, setEstimatedPurchaseCny] = useState(product.estimated_purchase_cny != null ? String(product.estimated_purchase_cny) : "");
+  const [purchaseAmountJpy, setPurchaseAmountJpy] = useState(product.purchase_amount_jpy != null ? String(product.purchase_amount_jpy) : "");
+  const [shippingJpy, setShippingJpy] = useState(product.shipping_jpy != null ? String(product.shipping_jpy) : "");
+  const [feeJpy, setFeeJpy] = useState(product.fee_jpy != null ? String(product.fee_jpy) : "");
+  const [domesticShippingJpy, setDomesticShippingJpy] = useState(product.domestic_shipping_jpy != null ? String(product.domestic_shipping_jpy) : "");
   const [shippingCny, setShippingCny] = useState(product.shipping_cny != null ? String(product.shipping_cny) : "");
   const [feeCny, setFeeCny] = useState(product.fee_cny != null ? String(product.fee_cny) : "");
   // ★2026-08-17実装: 中国国内送料(1点ごと。ロットの按分対象外)。2.36参照
@@ -3774,7 +3806,11 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
   const toggleColor = (color) => {
     setCheckedColors((prev) => ({ ...prev, [color]: !prev[color] }));
     // 初めてチェックした色は、共通欄(AI自動抽出で入った商品代等)の現在値をデフォルトとして引き継ぐ
-    setColorCostInputs((prev) => (prev[color] ? prev : { ...prev, [color]: { purchaseAmountCny: purchaseAmountCny || "", shippingCny: shippingCny || "", feeCny: feeCny || "", domesticShippingCny: domesticShippingCny || "" } }));
+    // ★2026-08-23: 直接支払いのJPY欄も同じく共通欄の現在値を引き継ぐ(2.46参照)
+    setColorCostInputs((prev) => (prev[color] ? prev : { ...prev, [color]: {
+      purchaseAmountCny: purchaseAmountCny || "", shippingCny: shippingCny || "", feeCny: feeCny || "", domesticShippingCny: domesticShippingCny || "",
+      purchaseAmountJpy: purchaseAmountJpy || "", shippingJpy: shippingJpy || "", feeJpy: feeJpy || "", domesticShippingJpy: domesticShippingJpy || "",
+    } }));
   };
 
   const updateColorCost = (color, field, value) => {
@@ -3838,6 +3874,13 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           shipping_cny: costs.shippingCny ? parseFloat(costs.shippingCny) : 0,
           fee_cny: costs.feeCny ? parseFloat(costs.feeCny) : 0,
           domestic_shipping_cny: costs.domesticShippingCny ? parseFloat(costs.domesticShippingCny) : 0,
+          // ★2026-08-23: カラーバリエーション一括登録も直接支払いに対応(2.46参照)
+          cost_source: costSource,
+          estimated_purchase_cny: estimatedPurchaseCny ? parseFloat(estimatedPurchaseCny) : null,
+          purchase_amount_jpy: costs.purchaseAmountJpy ? parseFloat(costs.purchaseAmountJpy) : 0,
+          shipping_jpy: costs.shippingJpy ? parseFloat(costs.shippingJpy) : 0,
+          fee_jpy: costs.feeJpy ? parseFloat(costs.feeJpy) : 0,
+          domestic_shipping_jpy: costs.domesticShippingJpy ? parseFloat(costs.domesticShippingJpy) : 0,
         });
       }
       await onSave({ multiItems });
@@ -3859,12 +3902,19 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
       size: size.trim() || null,
       size_options: sizeOptionsText.trim() || null,
       selling_price_jpy: sellingPriceJpy ? parseFloat(sellingPriceJpy) : null,
-      purchase_date: purchaseDate,
-      batch_id: batchId || null,
-      purchase_amount_cny: purchaseAmountCny ? parseFloat(purchaseAmountCny) : 0,
-      shipping_cny: shippingCny ? parseFloat(shippingCny) : 0,
-      fee_cny: feeCny ? parseFloat(feeCny) : 0,
-      domestic_shipping_cny: domesticShippingCny ? parseFloat(domesticShippingCny) : 0,
+      // ★2026-08-23: 仕入れなし(カタログ用)は仕入れ日を持たせず、金額もすべて0で保存する(2.47参照)
+      purchase_date: costSource === COST_SOURCE_NONE ? (purchaseDate || null) : purchaseDate,
+      batch_id: costSource === COST_SOURCE_NONE ? null : (batchId || null),
+      purchase_amount_cny: costSource === COST_SOURCE_NONE ? 0 : (purchaseAmountCny ? parseFloat(purchaseAmountCny) : 0),
+      shipping_cny: costSource === COST_SOURCE_NONE ? 0 : (shippingCny ? parseFloat(shippingCny) : 0),
+      fee_cny: costSource === COST_SOURCE_NONE ? 0 : (feeCny ? parseFloat(feeCny) : 0),
+      domestic_shipping_cny: costSource === COST_SOURCE_NONE ? 0 : (domesticShippingCny ? parseFloat(domesticShippingCny) : 0),
+      cost_source: costSource,
+      estimated_purchase_cny: estimatedPurchaseCny ? parseFloat(estimatedPurchaseCny) : null,
+      purchase_amount_jpy: costSource === COST_SOURCE_NONE ? 0 : (purchaseAmountJpy ? parseFloat(purchaseAmountJpy) : 0),
+      shipping_jpy: costSource === COST_SOURCE_NONE ? 0 : (shippingJpy ? parseFloat(shippingJpy) : 0),
+      fee_jpy: costSource === COST_SOURCE_NONE ? 0 : (feeJpy ? parseFloat(feeJpy) : 0),
+      domestic_shipping_jpy: costSource === COST_SOURCE_NONE ? 0 : (domesticShippingJpy ? parseFloat(domesticShippingJpy) : 0),
     });
     setSaving(false);
   };
@@ -3908,6 +3958,33 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           {visionError && <p className="text-xs mt-1" style={{ color: "#f2b8bd" }}>{visionError}</p>}
         </div>
 
+        {/* ★2026-08-23実装: 支払い経路の選択(2.46参照)。単品・カラーバリエーション一括の両方に効く。
+            直接支払いを選ぶとウォレットを使わず、JPY欄がそのまま確定原価になる。 */}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払い経路</label>
+          <select
+            value={costSource}
+            onChange={(e) => {
+              const next = e.target.value;
+              /* 「仕入れなし」から実際の仕入れへ切り替えたとき、商品代が未入力なら仕入れ予想価格を
+                 初期値として引き継ぐ(予想と実額がほぼ同じことが多く、入れ直す手間を省くため)。
+                 既に商品代が入っている場合は上書きしない。 */
+              if (costSource === COST_SOURCE_NONE && next !== COST_SOURCE_NONE
+                  && !(parseFloat(purchaseAmountCny) > 0) && parseFloat(estimatedPurchaseCny) > 0) {
+                setPurchaseAmountCny(estimatedPurchaseCny);
+              }
+              setCostSource(next);
+            }}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+            {COST_SOURCE_OPTIONS.map((o) => <option key={o} value={o}>{COST_SOURCE_LABELS[o] || o}</option>)}
+          </select>
+          <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+            {costSource === COST_SOURCE_DIRECT
+              ? "タオバオ・微店から直接仕入れた場合など、いつもの転送業者のウォレットを経由しない仕入れです。ウォレット残高は減りません。CNYは記録用、JPYが実際に支払った金額として原価になります。"
+              : "いつもの転送業者のチャージ残高(ウォレット)からFIFOで自動消化します。"}
+          </p>
+        </div>
+
         {colorOptions.length > 0 && (
           <div className="rounded-lg p-3 space-y-2" style={{ background: "var(--mz-surface-hover)", border: "1px solid var(--mz-border)" }}>
             <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
@@ -3928,6 +4005,12 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
                       onFile={(file) => handleColorImageFile(c, file)}
                       helperText="ドラッグ&ドロップ、またはクリックして画像を選択"
                     />
+                    {costSource === COST_SOURCE_NONE ? (
+                      <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                        仕入れなし(カタログ用)のため、色ごとの金額入力はありません。仕入れ予想価格は全色共通で上の欄の値が使われます。
+                      </p>
+                    ) : (
+                    <>
                     <div className="grid grid-cols-2 gap-2">
                       <input
                         type="number" min="0" step="any" placeholder="商品代(CNY)"
@@ -3955,6 +4038,38 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
                         className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
                       />
                     </div>
+                    {/* ★2026-08-23実装: 直接支払いのときは色ごとにJPYも入力する(2.46参照)。
+                        色によって支払額が違うため、単品と同じくJPYは色ごとに個別入力とする。 */}
+                    {costSource === COST_SOURCE_DIRECT && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <input
+                          type="number" min="0" step="any" placeholder="商品代(JPY)"
+                          value={(colorCostInputs[c] && colorCostInputs[c].purchaseAmountJpy) || ""}
+                          onChange={(e) => updateColorCost(c, "purchaseAmountJpy", e.target.value)}
+                          className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-gold)", color: "var(--mz-ink)" }}
+                        />
+                        <input
+                          type="number" min="0" step="any" placeholder="中国国内送料(JPY)"
+                          value={(colorCostInputs[c] && colorCostInputs[c].domesticShippingJpy) || ""}
+                          onChange={(e) => updateColorCost(c, "domesticShippingJpy", e.target.value)}
+                          className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-gold)", color: "var(--mz-ink)" }}
+                        />
+                        <input
+                          type="number" min="0" step="any" placeholder="国際送料(JPY)"
+                          value={(colorCostInputs[c] && colorCostInputs[c].shippingJpy) || ""}
+                          onChange={(e) => updateColorCost(c, "shippingJpy", e.target.value)}
+                          className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-gold)", color: "var(--mz-ink)" }}
+                        />
+                        <input
+                          type="number" min="0" step="any" placeholder="その他手数料(JPY)"
+                          value={(colorCostInputs[c] && colorCostInputs[c].feeJpy) || ""}
+                          onChange={(e) => updateColorCost(c, "feeJpy", e.target.value)}
+                          className="rounded-lg px-2 py-1.5 text-xs bg-transparent" style={{ border: "1px solid var(--mz-gold)", color: "var(--mz-ink)" }}
+                        />
+                      </div>
+                    )}
+                    </>
+                    )}
                   </div>
                 )}
               </div>
@@ -4073,8 +4188,11 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
         )}
 
         <div>
-          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入れ日</label>
-          <input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} required
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+            仕入れ日{costSource === COST_SOURCE_NONE ? "(仕入れなしのため空欄でOK)" : ""}
+          </label>
+          <input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)}
+            required={costSource !== COST_SOURCE_NONE}
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
         </div>
 
@@ -4096,7 +4214,24 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           </select>
         </div>
 
-        {activeColors.length === 0 && (
+        {/* ★2026-08-23: 仕入れなし(カタログ用)は金額欄自体を出さない。全て0で保存する(2.47参照) */}
+        {costSource === COST_SOURCE_NONE && (
+          <>
+            <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#2a2419", color: "#e3c489" }}>
+              カタログ掲載用の登録です。原価は0円、ウォレットも使いません。実際に仕入れたら、この画面で支払い経路を切り替えてください(下の仕入れ予想価格が商品代の初期値として入ります)。
+            </p>
+            <div>
+              <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>仕入れ予想価格(CNY・任意)</label>
+              <input type="number" min="0" step="any" value={estimatedPurchaseCny} onChange={(e) => setEstimatedPurchaseCny(e.target.value)}
+                className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+              <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+                いくらで仕入れられそうかの目安です。上の「参考販売価格(JPY)」を決める材料に使います。**原価には含まれず**、月次損益・利益計算・ウォレットのいずれにも影響しません。ホストが見る公開カタログにも表示されません。
+              </p>
+            </div>
+          </>
+        )}
+
+        {activeColors.length === 0 && costSource !== COST_SOURCE_NONE && (
           <>
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -4125,15 +4260,52 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
               国際送料・その他手数料は仕入れロットを選ぶと自動で入ります。中国国内送料は1点ごとの金額なので、ロットとは関係なく手入力してください。
             </p>
 
-            <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-              保存すると、上記CNY合計額がウォレット(チャージ残高)からFIFOで自動消化されます。
-            </p>
+            {costSource === COST_SOURCE_DIRECT ? (
+              <>
+                <div className="pt-1" style={{ borderTop: "1px solid var(--mz-border)" }}>
+                  <p className="text-xs mt-2 mb-2" style={{ color: "var(--mz-ink-muted)" }}>
+                    実際に支払った金額(JPY)。ここに入れた金額がそのまま原価になり、<b>仕入れ日の月の経費</b>として月次損益に計上されます。
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品代(JPY)</label>
+                      <input type="number" min="0" step="any" value={purchaseAmountJpy} onChange={(e) => setPurchaseAmountJpy(e.target.value)}
+                        className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+                    </div>
+                    <div>
+                      <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>中国国内送料(JPY)</label>
+                      <input type="number" min="0" step="any" value={domesticShippingJpy} onChange={(e) => setDomesticShippingJpy(e.target.value)}
+                        className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+                    </div>
+                    <div>
+                      <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>国際送料(JPY)</label>
+                      <input type="number" min="0" step="any" value={shippingJpy} onChange={(e) => setShippingJpy(e.target.value)}
+                        className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+                    </div>
+                    <div>
+                      <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>その他手数料(JPY)</label>
+                      <input type="number" min="0" step="any" value={feeJpy} onChange={(e) => setFeeJpy(e.target.value)}
+                        className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+                    </div>
+                  </div>
+                </div>
+                <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                  保存してもウォレット残高は変わりません。
+                </p>
+              </>
+            ) : (
+              <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                保存すると、上記CNY合計額がウォレット(チャージ残高)からFIFOで自動消化されます。
+              </p>
+            )}
           </>
         )}
 
         {activeColors.length > 0 && (
           <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-            カラーバリエーション一括登録モードです。上のカラー一覧で入力した色ごとの金額で、それぞれウォレット(チャージ残高)からFIFOで自動消化されます。
+            {costSource === COST_SOURCE_DIRECT
+              ? "カラーバリエーション一括登録モードです。上のカラー一覧で色ごとに入力したJPYが、そのまま各商品の原価になります。ウォレット残高は変わりません。"
+              : "カラーバリエーション一括登録モードです。上のカラー一覧で入力した色ごとの金額で、それぞれウォレット(チャージ残高)からFIFOで自動消化されます。"}
           </p>
         )}
 
@@ -4256,7 +4428,18 @@ function ProductCard({ product, onEdit, onReturn, onDelete, onTogglePurpose }) {
               <span>本体: {fmtJPY(purchaseJpy)}</span>
               <span>送料・手数料: {fmtJPY(feeJpyTotal)}</span>
               <span>原価合計(JPY): {fmtJPY(costJpy)}</span>
+              {/* ★2026-08-23: ウォレットを経由していない仕入れであることを明示(2.46参照) */}
+              {costSourceOf(product) === COST_SOURCE_DIRECT && (
+                <span style={{ color: "#d6a98f" }}>直接支払い(ウォレット未経由)</span>
+              )}
             </div>
+          )}
+          {/* ★2026-08-23: 仕入れなし(カタログ用)は原価0円で上の内訳が出ないため、ここで別途明示する(2.47参照) */}
+          {costSourceOf(product) === COST_SOURCE_NONE && (
+            <p className="text-xs mt-0.5" style={{ color: "#d6a98f" }}>
+              仕入れなし(カタログ用・未仕入れ)
+              {product.estimated_purchase_cny != null && ` ・ 仕入れ予想: ${fmtCnyCompact(product.estimated_purchase_cny)} CNY`}
+            </p>
           )}
         </div>
       </CardWrapper>
@@ -4333,25 +4516,48 @@ async function updateProductCore(form, original, options) {
   const opts = options || {};
   const syncProfits = opts.syncProfits !== false;
   const orig = original || {};
+  /* ★2026-08-23: 支払い経路(2.46参照)。
+     ・直接支払い … ウォレットを一切触らず、入力されたJPYをそのまま確定額として保存する。
+     ・経路を切り替えた場合も「旧経路の後始末 → 新経路で確定」の順で処理する。
+       ウォレット→直接に切り替えるときは、必ず先に旧消化を払い戻すこと
+       (残したままだと、その商品の原価が消えたのにウォレットだけ減ったままになる)。 */
+  const newSource = costSourceOf(form);
+  const oldSource = costSourceOf(orig);
+  const sourceChanged = newSource !== oldSource;
   const oldTotalCny = (Number(orig.purchase_amount_cny) || 0) + (Number(orig.shipping_cny) || 0) + (Number(orig.fee_cny) || 0)
     + (Number(orig.domestic_shipping_cny) || 0);
   const newTotalCny = (Number(form.purchase_amount_cny) || 0) + (Number(form.shipping_cny) || 0) + (Number(form.fee_cny) || 0)
     + (Number(form.domestic_shipping_cny) || 0);
-  const costsChanged =
+  const cnyChanged =
     (Number(form.purchase_amount_cny) || 0) !== (Number(orig.purchase_amount_cny) || 0) ||
     (Number(form.shipping_cny) || 0) !== (Number(orig.shipping_cny) || 0) ||
     (Number(form.fee_cny) || 0) !== (Number(orig.fee_cny) || 0) ||
     (Number(form.domestic_shipping_cny) || 0) !== (Number(orig.domestic_shipping_cny) || 0);
+  const jpyChanged = (newSource === COST_SOURCE_DIRECT || newSource === COST_SOURCE_NONE) && (
+    (Number(form.purchase_amount_jpy) || 0) !== (Number(orig.purchase_amount_jpy) || 0) ||
+    (Number(form.shipping_jpy) || 0) !== (Number(orig.shipping_jpy) || 0) ||
+    (Number(form.fee_jpy) || 0) !== (Number(orig.fee_jpy) || 0) ||
+    (Number(form.domestic_shipping_jpy) || 0) !== (Number(orig.domestic_shipping_jpy) || 0)
+  );
+  const costsChanged = cnyChanged || jpyChanged || sourceChanged;
+  // ウォレットの組み替えが要るのは「金額(CNY)が変わった」か「経路が変わった」場合だけ
+  const needsWalletRework = cnyChanged || sourceChanged;
 
-  if (costsChanged) {
-    const balance = await getWalletRemainingTotal();
-    if (!balance.ok) return { ok: false, message: "ウォレット残高の確認に失敗しました" };
-    const projectedBalance = balance.total + oldTotalCny;
-    if (projectedBalance < newTotalCny) {
-      return { ok: false, message: `ウォレット残高が不足しています(必要額: ${newTotalCny.toFixed(2)} CNY / 旧消化分を払い戻した場合の残高: ${projectedBalance.toFixed(2)} CNY)。先にチャージを追加してから再度保存してください。` };
+  if (needsWalletRework) {
+    if (newSource === COST_SOURCE_WALLET) {
+      const balance = await getWalletRemainingTotal();
+      if (!balance.ok) return { ok: false, message: "ウォレット残高の確認に失敗しました" };
+      // 旧経路が直接支払いなら、払い戻しで戻ってくる残高は無い
+      const refundable = oldSource === COST_SOURCE_WALLET ? oldTotalCny : 0;
+      const projectedBalance = balance.total + refundable;
+      if (projectedBalance < newTotalCny) {
+        return { ok: false, message: `ウォレット残高が不足しています(必要額: ${newTotalCny.toFixed(2)} CNY / 旧消化分を払い戻した場合の残高: ${projectedBalance.toFixed(2)} CNY)。先にチャージを追加してから再度保存してください。` };
+      }
     }
-    const reverseRes = await reverseWalletConsumption(form.id);
-    if (!reverseRes.ok) return { ok: false, message: reverseRes.message };
+    if (oldSource === COST_SOURCE_WALLET) {
+      const reverseRes = await reverseWalletConsumption(form.id);
+      if (!reverseRes.ok) return { ok: false, message: reverseRes.message };
+    }
   }
 
   const patch = {
@@ -4372,11 +4578,29 @@ async function updateProductCore(form, original, options) {
     shipping_cny: form.shipping_cny,
     fee_cny: form.fee_cny,
     domestic_shipping_cny: form.domestic_shipping_cny,
+    cost_source: newSource,
+    // ★2026-08-23: 仕入れ予想価格。原価ではないので消化・利益計算には一切使わない(2.47参照)
+    estimated_purchase_cny: form.estimated_purchase_cny != null ? form.estimated_purchase_cny : null,
   };
+  /* 直接支払いの場合は、入力されたJPYをそのまま確定額として保存する(ウォレット消化は行わない)。
+     ウォレットへ戻した場合は、この後のFIFO消化で上書きされるため、いったん0にしておく
+     (消化が失敗したときに古い直接入力額が残り続けるのを防ぐ)。 */
+  if (newSource === COST_SOURCE_DIRECT || newSource === COST_SOURCE_NONE) {
+    // 仕入れなし(カタログ用)はフォーム側で0が入るため、そのまま書けば0になる(2.47参照)
+    patch.purchase_amount_jpy = Number(form.purchase_amount_jpy) || 0;
+    patch.shipping_jpy = Number(form.shipping_jpy) || 0;
+    patch.fee_jpy = Number(form.fee_jpy) || 0;
+    patch.domestic_shipping_jpy = Number(form.domestic_shipping_jpy) || 0;
+  } else if (sourceChanged) {
+    patch.purchase_amount_jpy = 0;
+    patch.shipping_jpy = 0;
+    patch.fee_jpy = 0;
+    patch.domestic_shipping_jpy = 0;
+  }
   const { error } = await supabase.from("products").update(patch).eq("id", form.id);
   if (error) return { ok: false, message: "更新に失敗しました" };
 
-  if (costsChanged) {
+  if (newSource === COST_SOURCE_WALLET && needsWalletRework) {
     const consumeRes = await consumeAndFinalizeProductCost(form.id, {
       purchaseCny: form.purchase_amount_cny,
       shippingCny: form.shipping_cny,
@@ -4423,7 +4647,7 @@ async function updateProductCore(form, original, options) {
    ・ウォレットは updateProductCore 経由で1点ずつ取り消し→再消化する(並列にすると残高が壊れる)。 */
 /* updateProductCore が書き込む列を漏れなく含んだ、商品編集用のSELECT列。
    1列でも欠けると、その値が undefined としてDBに書き戻され、既存の値が消える(2.36参照)。 */
-const PRODUCT_EDIT_SELECT = "id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy";
+const PRODUCT_EDIT_SELECT = "id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny";
 
 async function reallocateBatchAmounts(batch) {
   const { data: rows, error } = await supabase
@@ -4589,7 +4813,7 @@ function ProductsPage() {
     setCodeSearching(true);
     const { data, error } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
       .ilike("product_code", `%${code}%`);
     setCodeSearching(false);
     setCodeSearchResult(error ? [] : (data || []));
@@ -4600,7 +4824,7 @@ function ProductsPage() {
     setError(null);
     const [productsRes, batchesRes, consumptionsRes, batchLinkRes] = await Promise.all([
       supabase.from("products")
-        .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+        .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
         .eq("created_via_sale", false) // ★2026-08-04実装: 販売登録からの新規仕入はサンプル・在庫の一覧から除外(2.30参照)
         .order("created_at", { ascending: false }),
       supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
@@ -4668,11 +4892,15 @@ function ProductsPage() {
   // 新規商品1点分の登録処理(ウォレット残高事前チェック→insert→FIFO消化確定)を共通化。
   // 単品の新規登録・カラーバリエーション一括登録(2.22参照)の両方から呼び出す。
   const insertNewProductCore = async (item) => {
+    // ★2026-08-23: 直接支払い(ウォレットを使わない仕入れ)はウォレット残高を一切見ない(2.46参照)
+    const source = costSourceOf(item);
     const totalNeeded = (item.purchase_amount_cny || 0) + (item.shipping_cny || 0) + (item.fee_cny || 0) + (item.domestic_shipping_cny || 0);
-    const balance = await getWalletRemainingTotal();
-    if (!balance.ok) return { ok: false, message: "ウォレット残高の確認に失敗しました" };
-    if (balance.total < totalNeeded) {
-      return { ok: false, message: `ウォレット残高が不足しています(必要額: ${totalNeeded.toFixed(2)} CNY / 残高: ${balance.total.toFixed(2)} CNY)。先にチャージを追加してください。` };
+    if (source === COST_SOURCE_WALLET) {
+      const balance = await getWalletRemainingTotal();
+      if (!balance.ok) return { ok: false, message: "ウォレット残高の確認に失敗しました" };
+      if (balance.total < totalNeeded) {
+        return { ok: false, message: `ウォレット残高が不足しています(必要額: ${totalNeeded.toFixed(2)} CNY / 残高: ${balance.total.toFixed(2)} CNY)。先にチャージを追加してください。` };
+      }
     }
 
     const { data: inserted, error } = await supabase.from("products").insert({
@@ -4693,9 +4921,19 @@ function ProductsPage() {
       shipping_cny: item.shipping_cny,
       fee_cny: item.fee_cny,
       domestic_shipping_cny: item.domestic_shipping_cny || 0,
+      cost_source: source,
+      estimated_purchase_cny: item.estimated_purchase_cny != null ? item.estimated_purchase_cny : null,
+      // 直接支払いは入力されたJPYをそのまま確定額として保存する(ウォレット消化なし)
+      ...(source !== COST_SOURCE_WALLET ? {
+        purchase_amount_jpy: Number(item.purchase_amount_jpy) || 0,
+        shipping_jpy: Number(item.shipping_jpy) || 0,
+        fee_jpy: Number(item.fee_jpy) || 0,
+        domestic_shipping_jpy: Number(item.domestic_shipping_jpy) || 0,
+      } : {}),
     }).select("id").single();
 
     if (error || !inserted) return { ok: false, message: `${item.product_name}: 登録に失敗しました` };
+    if (source !== COST_SOURCE_WALLET) return { ok: true };
 
     const consumeRes = await consumeAndFinalize(inserted.id, {
       purchaseCny: item.purchase_amount_cny,
@@ -5069,7 +5307,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-22k";
+const BUILD_VERSION = "2026-08-23e";
 
 const ISSUER_INFO_DEFAULT = "〒012-0055\n秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
@@ -5269,6 +5507,12 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
   const [purchaseDate, setPurchaseDate] = useState(todayISO());
   const [batchId, setBatchId] = useState("");
   const [purchaseAmountCny, setPurchaseAmountCny] = useState("");
+  /* ★2026-08-23: 支払い経路(2.46参照)。直接支払いのときはウォレットを使わずJPYを手入力する。 */
+  const [costSource, setCostSource] = useState(COST_SOURCE_WALLET);
+  const [purchaseAmountJpy, setPurchaseAmountJpy] = useState("");
+  const [shippingJpy, setShippingJpy] = useState("");
+  const [feeJpy, setFeeJpy] = useState("");
+  const [domesticShippingJpy, setDomesticShippingJpy] = useState("");
   const [shippingCny, setShippingCny] = useState("");
   const [feeCny, setFeeCny] = useState("");
   // ★2026-08-17実装: 中国国内送料(1点ごと。ロットの按分対象外)。2.36参照
@@ -5363,12 +5607,15 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
     setSaving(true);
 
     // 事前にウォレット残高を確認(部分消化を避けるため、ProductsPageの新規仕入登録と同じ方針)
-    const balance = await getWalletRemainingTotal();
-    if (!balance.ok) { setError("ウォレット残高の確認に失敗しました"); setSaving(false); return; }
-    if (balance.total < totalNeeded) {
-      setError(`ウォレット残高が不足しています(必要額: ${totalNeeded.toFixed(2)} CNY / 残高: ${balance.total.toFixed(2)} CNY)。先にチャージを追加してください。`);
-      setSaving(false);
-      return;
+    // ★2026-08-23: 直接支払いはウォレットを使わないため、この確認自体を行わない(2.46参照)
+    if (costSource === COST_SOURCE_WALLET) {
+      const balance = await getWalletRemainingTotal();
+      if (!balance.ok) { setError("ウォレット残高の確認に失敗しました"); setSaving(false); return; }
+      if (balance.total < totalNeeded) {
+        setError(`ウォレット残高が不足しています(必要額: ${totalNeeded.toFixed(2)} CNY / 残高: ${balance.total.toFixed(2)} CNY)。先にチャージを追加してください。`);
+        setSaving(false);
+        return;
+      }
     }
 
     const { data: inserted, error: insertErr } = await supabase.from("products").insert({
@@ -5392,17 +5639,27 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
       shipping_cny: shippingCnyVal,
       fee_cny: feeCnyVal,
       domestic_shipping_cny: domesticShippingCnyVal,
+      cost_source: costSource,
+      // 直接支払いは入力されたJPYをそのまま確定原価として保存する(ウォレット消化なし)
+      ...(costSource === COST_SOURCE_DIRECT ? {
+        purchase_amount_jpy: parseFloat(purchaseAmountJpy) || 0,
+        shipping_jpy: parseFloat(shippingJpy) || 0,
+        fee_jpy: parseFloat(feeJpy) || 0,
+        domestic_shipping_jpy: parseFloat(domesticShippingJpy) || 0,
+      } : {}),
     }).select("id").single();
 
     if (insertErr || !inserted) { setError("商品の登録に失敗しました"); setSaving(false); return; }
 
-    const consumeRes = await consumeAndFinalizeProductCost(inserted.id, {
-      purchaseCny, shippingCny: shippingCnyVal, feeCny: feeCnyVal, domesticShippingCny: domesticShippingCnyVal,
-    });
-    if (!consumeRes.ok) {
-      setSaving(false);
-      alert(`商品は登録されましたが、ウォレット消化処理でエラーが発生しました: ${consumeRes.message}\nチャージ台帳・商品情報をご確認ください。`);
-      // 登録済み商品情報を渡して明細追加までは行う(在庫としては存在するため)
+    if (costSource === COST_SOURCE_WALLET) {
+      const consumeRes = await consumeAndFinalizeProductCost(inserted.id, {
+        purchaseCny, shippingCny: shippingCnyVal, feeCny: feeCnyVal, domesticShippingCny: domesticShippingCnyVal,
+      });
+      if (!consumeRes.ok) {
+        setSaving(false);
+        alert(`商品は登録されましたが、ウォレット消化処理でエラーが発生しました: ${consumeRes.message}\nチャージ台帳・商品情報をご確認ください。`);
+        // 登録済み商品情報を渡して明細追加までは行う(在庫としては存在するため)
+      }
     }
 
     // 確定後の商品情報(原価JPY確定額込み)を取得し、そのまま販売明細へ追加する
@@ -5553,6 +5810,20 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
           </div>
         </div>
 
+        {/* ★2026-08-23実装: 支払い経路(2.46参照) */}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払い経路</label>
+          <select value={costSource} onChange={(e) => setCostSource(e.target.value)}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+            {[COST_SOURCE_WALLET, COST_SOURCE_DIRECT].map((o) => <option key={o} value={o}>{COST_SOURCE_LABELS[o] || o}</option>)}
+          </select>
+          <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+            {costSource === COST_SOURCE_DIRECT
+              ? "ウォレットは使いません。CNYは記録用、JPYが実際に支払った金額として原価になります。"
+              : "いつもの転送業者のチャージ残高(ウォレット)からFIFOで自動消化します。"}
+          </p>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品代(CNY)</label>
@@ -5576,6 +5847,36 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
               className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
           </div>
         </div>
+
+        {costSource === COST_SOURCE_DIRECT && (
+          <div className="pt-1" style={{ borderTop: "1px solid var(--mz-border)" }}>
+            <p className="text-xs mt-2 mb-2" style={{ color: "var(--mz-ink-muted)" }}>
+              実際に支払った金額(JPY)。ここに入れた金額がそのまま原価になり、<b>仕入れ日の月の経費</b>として月次損益に計上されます。
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品代(JPY)</label>
+                <input type="number" min="0" step="any" value={purchaseAmountJpy} onChange={(e) => setPurchaseAmountJpy(e.target.value)}
+                  className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+              </div>
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>中国国内送料(JPY)</label>
+                <input type="number" min="0" step="any" value={domesticShippingJpy} onChange={(e) => setDomesticShippingJpy(e.target.value)}
+                  className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+              </div>
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>国際送料(JPY)</label>
+                <input type="number" min="0" step="any" value={shippingJpy} onChange={(e) => setShippingJpy(e.target.value)}
+                  className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+              </div>
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>その他手数料(JPY)</label>
+                <input type="number" min="0" step="any" value={feeJpy} onChange={(e) => setFeeJpy(e.target.value)}
+                  className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+              </div>
+            </div>
+          </div>
+        )}
 
         <div>
           <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>参考販売価格(JPY・任意)</label>
@@ -5840,7 +6141,7 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
     setCostEditLoading(true);
     const { data, error: fetchErr } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
       .eq("id", productId)
       .single();
     setCostEditLoading(false);
@@ -7518,7 +7819,7 @@ function BatchLinkTab({ batches, onCreateBatch }) {
     setLoadError(null);
     let query = supabase
       .from("products")
-      .select("id,type,status,sample_purpose,created_via_sale,return_source_product_id,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+      .select("id,type,status,sample_purpose,created_via_sale,return_source_product_id,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
       // ★返品在庫(return_source_product_idあり)は常に除外する。返品登録はコスト0円・ウォレット消化なしで
       //   作られる行(1.10参照)で、batch_idが永久にnullのままのため、除外しないとこの一覧に residual として
       //   出続け、誤って選択するとウォレットから送料を二重に消化してしまう。
@@ -7756,7 +8057,7 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
     setCodeSearching(true);
     const { data, error } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
       .ilike("product_code", `%${code}%`);
     setCodeSearching(false);
     setCodeSearchResult(error ? [] : (data || []));
@@ -7765,7 +8066,7 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
   const loadAll = useCallback(async () => {
     const { data: productsData, error } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
       .eq("created_via_sale", true)
       .eq("status", "未販売")
       .order("created_at", { ascending: false });
@@ -10442,13 +10743,19 @@ function ContractorInvoicesPage() {
     const rangeEnd = nextMonthFirstDay(monthsAsc[monthsAsc.length - 1]);
 
     const ROW_CAP = 1000; // Supabase(PostgREST)のMax rows既定値
-    const [salesRes, expenseRes] = await Promise.all([
+    /* ★2026-08-23変更: 仕入原価は products.purchase_date 基準に変更(2.45参照)。
+       **計算式・期間の切り方は handleCalculateMonthlyProfit と完全に一致させること。**
+       片方だけ直すと、実際はズレていないのに毎回「古い」と警告が出続ける。 */
+    const [salesRes, expenseRes, productRes] = await Promise.all([
       supabase.from("sales")
-        .select("transaction_date,total_amount_jpy,sale_items(product_id,products(purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
+        .select("transaction_date,total_amount_jpy")
         .gte("transaction_date", rangeStart).lt("transaction_date", rangeEnd),
       supabase.from("expenses")
         .select("amount_incl_tax,payment_date")
         .gte("payment_date", rangeStart).lt("payment_date", rangeEnd),
+      supabase.from("products")
+        .select("purchase_date,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+        .gte("purchase_date", rangeStart).lt("purchase_date", rangeEnd),
     ]);
     if (!isCurrent()) return;
 
@@ -10457,8 +10764,9 @@ function ContractorInvoicesPage() {
        黙って警告を消すと、古い粗利のまま報酬を発行してしまう。
        行数上限に達している場合も、取得漏れのぶんだけ必ずズレて見えるので同じ扱いにする
        (この状態で警告を出すと、再集計しても消えない警告が延々と出続けてしまう)。 */
-    const truncated = (salesRes.data || []).length >= ROW_CAP || (expenseRes.data || []).length >= ROW_CAP;
-    if (salesRes.error || expenseRes.error || truncated) {
+    const truncated = (salesRes.data || []).length >= ROW_CAP || (expenseRes.data || []).length >= ROW_CAP
+      || (productRes.data || []).length >= ROW_CAP;
+    if (salesRes.error || expenseRes.error || productRes.error || truncated) {
       setStaleCheckError(true); // 直前の判定結果(staleProfits)はあえて消さずに残す
       return;
     }
@@ -10466,13 +10774,10 @@ function ContractorInvoicesPage() {
     const byMonth = {};
     const bucket = (m) => (byMonth[m] = byMonth[m] || { sales: 0, cost: 0, expenses: 0 });
     (salesRes.data || []).forEach((sale) => {
-      const b = bucket(String(sale.transaction_date).slice(0, 7));
-      b.sales += Number(sale.total_amount_jpy) || 0;
-      (sale.sale_items || []).forEach((it) => {
-        const pr = it.products || {};
-        b.cost += (Number(pr.purchase_amount_jpy) || 0) + (Number(pr.shipping_jpy) || 0)
-          + (Number(pr.fee_jpy) || 0) + (Number(pr.domestic_shipping_jpy) || 0);
-      });
+      bucket(String(sale.transaction_date).slice(0, 7)).sales += Number(sale.total_amount_jpy) || 0;
+    });
+    (productRes.data || []).forEach((pr) => {
+      bucket(String(pr.purchase_date).slice(0, 7)).cost += productCostJpy(pr);
     });
     (expenseRes.data || []).forEach((e) => {
       bucket(String(e.payment_date).slice(0, 7)).expenses += Number(e.amount_incl_tax) || 0;
@@ -10609,24 +10914,29 @@ function ContractorInvoicesPage() {
       const monthStart = `${targetMonth}-01`;
       const monthEndExclusive = nextMonthFirstDay(targetMonth);
 
-      // 売上合計(税込)と、その月に売れた商品の原価合計(sale_items→productsの確定JPY原価)
+      // 売上合計(税込)
       const { data: salesData, error: salesError } = await supabase
         .from("sales")
-        .select("id,transaction_date,total_amount_jpy,sale_items(product_id,products(purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
+        .select("id,transaction_date,total_amount_jpy")
         .gte("transaction_date", monthStart)
         .lt("transaction_date", monthEndExclusive);
       if (salesError) { setProfitError("売上データの取得に失敗しました"); setCalculating(false); return; }
 
-      let totalSales = 0;
-      let totalPurchaseCost = 0;
-      (salesData || []).forEach((s) => {
-        totalSales += Number(s.total_amount_jpy) || 0;
-        (s.sale_items || []).forEach((it) => {
-          const p = it.products || {};
-          totalPurchaseCost += (Number(p.purchase_amount_jpy) || 0) + (Number(p.shipping_jpy) || 0) + (Number(p.fee_jpy) || 0)
-            + (Number(p.domestic_shipping_jpy) || 0); // ★2026-08-17: 中国国内送料を算入(2.36参照)
-        });
-      });
+      const totalSales = (salesData || []).reduce((sum, x) => sum + (Number(x.total_amount_jpy) || 0), 0);
+
+      /* ★2026-08-23変更: 仕入原価は「その月に**仕入れた**商品の原価合計」(products.purchase_date基準)。
+         従来は「その月に**売れた**商品の原価」だった(売上との対応を取る売上原価方式)が、
+         サンプル・在庫を問わず仕入れた月の経費として計上する運用へ変更した(2.45参照)。
+         ・purchase_dateが未入力の商品は、仕入れがまだ確定していないためどの月にも計上しない。
+         ・売れたかどうかは一切見ない(未販売の在庫・サンプルも仕入月に計上される)。 */
+      const { data: purchasedData, error: purchasedError } = await supabase
+        .from("products")
+        .select("id,purchase_date,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+        .gte("purchase_date", monthStart)
+        .lt("purchase_date", monthEndExclusive);
+      if (purchasedError) { setProfitError("仕入れ商品の取得に失敗しました"); setCalculating(false); return; }
+
+      const totalPurchaseCost = (purchasedData || []).reduce((sum, p) => sum + productCostJpy(p), 0);
 
       // 一般経費合計
       const { data: expenseData, error: expenseError } = await supabase
@@ -11032,7 +11342,7 @@ function ContractorInvoicesPage() {
               {calculating ? "集計中..." : "この月を集計する"}
             </button>
             <p className="text-xs w-full" style={{ color: "var(--mz-ink-muted)" }}>
-              売上合計(税込)・その月に売れた商品の仕入原価合計・一般経費合計から粗利益を自動算出します。既にこの対象月のデータがあれば上書き(再集計)されます。
+              売上合計(税込)・その月に仕入れた商品の原価合計(仕入れ日基準・売れたかどうかは問いません)・一般経費合計から粗利益を自動算出します。既にこの対象月のデータがあれば上書き(再集計)されます。
             </p>
           </div>
 
@@ -11289,6 +11599,14 @@ function PublicCatalogItemCard({ item }) {
   // ★2026-07-12実装: 処分用サンプルは「その1点しかない現品」であり、サイズ展開(選べる範囲)を
   //   見せると誤解を招くため、登録された実サイズのみを表示し、「現品限り」の注記を添える。
   const isDisposal = item.sample_purpose === "処分用";
+  /* ★2026-08-23実装: まだ仕入れていない、カタログ掲載のためだけに登録した商品(2.47参照)。
+     現物サンプルが手元にないことをホストに伝えるため「サンプル品なし(お取り寄せ)」と明示する。
+     ・実サイズ(size)は未入力なので「サンプルサイズ」の行は自然に出ず、「サイズ展開」だけが出る。
+     ・処分用とは同時に成立しないが、万一両方に該当した場合は「現品限り」を優先する
+       (現品限りの方がホストにとって影響が大きい情報のため)。
+     ・cost_sourceはget_public_catalog RPCの戻り値に追加が必要(2.48参照)。RPC未更新の間は
+       undefinedになりバッジが出ないだけで、他の表示は壊れない。 */
+  const isOrderOnly = !isDisposal && item.cost_source === COST_SOURCE_NONE;
 
   return (
     <div
@@ -11307,6 +11625,14 @@ function PublicCatalogItemCard({ item }) {
             style={{ background: "#3a2a1f", color: "#d6a98f", border: "1px solid rgba(0,0,0,0.3)" }}
           >
             現品限り
+          </span>
+        )}
+        {isOrderOnly && (
+          <span
+            className="absolute top-2 left-2 text-[10px] px-2 py-0.5 rounded-full"
+            style={{ background: "#22303a", color: "#9fc4d6", border: "1px solid rgba(0,0,0,0.3)" }}
+          >
+            サンプル品なし(お取り寄せ)
           </span>
         )}
       </div>
