@@ -5307,7 +5307,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-23e";
+const BUILD_VERSION = "2026-08-23f";
 
 const ISSUER_INFO_DEFAULT = "〒012-0055\n秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
@@ -11595,7 +11595,7 @@ function AppShell({ staffName, onSwitchStaff, onSignOut }) {
    get_public_catalog RPC(SECURITY DEFINER)経由でのみデータ取得し、
    catalogs/products テーブルへの直接アクセスは行わない。
    ============================================================ */
-function PublicCatalogItemCard({ item }) {
+function PublicCatalogItemCard({ item, onZoom }) {
   // ★2026-07-12実装: 処分用サンプルは「その1点しかない現品」であり、サイズ展開(選べる範囲)を
   //   見せると誤解を招くため、登録された実サイズのみを表示し、「現品限り」の注記を添える。
   const isDisposal = item.sample_purpose === "処分用";
@@ -11613,7 +11613,14 @@ function PublicCatalogItemCard({ item }) {
       className="rounded-xl overflow-hidden flex flex-col"
       style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
     >
-      <div className="relative aspect-square w-full flex items-center justify-center" style={{ background: "var(--mz-surface-hover)" }}>
+      {/* ★2026-08-23実装: 画像タップで拡大表示(2.49参照)。画像が無い商品は押しても何も起きない */}
+      <div
+        className="relative aspect-square w-full flex items-center justify-center"
+        style={{ background: "var(--mz-surface-hover)", cursor: item.product_image_url ? "zoom-in" : "default" }}
+        onClick={() => { if (item.product_image_url && onZoom) onZoom(item); }}
+        role={item.product_image_url ? "button" : undefined}
+        aria-label={item.product_image_url ? `${item.product_name || "商品"}の画像を拡大` : undefined}
+      >
         {item.product_image_url ? (
           <img src={item.product_image_url} alt={item.product_name || ""} className="w-full h-full object-cover" />
         ) : (
@@ -11666,10 +11673,87 @@ function PublicCatalogItemCard({ item }) {
   );
 }
 
+/* ★2026-08-23実装: 公開カタログの画像拡大表示(2.49参照)。
+   ・ホストはスマホで見るため、画面いっぱいに表示して指で閉じられることを優先する。
+     背景タップ・×ボタン・Escキーのいずれでも閉じられる。
+   ・画像は object-contain。カード側は object-cover でトリミングされているため、
+     拡大時は**切れていない全体**が見えるようにする(柄・丈の確認が目的のため)。
+   ・カタログは複数点を続けて見るものなので、左右の矢印と←→キーで隣の商品へ移動できる。
+     画像が無い商品は送り先に含めない(押しても真っ白になるだけのため)。 */
+function PublicCatalogLightbox({ items, index, onClose, onMove }) {
+  const item = items[index];
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+      else if (e.key === "ArrowRight") onMove(1);
+      else if (e.key === "ArrowLeft") onMove(-1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, onMove]);
+
+  if (!item) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex flex-col"
+      style={{ background: "rgba(0,0,0,0.92)" }}
+      onClick={onClose}
+    >
+      <div className="flex items-center justify-between p-3 shrink-0">
+        <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+          {index + 1} / {items.length}
+        </span>
+        <button
+          onClick={onClose}
+          className="text-sm px-3 py-1.5 rounded-lg"
+          style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+        >
+          閉じる
+        </button>
+      </div>
+
+      <div className="flex-1 min-h-0 flex items-center justify-center px-2">
+        <img
+          src={item.product_image_url}
+          alt={item.product_name || ""}
+          className="max-w-full max-h-full object-contain"
+          onClick={(e) => e.stopPropagation()}
+        />
+      </div>
+
+      <div className="shrink-0 p-4 text-center space-y-1" onClick={(e) => e.stopPropagation()}>
+        <p className="font-display text-base">{item.product_name || "(名称未設定)"}</p>
+        <div className="flex items-center justify-center gap-3 text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+          {item.product_code && <span>No.{item.product_code}</span>}
+          {item.selling_price_jpy != null && (
+            <span style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(item.selling_price_jpy)}</span>
+          )}
+        </div>
+        {item.size_options && (
+          <p className="text-xs break-words" style={{ color: "var(--mz-ink-muted)" }}>サイズ展開: {item.size_options}</p>
+        )}
+        {items.length > 1 && (
+          <div className="flex items-center justify-center gap-3 pt-2">
+            <button onClick={() => onMove(-1)} className="text-sm px-4 py-2 rounded-lg"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>← 前</button>
+            <button onClick={() => onMove(1)} className="text-sm px-4 py-2 rounded-lg"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>次 →</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PublicCatalogPage({ token }) {
   const [items, setItems] = useState(null); // null = 読み込み中
   const [catalogName, setCatalogName] = useState("");
   const [notFound, setNotFound] = useState(false);
+  // ★2026-08-23: 画像拡大表示(2.49参照)。画像がある商品だけを送り対象にする
+  const [zoomIndex, setZoomIndex] = useState(null);
+  const zoomableItems = useMemo(() => (items || []).filter((x) => x.product_image_url), [items]);
 
   useEffect(() => {
     let cancelled = false;
@@ -11707,10 +11791,32 @@ function PublicCatalogPage({ token }) {
         )}
         {items !== null && items.length > 0 && (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-            {items.map((item) => <PublicCatalogItemCard key={item.product_id} item={item} />)}
+            {items.map((item) => (
+              <PublicCatalogItemCard
+                key={item.product_id}
+                item={item}
+                onZoom={(it) => {
+                  const idx = zoomableItems.findIndex((x) => x.product_id === it.product_id);
+                  if (idx >= 0) setZoomIndex(idx);
+                }}
+              />
+            ))}
           </div>
         )}
       </main>
+
+      {zoomIndex !== null && zoomableItems.length > 0 && (
+        <PublicCatalogLightbox
+          items={zoomableItems}
+          index={zoomIndex}
+          onClose={() => setZoomIndex(null)}
+          onMove={(dir) => setZoomIndex((prev) => {
+            // 端まで来たら反対側へ回り込む(カタログを一周見て回れるように)
+            const n = zoomableItems.length;
+            return ((prev + dir) % n + n) % n;
+          })}
+        />
+      )}
     </div>
   );
 }
