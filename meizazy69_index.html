@@ -5307,7 +5307,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24c";
+const BUILD_VERSION = "2026-08-24e";
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
@@ -9978,8 +9978,13 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
       const monthStart = `${month}-01`;
       const monthEnd = nextMonthFirstDay(month);
       const [salesRes, productRes, expenseRes] = await Promise.all([
+        /* ★2026-08-24: 売れた商品の原価が「どの月に計上されているか」を売上の行ごとに出すため、
+           明細と商品の仕入れ日・原価まで取得する(2.50参照)。
+           仕入原価は仕入れ月に計上する方式(2.45)のため、**前月以前に仕入れた在庫・サンプルが
+           当月に売れても、その原価は当月の仕入原価に入らない**。これが見えないと
+           「在庫が売れた分の原価はどこへ行ったのか」が分からないため、明示する。 */
         supabase.from("sales")
-          .select("id,transaction_date,total_amount_jpy,host_clubs(name)")
+          .select("id,transaction_date,total_amount_jpy,host_clubs(name),sale_items(product_id,products(product_code,product_name,purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
           .gte("transaction_date", monthStart).lt("transaction_date", monthEnd)
           .order("transaction_date"),
         supabase.from("products")
@@ -9996,10 +10001,27 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
         return;
       }
       const all = productRes.data || [];
+      /* ★2026-08-24: 当月販売分の原価(2.45参照)。
+         仕入れ時に費用化していない商品が当月に売れた分を、売れた月の原価として計上する。
+         同じ商品が複数の明細に出ることは無い(1商品=1点)が、念のためidで重複排除する。 */
+      const soldSeen = {};
+      const soldUncounted = [];
+      (salesRes.data || []).forEach((sale) => {
+        (sale.sale_items || []).forEach((si) => {
+          const pr = si.products;
+          if (!pr || isPurchaseCostCountable(pr)) return;
+          const key = si.product_id;
+          if (soldSeen[key]) return;
+          soldSeen[key] = true;
+          soldUncounted.push({ ...pr, id: key, _saleDate: sale.transaction_date });
+        });
+      });
       setData({
         sales: salesRes.data || [],
         counted: all.filter(isPurchaseCostCountable),
-        excluded: all.filter((x) => !isPurchaseCostCountable(x)),
+        soldUncounted,
+        // 当月仕入だが計上対象外、かつ当月に売れてもいない(=まだどの月にも計上されていない)分
+        excluded: all.filter((x) => !isPurchaseCostCountable(x) && !soldSeen[x.id]),
         expenses: expenseRes.data || [],
       });
     })();
@@ -10009,7 +10031,9 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
   const rowStyle = { borderBottom: "1px solid var(--mz-border)" };
 
   const liveSales = data ? sum(data.sales, (x) => x.total_amount_jpy) : 0;
-  const liveCost = data ? data.counted.reduce((a, x) => a + productCostJpy(x), 0) : 0;
+  const liveCostPurchased = data ? data.counted.reduce((a, x) => a + productCostJpy(x), 0) : 0;
+  const liveCostSold = data ? data.soldUncounted.reduce((a, x) => a + productCostJpy(x), 0) : 0;
+  const liveCost = liveCostPurchased + liveCostSold;
   const liveExpenses = data ? sum(data.expenses, (x) => x.amount_incl_tax) : 0;
   const liveGross = liveSales - liveCost - liveExpenses;
 
@@ -10018,8 +10042,12 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
   const savedExpenses = Number((saved || {}).total_general_expenses_jpy) || 0;
   const savedGross = Number((saved || {}).gross_profit_jpy) || 0;
 
+  /* ★2026-08-24修正: 比較は必ず円単位(四捨五入後)で行う。
+     原価の按分は小数点4桁まで保持しているため(1.9参照)、小数まで含めた厳密一致で比べると、
+     実際は同じ金額なのに「保存値」が出続ける(実際に¥99,304同士で誤表示された)。
+     画面表示も円単位なので、表示と同じ粒度で比べるのが正しい。 */
   const Diff = ({ live, savedValue }) => (
-    live === savedValue
+    Math.round(live) === Math.round(savedValue)
       ? <span style={{ color: "var(--mz-ink-muted)" }}>一致</span>
       : <span style={{ color: "#f2b8bd" }}>保存値 {fmtJPY(savedValue)}</span>
   );
@@ -10054,20 +10082,42 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
 
             <div>
               <p className="text-sm mb-1.5">売上({data.sales.length}件) {fmtJPY(liveSales)}</p>
+              <p className="text-xs mb-1" style={{ color: "var(--mz-ink-muted)" }}>
+                各行の「原価」は売れた商品の原価。<span style={{ color: "#d6a98f" }}>仕入月に計上済</span>と付いている分は、
+                仕入れた月に既に経費計上しているため、この月の原価には入っていません(二重計上を避けるため)。
+                それ以外は上の「当月販売分」としてこの月の原価に入っています。
+              </p>
               {data.sales.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
                 <div className="text-xs">
-                  {data.sales.map((x) => (
-                    <div key={x.id} className="flex justify-between py-1 gap-3" style={rowStyle}>
-                      <span className="min-w-0 truncate">{x.transaction_date} {(x.host_clubs || {}).name || "-"}</span>
-                      <span className="shrink-0">{fmtJPY(x.total_amount_jpy)}</span>
-                    </div>
-                  ))}
+                  {data.sales.map((x) => {
+                    const its = (x.sale_items || []).map((si) => si.products).filter(Boolean);
+                    const costAll = its.reduce((a2, pr) => a2 + productCostJpy(pr), 0);
+                    // この月の仕入原価として計上されている分だけを抜き出す(集計と同じ判定)
+                    // 仕入れ時に既に費用化している商品は、この月の原価には入らない(二重計上しない)
+                    const outside = its
+                      .filter(isPurchaseCostCountable)
+                      .reduce((a2, pr) => a2 + productCostJpy(pr), 0);
+                    return (
+                      <div key={x.id} className="py-1" style={rowStyle}>
+                        <div className="flex justify-between gap-3">
+                          <span className="min-w-0 truncate">{x.transaction_date} {(x.host_clubs || {}).name || "-"}</span>
+                          <span className="shrink-0">{fmtJPY(x.total_amount_jpy)}</span>
+                        </div>
+                        <div style={{ color: "var(--mz-ink-muted)" }}>
+                          {its.length}点 ・ 原価 {fmtJPY(costAll)}
+                          {outside > 0 && (
+                            <span style={{ color: "#d6a98f" }}>(うち仕入月に計上済 {fmtJPY(outside)})</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
 
             <div>
-              <p className="text-sm mb-1.5">仕入原価・計上分({data.counted.length}点) {fmtJPY(liveCost)}</p>
+              <p className="text-sm mb-1.5">仕入原価・当月仕入分({data.counted.length}点) {fmtJPY(liveCostPurchased)}</p>
               {data.counted.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
                 <div className="text-xs">
                   {data.counted.map((x) => (
@@ -10084,11 +10134,33 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
             </div>
 
             <div>
+              <p className="text-sm mb-1.5">仕入原価・当月販売分({data.soldUncounted.length}点) {fmtJPY(liveCostSold)}</p>
+              <p className="text-xs mb-1" style={{ color: "var(--mz-ink-muted)" }}>
+                計上開始日より前に仕入れたため<b>仕入れ時に経費計上していない商品</b>が、この月に売れた分です。
+                売上が立つこの月の原価として引きます(仕入れ時に計上済みの商品はここには出ません＝二重計上しません)。
+              </p>
+              {data.soldUncounted.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
+                <div className="text-xs">
+                  {data.soldUncounted.map((x) => (
+                    <div key={x.id} className="flex justify-between py-1 gap-3" style={rowStyle}>
+                      <span className="min-w-0 truncate">
+                        販売 {x._saleDate} ・ 仕入 {x.purchase_date || "(日付なし)"}
+                        [{x.created_via_sale ? "受注" : "サンプル/在庫"}] {x.product_name || ""}
+                      </span>
+                      <span className="shrink-0">{fmtJPY(productCostJpy(x))}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
               <p className="text-sm mb-1.5" style={{ color: "#d6a98f" }}>
-                仕入原価・計上対象外({data.excluded.length}点) {fmtJPY(data.excluded.reduce((a, x) => a + productCostJpy(x), 0))}
+                仕入原価・未計上({data.excluded.length}点) {fmtJPY(data.excluded.reduce((a, x) => a + productCostJpy(x), 0))}
               </p>
               <p className="text-xs mb-1" style={{ color: "var(--mz-ink-muted)" }}>
-                この月に仕入れたが、計上開始日(受注: {PURCHASE_COST_BASIS_FROM_ORDER} / サンプル・在庫: {PURCHASE_COST_BASIS_FROM_SAMPLE})より前のため計上していない分です。
+                この月に仕入れたが計上開始日(受注: {PURCHASE_COST_BASIS_FROM_ORDER} / サンプル・在庫: {PURCHASE_COST_BASIS_FROM_SAMPLE})より前で、
+                まだ売れてもいないため、どの月にも計上されていない分です。売れた時点でその月の原価になります。
               </p>
               {data.excluded.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
                 <div className="text-xs">
@@ -10954,7 +11026,8 @@ function ContractorInvoicesPage() {
        片方だけ直すと、実際はズレていないのに毎回「古い」と警告が出続ける。 */
     const [salesRes, expenseRes, productRes] = await Promise.all([
       supabase.from("sales")
-        .select("transaction_date,total_amount_jpy")
+        // ★2026-08-24: 当月販売分の原価も計上するため、明細と商品まで取得する(2.45参照)
+        .select("transaction_date,total_amount_jpy,sale_items(product_id,products(purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .gte("transaction_date", rangeStart).lt("transaction_date", rangeEnd),
       supabase.from("expenses")
         .select("amount_incl_tax,payment_date")
@@ -10982,7 +11055,13 @@ function ContractorInvoicesPage() {
     const byMonth = {};
     const bucket = (m) => (byMonth[m] = byMonth[m] || { sales: 0, cost: 0, expenses: 0 });
     (salesRes.data || []).forEach((sale) => {
-      bucket(String(sale.transaction_date).slice(0, 7)).sales += Number(sale.total_amount_jpy) || 0;
+      const b = bucket(String(sale.transaction_date).slice(0, 7));
+      b.sales += Number(sale.total_amount_jpy) || 0;
+      // 仕入れ時に費用化していない商品が売れた分は、売れた月の原価として計上する
+      (sale.sale_items || []).forEach((si) => {
+        const pr = si.products;
+        if (pr && !isPurchaseCostCountable(pr)) b.cost += productCostJpy(pr);
+      });
     });
     (productRes.data || []).filter(isPurchaseCostCountable).forEach((pr) => {
       bucket(String(pr.purchase_date).slice(0, 7)).cost += productCostJpy(pr);
@@ -11122,15 +11201,28 @@ function ContractorInvoicesPage() {
       const monthStart = `${targetMonth}-01`;
       const monthEndExclusive = nextMonthFirstDay(targetMonth);
 
-      // 売上合計(税込)
+      /* 売上合計(税込)と、その月に売れた商品の原価。
+         ★2026-08-24: 仕入原価は2本立てで計上する(2.45参照)。
+           ①当月仕入分 … 計上開始日以降に仕入れた商品(仕入れた月に費用化)
+           ②当月販売分 … **計上開始日より前に仕入れて、まだ費用化していない商品**が当月に売れた分
+         ①で費用化済みの商品は②では数えないため、どの商品も必ず1回だけ経費になる(二重計上しない)。 */
       const { data: salesData, error: salesError } = await supabase
         .from("sales")
-        .select("id,transaction_date,total_amount_jpy")
+        .select("id,transaction_date,total_amount_jpy,sale_items(product_id,products(purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .gte("transaction_date", monthStart)
         .lt("transaction_date", monthEndExclusive);
       if (salesError) { setProfitError("売上データの取得に失敗しました"); setCalculating(false); return; }
 
       const totalSales = (salesData || []).reduce((sum, x) => sum + (Number(x.total_amount_jpy) || 0), 0);
+
+      // ②当月販売分: 仕入れ時に費用化していない(=isPurchaseCostCountableがfalseの)商品だけ
+      const soldUncountedCost = (salesData || []).reduce((sum, sale) => (
+        sum + (sale.sale_items || []).reduce((a, si) => {
+          const pr = si.products;
+          if (!pr || isPurchaseCostCountable(pr)) return a; // 仕入れ時に計上済みならここでは数えない
+          return a + productCostJpy(pr);
+        }, 0)
+      ), 0);
 
       /* ★2026-08-23変更: 仕入原価は「その月に**仕入れた**商品の原価合計」(products.purchase_date基準)。
          従来は「その月に**売れた**商品の原価」だった(売上との対応を取る売上原価方式)が、
@@ -11152,6 +11244,7 @@ function ContractorInvoicesPage() {
           .filter(isPurchaseCostCountable)
           .reduce((sum, p) => sum + productCostJpy(p), 0);
       }
+      totalPurchaseCost += soldUncountedCost;
 
       // 一般経費合計
       const { data: expenseData, error: expenseError } = await supabase
