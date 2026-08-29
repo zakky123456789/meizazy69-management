@@ -5307,17 +5307,36 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24a";
+const BUILD_VERSION = "2026-08-24b";
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
    **過去に登録済みの全商品が遡って計上されてしまう**問題が起きた
    (7月に¥322,912、8月の報酬基準額が¥41,719→¥-281,072に転落した)。
-   過去分は別途処理済みのため、この日以降に仕入れた商品だけを計上対象とする。
+   過去分は別途処理済みのため、計上開始日より前の仕入れは対象外とする。
+
+   **商品の種類で開始日が違う**(2026-08-24にユーザーと確認):
+   ・受注商品(created_via_sale = true。販売登録の「新規仕入で追加」由来のオーダー)
+     … 8月分から計上する。
+   ・サンプル・在庫(created_via_sale = false) … 8月28日分から計上する。
+
    ・この日より前のpurchase_dateを持つ商品は、どの月の仕入原価にも入らない。
-   ・**handleCalculateMonthlyProfit と checkStaleMonthlyProfits の両方で必ず同じ値を使うこと**
+   ・**handleCalculateMonthlyProfit と checkStaleMonthlyProfits の両方で必ず同じ値・同じ判定を使うこと**
      (片方だけだと、実際はズレていないのに毎回「古い」と警告が出続ける。2.37参照)。 */
-const PURCHASE_COST_BASIS_FROM = "2026-08-28";
+const PURCHASE_COST_BASIS_FROM_ORDER = "2026-08-01";   // 受注商品(オーダー)
+const PURCHASE_COST_BASIS_FROM_SAMPLE = "2026-08-28";  // サンプル・在庫
+const PURCHASE_COST_BASIS_FROM_MIN =
+  PURCHASE_COST_BASIS_FROM_ORDER < PURCHASE_COST_BASIS_FROM_SAMPLE
+    ? PURCHASE_COST_BASIS_FROM_ORDER : PURCHASE_COST_BASIS_FROM_SAMPLE;
+
+/* その商品を仕入原価として計上してよいか(計上開始日の判定)。
+   種類ごとに開始日が違うため、必ずこの関数を通して判定すること。 */
+function isPurchaseCostCountable(p) {
+  const d = String((p || {}).purchase_date || "");
+  if (!d) return false; // 仕入れ日が未入力の商品はどの月にも計上しない
+  const from = p.created_via_sale ? PURCHASE_COST_BASIS_FROM_ORDER : PURCHASE_COST_BASIS_FROM_SAMPLE;
+  return d >= from;
+}
 
 const ISSUER_INFO_DEFAULT = "〒012-0055\n秋田県湯沢市山田字荻生田26-2\nIMPORT PRIME合同会社\n08016592527";
 
@@ -10764,9 +10783,9 @@ function ContractorInvoicesPage() {
         .select("amount_incl_tax,payment_date")
         .gte("payment_date", rangeStart).lt("payment_date", rangeEnd),
       supabase.from("products")
-        .select("purchase_date,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
-        // 計上開始日より前は集計側でも対象外。handleCalculateMonthlyProfitと必ず同じ条件にすること
-        .gte("purchase_date", rangeStart > PURCHASE_COST_BASIS_FROM ? rangeStart : PURCHASE_COST_BASIS_FROM)
+        .select("purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+        // 計上開始日より前は集計側でも対象外。handleCalculateMonthlyProfitと必ず同じ条件・同じ判定にすること
+        .gte("purchase_date", rangeStart > PURCHASE_COST_BASIS_FROM_MIN ? rangeStart : PURCHASE_COST_BASIS_FROM_MIN)
         .lt("purchase_date", rangeEnd),
     ]);
     if (!isCurrent()) return;
@@ -10788,7 +10807,7 @@ function ContractorInvoicesPage() {
     (salesRes.data || []).forEach((sale) => {
       bucket(String(sale.transaction_date).slice(0, 7)).sales += Number(sale.total_amount_jpy) || 0;
     });
-    (productRes.data || []).forEach((pr) => {
+    (productRes.data || []).filter(isPurchaseCostCountable).forEach((pr) => {
       bucket(String(pr.purchase_date).slice(0, 7)).cost += productCostJpy(pr);
     });
     (expenseRes.data || []).forEach((e) => {
@@ -10941,17 +10960,20 @@ function ContractorInvoicesPage() {
          サンプル・在庫を問わず仕入れた月の経費として計上する運用へ変更した(2.45参照)。
          ・purchase_dateが未入力の商品は、仕入れがまだ確定していないためどの月にも計上しない。
          ・売れたかどうかは一切見ない(未販売の在庫・サンプルも仕入月に計上される)。 */
-      // 計上開始日(PURCHASE_COST_BASIS_FROM)より前の仕入れは対象外。対象月が丸ごと開始日より前なら0円
-      const costStart = monthStart > PURCHASE_COST_BASIS_FROM ? monthStart : PURCHASE_COST_BASIS_FROM;
+      /* 計上開始日より前の仕入れは対象外。開始日は種類(受注/サンプル・在庫)で違うため、
+         取得は「早い方の開始日」で絞り、実際の可否は isPurchaseCostCountable で1件ずつ判定する。 */
+      const costStart = monthStart > PURCHASE_COST_BASIS_FROM_MIN ? monthStart : PURCHASE_COST_BASIS_FROM_MIN;
       let totalPurchaseCost = 0;
       if (costStart < monthEndExclusive) {
         const { data: purchasedData, error: purchasedError } = await supabase
           .from("products")
-          .select("id,purchase_date,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+          .select("id,purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
           .gte("purchase_date", costStart)
           .lt("purchase_date", monthEndExclusive);
         if (purchasedError) { setProfitError("仕入れ商品の取得に失敗しました"); setCalculating(false); return; }
-        totalPurchaseCost = (purchasedData || []).reduce((sum, p) => sum + productCostJpy(p), 0);
+        totalPurchaseCost = (purchasedData || [])
+          .filter(isPurchaseCostCountable)
+          .reduce((sum, p) => sum + productCostJpy(p), 0);
       }
 
       // 一般経費合計
@@ -11361,7 +11383,8 @@ function ContractorInvoicesPage() {
               売上合計(税込)・その月に仕入れた商品の原価合計(仕入れ日基準・売れたかどうかは問いません)・一般経費合計から粗利益を自動算出します。既にこの対象月のデータがあれば上書き(再集計)されます。
               <br />
               <span style={{ color: "#e3c489" }}>
-                仕入原価は{PURCHASE_COST_BASIS_FROM}以降に仕入れた商品のみ計上します(それより前の仕入れは対象外)。
+                仕入原価の計上開始日: 受注商品(オーダー)は{PURCHASE_COST_BASIS_FROM_ORDER}以降、
+                サンプル・在庫は{PURCHASE_COST_BASIS_FROM_SAMPLE}以降に仕入れた分のみ計上します(それより前の仕入れは対象外)。
               </span>
             </p>
           </div>
