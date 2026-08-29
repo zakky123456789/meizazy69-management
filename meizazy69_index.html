@@ -5307,7 +5307,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24b";
+const BUILD_VERSION = "2026-08-24c";
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
@@ -9961,7 +9961,175 @@ function CommissionRateFormModal({ rate, staffList, onClose, onSave }) {
 }
 
 /* ---- 月次損益 一覧表示(対象月の新しい順) ---- */
-function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, recalculating }) {
+/* ★2026-08-24実装: 月次損益の内訳表示(2.50参照)。
+   保存されている集計値がどの明細から積み上がったのかを、画面で確認できるようにする。
+   ・**取得条件は handleCalculateMonthlyProfit と完全に一致させること。** ここだけ条件がずれると、
+     「内訳を足しても合計に合わない」という、原因の分かりにくい不整合になる。
+     特に仕入原価の計上可否は必ず isPurchaseCostCountable を通す(2.45参照)。
+   ・計上対象外の仕入れも「なぜ入っていないか」が分かるよう、別枠で必ず表示する
+     (0円や欠落を黙って隠さない。5章35番・37番と同じ方針)。
+   ・この画面はDBを一切書き換えない(読むだけ)。 */
+function MonthlyProfitDetailModal({ month, saved, onClose }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const monthStart = `${month}-01`;
+      const monthEnd = nextMonthFirstDay(month);
+      const [salesRes, productRes, expenseRes] = await Promise.all([
+        supabase.from("sales")
+          .select("id,transaction_date,total_amount_jpy,host_clubs(name)")
+          .gte("transaction_date", monthStart).lt("transaction_date", monthEnd)
+          .order("transaction_date"),
+        supabase.from("products")
+          .select("id,purchase_date,created_via_sale,product_code,product_name,cost_source,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+          .gte("purchase_date", monthStart).lt("purchase_date", monthEnd)
+          .order("purchase_date"),
+        supabase.from("expenses")
+          .select("id,payment_date,payee,item_name,account_category,payment_method,amount_incl_tax")
+          .gte("payment_date", monthStart).lt("payment_date", monthEnd)
+          .order("payment_date"),
+      ]);
+      if (salesRes.error || productRes.error || expenseRes.error) {
+        setError("内訳の取得に失敗しました");
+        return;
+      }
+      const all = productRes.data || [];
+      setData({
+        sales: salesRes.data || [],
+        counted: all.filter(isPurchaseCostCountable),
+        excluded: all.filter((x) => !isPurchaseCostCountable(x)),
+        expenses: expenseRes.data || [],
+      });
+    })();
+  }, [month]);
+
+  const sum = (arr, f) => arr.reduce((a, x) => a + (Number(f(x)) || 0), 0);
+  const rowStyle = { borderBottom: "1px solid var(--mz-border)" };
+
+  const liveSales = data ? sum(data.sales, (x) => x.total_amount_jpy) : 0;
+  const liveCost = data ? data.counted.reduce((a, x) => a + productCostJpy(x), 0) : 0;
+  const liveExpenses = data ? sum(data.expenses, (x) => x.amount_incl_tax) : 0;
+  const liveGross = liveSales - liveCost - liveExpenses;
+
+  const savedSales = Number((saved || {}).total_sales_jpy) || 0;
+  const savedCost = Number((saved || {}).total_purchase_cost_jpy) || 0;
+  const savedExpenses = Number((saved || {}).total_general_expenses_jpy) || 0;
+  const savedGross = Number((saved || {}).gross_profit_jpy) || 0;
+
+  const Diff = ({ live, savedValue }) => (
+    live === savedValue
+      ? <span style={{ color: "var(--mz-ink-muted)" }}>一致</span>
+      : <span style={{ color: "#f2b8bd" }}>保存値 {fmtJPY(savedValue)}</span>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <div className="w-full max-w-2xl rounded-2xl p-5 my-8 space-y-4" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+        <div className="flex items-center justify-between">
+          <p className="font-display text-lg">{formatMonthLabel(`${month}-01`)}の内訳</p>
+          <button onClick={onClose} className="text-sm px-3 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>閉じる</button>
+        </div>
+
+        {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
+        {!data && !error && <p className="text-sm text-center py-8" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>}
+
+        {data && (
+          <>
+            <div className="rounded-lg p-3 text-xs space-y-1" style={{ border: "1px solid var(--mz-border)" }}>
+              <div className="flex justify-between"><span>売上合計</span><span>{fmtJPY(liveSales)} <Diff live={liveSales} savedValue={savedSales} /></span></div>
+              <div className="flex justify-between"><span>− 仕入原価合計</span><span>{fmtJPY(liveCost)} <Diff live={liveCost} savedValue={savedCost} /></span></div>
+              <div className="flex justify-between"><span>− 一般経費合計</span><span>{fmtJPY(liveExpenses)} <Diff live={liveExpenses} savedValue={savedExpenses} /></span></div>
+              <div className="flex justify-between font-medium pt-1" style={{ borderTop: "1px solid var(--mz-border)" }}>
+                <span>= 粗利益</span>
+                <span style={{ color: liveGross >= 0 ? "var(--mz-gold-soft)" : "#f2b8bd" }}>
+                  {fmtJPY(liveGross)} <Diff live={liveGross} savedValue={savedGross} />
+                </span>
+              </div>
+              <p style={{ color: "var(--mz-ink-muted)" }}>
+                ※「保存値」が出ている行は、集計したあとに実データが変わっています。再集計すると左の数字になります。
+              </p>
+            </div>
+
+            <div>
+              <p className="text-sm mb-1.5">売上({data.sales.length}件) {fmtJPY(liveSales)}</p>
+              {data.sales.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
+                <div className="text-xs">
+                  {data.sales.map((x) => (
+                    <div key={x.id} className="flex justify-between py-1 gap-3" style={rowStyle}>
+                      <span className="min-w-0 truncate">{x.transaction_date} {(x.host_clubs || {}).name || "-"}</span>
+                      <span className="shrink-0">{fmtJPY(x.total_amount_jpy)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <p className="text-sm mb-1.5">仕入原価・計上分({data.counted.length}点) {fmtJPY(liveCost)}</p>
+              {data.counted.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
+                <div className="text-xs">
+                  {data.counted.map((x) => (
+                    <div key={x.id} className="flex justify-between py-1 gap-3" style={rowStyle}>
+                      <span className="min-w-0 truncate">
+                        {x.purchase_date} [{x.created_via_sale ? "受注" : "サンプル/在庫"}]
+                        {x.product_code ? ` No.${x.product_code}` : ""} {x.product_name || ""}
+                      </span>
+                      <span className="shrink-0">{fmtJPY(productCostJpy(x))}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <p className="text-sm mb-1.5" style={{ color: "#d6a98f" }}>
+                仕入原価・計上対象外({data.excluded.length}点) {fmtJPY(data.excluded.reduce((a, x) => a + productCostJpy(x), 0))}
+              </p>
+              <p className="text-xs mb-1" style={{ color: "var(--mz-ink-muted)" }}>
+                この月に仕入れたが、計上開始日(受注: {PURCHASE_COST_BASIS_FROM_ORDER} / サンプル・在庫: {PURCHASE_COST_BASIS_FROM_SAMPLE})より前のため計上していない分です。
+              </p>
+              {data.excluded.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
+                <div className="text-xs">
+                  {data.excluded.map((x) => (
+                    <div key={x.id} className="flex justify-between py-1 gap-3" style={rowStyle}>
+                      <span className="min-w-0 truncate">
+                        {x.purchase_date} [{x.created_via_sale ? "受注" : "サンプル/在庫"}]
+                        {x.product_code ? ` No.${x.product_code}` : ""} {x.product_name || ""}
+                      </span>
+                      <span className="shrink-0">{fmtJPY(productCostJpy(x))}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <p className="text-sm mb-1.5">一般経費({data.expenses.length}件) {fmtJPY(liveExpenses)}</p>
+              {data.expenses.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
+                <div className="text-xs">
+                  {data.expenses.map((x) => (
+                    <div key={x.id} className="flex justify-between py-1 gap-3" style={rowStyle}>
+                      <span className="min-w-0 truncate">
+                        {x.payment_date} {x.payee || "(支払先未入力)"}
+                        {x.item_name ? ` / ${x.item_name}` : ""}
+                        {x.payment_method ? ` [${x.payment_method}]` : ""}
+                      </span>
+                      <span className="shrink-0">{fmtJPY(x.amount_incl_tax)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, recalculating, onShowDetail }) {
   if (profits.length === 0) {
     return <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>月次損益がまだ集計されていません</p>;
   }
@@ -10028,6 +10196,13 @@ function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, rec
                   {recalculating ? "集計中..." : "この月を再集計"}
                 </button>
               )}
+              <button
+                onClick={() => onShowDetail(p)}
+                className="text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+              >
+                内訳を見る
+              </button>
               <button
                 onClick={() => onDelete(p.id)}
                 className="text-xs px-2.5 py-1.5 rounded-lg"
@@ -10683,6 +10858,8 @@ function ContractorInvoicesPage() {
   const [staleProfits, setStaleProfits] = useState({});
   // 通信エラー・取得件数上限などで鮮度を判定できなかった場合(警告が無い=最新、と誤解させないため)
   const [staleCheckError, setStaleCheckError] = useState(false);
+  // ★2026-08-24: 月次損益の内訳表示(2.50参照)
+  const [detailProfit, setDetailProfit] = useState(null);
 
   const [invoices, setInvoices] = useState(null); // null = 読み込み中
   const [invoiceError, setInvoiceError] = useState(null);
@@ -11407,6 +11584,7 @@ function ContractorInvoicesPage() {
               staleProfits={staleProfits}
               recalculating={calculating}
               onRecalculate={(month) => handleCalculateMonthlyProfit(month)}
+              onShowDetail={setDetailProfit}
             />
           )}
         </>
@@ -11520,6 +11698,14 @@ function ContractorInvoicesPage() {
             <ContractorInvoiceList invoices={invoices} onUpdateStatus={handleUpdateInvoiceStatus} onDelete={handleDeleteInvoice} onViewInvoice={setViewInvoice} />
           )}
         </>
+      )}
+
+      {detailProfit && (
+        <MonthlyProfitDetailModal
+          month={String(detailProfit.target_month).slice(0, 7)}
+          saved={detailProfit}
+          onClose={() => setDetailProfit(null)}
+        />
       )}
 
       {profileStaff && (
