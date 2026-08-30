@@ -4854,12 +4854,31 @@ function ProductsPage() {
 
   // ★2026-07-10実装: 販売登録画面の「展示用サンプルが売れました。再仕入れしますか？」に
   //   「はい」と回答した場合、その商品情報を事前入力した状態で新規登録モーダルを開く。
+  /* ★2026-08-24: 「再仕入れ検討」から来た場合は、その販売明細のidも受け取っておく。
+     登録が完了した時点で reorder_decided=true にし、キャンセルしたら何もしない(2.31参照)。 */
+  const [reorderSaleItemId, setReorderSaleItemId] = useState(null);
   useEffect(() => {
     if (pendingProductPrefill) {
       setModalProduct(pendingProductPrefill);
       pendingProductPrefill = null;
     }
+    if (pendingReorderSaleItemId) {
+      setReorderSaleItemId(pendingReorderSaleItemId);
+      pendingReorderSaleItemId = null;
+    }
   }, []);
+
+  /* 再仕入れ検討からの登録が完了したときだけ、その明細を判断済みにする。
+     失敗しても商品登録自体は成功しているため、警告に留めて処理は止めない
+     (一覧に残るだけなので、あとで「再仕入れ不要」を押せば消せる)。 */
+  const markReorderDecided = async () => {
+    if (!reorderSaleItemId) return;
+    const { error } = await supabase.from("sale_items").update({ reorder_decided: true }).eq("id", reorderSaleItemId);
+    if (error) {
+      alert("商品は登録されましたが、「再仕入れ検討」からの削除に失敗しました。\n販売登録ページの再仕入れ検討タブで「再仕入れ不要」を押して消してください。");
+    }
+    setReorderSaleItemId(null);
+  };
 
 
   const consumedProductIds = useMemo(() => new Set((consumptions || []).map((c) => c.product_id)), [consumptions]);
@@ -4966,6 +4985,8 @@ function ProductsPage() {
         else if (res.warning) messages.push(res.warning);
       }
       if (messages.length > 0) alert(messages.join("\n"));
+      // ★2026-08-24: カラバリ一括でも、1点でも登録できていれば「再仕入れ検討」から外す(2.31参照)
+      await markReorderDecided();
       setModalProduct(null);
       loadAll();
       return;
@@ -4987,6 +5008,8 @@ function ProductsPage() {
     if (!res.ok) { alert(res.message); return; }
     if (res.warning) alert(res.warning);
 
+    // ★2026-08-24: 登録できて初めて「再仕入れ検討」から外す(2.31参照)
+    await markReorderDecided();
     setModalProduct(null);
     loadAll();
   };
@@ -5284,7 +5307,16 @@ function ProductsPage() {
       )}
 
       {modalProduct && (
-        <ProductFormModal product={modalProduct} batches={batches} onClose={() => setModalProduct(null)} onSave={handleSaveProduct} onCreateBatch={handleCreateBatchInline} />
+        <ProductFormModal
+          product={modalProduct}
+          batches={batches}
+          /* ★2026-08-24: キャンセルしたら「再仕入れ検討」の持ち回りを破棄する。
+             残したままだと、次に別の商品を新規登録したときに無関係な明細が判断済みになる(2.31参照)。
+             判断済みにしないので、元の明細は一覧に残ったままになる(これが本来の挙動)。 */
+          onClose={() => { setModalProduct(null); setReorderSaleItemId(null); }}
+          onSave={handleSaveProduct}
+          onCreateBatch={handleCreateBatchInline}
+        />
       )}
       {modalBatch && (
         <BatchFormModal onClose={() => setModalBatch(false)} onSave={handleSaveBatch} />
@@ -5316,7 +5348,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24g";
+const BUILD_VERSION = "2026-08-24h";
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
@@ -7307,6 +7339,18 @@ function ReorderReviewTab({ sales, onDecide }) {
                 <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
                   {row.transactionDate} ・ {row.clubName}{row.hostName ? ` / ${row.hostName}` : ""}
                 </p>
+                {/* ★2026-08-24: 前回いくらで売れたか・サイズ展開を一覧に出す。
+                    これを確認するためだけに登録画面を開かなくて済むようにする(2.31参照) */}
+                {row.unitPriceJpy != null && (
+                  <p className="text-xs mt-0.5" style={{ color: "var(--mz-gold-soft)" }}>
+                    前回の販売価格: {fmtJPY(row.unitPriceJpy)}
+                  </p>
+                )}
+                {row.product.size_options && (
+                  <p className="text-xs break-words" style={{ color: "var(--mz-ink-muted)" }}>
+                    サイズ展開: {row.product.size_options}
+                  </p>
+                )}
               </div>
               <div className="flex flex-col items-end gap-1.5 shrink-0">
                 <button
