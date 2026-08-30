@@ -2906,8 +2906,12 @@ async function extractProductInfoFromImage(imageUrl) {
    レスポンス想定: {
      payment_date: "YYYY-MM-DD"|null, payee: string|null, item_name: string|null,
      amount_incl_tax: number|null, tax_category: string|null, account_category: string|null,
-     invoice_number: string|null
+     invoice_number: string|null,
+     tax_amount: number|null,                  // ★2026-08-24: レシートに記載された消費税額(無ければnull)
+     invoice_registration_number: string|null  // ★2026-08-24: インボイス登録番号(T+13桁)
    }
+   ※ tax_amount / invoice_registration_number はEdge Function側のプロンプト追加が必要(2.51参照)。
+      返ってこない間はundefinedになり、消費税額は税込額からの自動計算にフォールバックする。
    画像・PDFどちらの公開URLも受け付ける(Edge Function側でcontent-typeを見て分岐する想定)。 */
 async function extractExpenseInfoFromImage(fileUrl) {
   const resp = await fetch(`${SUPABASE_URL}/functions/v1/extract-expense-info`, {
@@ -2936,6 +2940,11 @@ function mapExtractedExpenseInfo(info) {
     account_category: EXPENSE_ACCOUNT_CATEGORY_OPTIONS.includes(safe.account_category) ? safe.account_category : undefined,
     tax_category: EXPENSE_TAX_CATEGORY_OPTIONS.includes(safe.tax_category) ? safe.tax_category : undefined,
     invoice_number: safe.invoice_number || undefined,
+    invoice_registration_number: safe.invoice_registration_number || undefined,
+    /* ★2026-08-24: **レシートに消費税額の記載があればその金額を採用する**(2.51参照)。
+       記載が無い(null)ときはここでundefinedを返し、フォーム側の自動計算(税込×10÷110・切り捨て)に委ねる。
+       0円も有効な記載額(非課税等)なので、`|| undefined`ではなく null/undefined だけを弾くこと。 */
+    tax_amount_jpy: safe.tax_amount != null ? String(safe.tax_amount) : undefined,
   };
 }
 
@@ -5307,7 +5316,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24e";
+const BUILD_VERSION = "2026-08-24g";
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
@@ -9176,6 +9185,21 @@ const EXPENSE_REIMBURSEMENT_STATUS_OPTIONS = ["未精算", "精算済み"];
    EXPENSE_PAYMENT_METHOD_OPTIONS から派生させているため、Supabase側のCHECK制約に
    立替の種類を追加したときは、上の定数を直すだけでこちらも自動的に追従する。 */
 const EXPENSE_ADVANCE_PAYMENT_METHODS = EXPENSE_PAYMENT_METHOD_OPTIONS.filter((m) => m.startsWith("立替"));
+
+/* ★2026-08-24追加: 税込金額から消費税額を割り戻す(2.51参照)。
+   国税庁の示す方法どおり、税込価格から「税率/(100+税率)」を掛けて求める。
+   ・課税10%      … 金額 × 10 ÷ 110
+   ・課税8%(軽減) … 金額 ×  8 ÷ 108
+   ・非課税 / 対象外 … 0
+   **1円未満は切り捨てで統一する**(Math.floor)。四捨五入や切り上げと混ぜないこと。 */
+const EXPENSE_TAX_RATE_BY_CATEGORY = { "課税10%": 10, "課税8%(軽減)": 8, "非課税": 0, "対象外": 0 };
+function calcExpenseTaxJpy(amountInclTax, taxCategory) {
+  const amount = Number(amountInclTax);
+  if (!Number.isFinite(amount) || amount <= 0) return 0;
+  const rate = EXPENSE_TAX_RATE_BY_CATEGORY[taxCategory];
+  if (!rate) return 0;
+  return Math.floor((amount * rate) / (100 + rate));
+}
 const isAdvancePaymentMethod = (pm) => EXPENSE_ADVANCE_PAYMENT_METHODS.includes(pm);
 
 function ExpenseReimbursementBadge({ status }) {
@@ -9193,7 +9217,9 @@ function ExpenseReimbursementBadge({ status }) {
 }
 
 /* ---- 一覧表示 ---- */
-function ExpenseList({ expenses, onEdit, onDelete }) {
+/* ★2026-08-24変更: 編集は画面上部のフォームではなく、**その行の中**で開く(2.51参照)。
+   一覧が長いと、上部のフォームに飛ばされても「どの経費を編集しているのか」が分からなくなるため。 */
+function ExpenseList({ expenses, editingId, onEdit, onCancelEdit, onSave, onDelete }) {
   if (expenses.length === 0) {
     return (
       <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>
@@ -9204,6 +9230,16 @@ function ExpenseList({ expenses, onEdit, onDelete }) {
   return (
     <div className="space-y-2">
       {expenses.map((e) => (
+        e.id === editingId ? (
+          <div
+            key={e.id}
+            className="rounded-xl p-4"
+            style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-gold)" }}
+          >
+            <p className="text-sm mb-3" style={{ color: "var(--mz-gold-soft)" }}>この経費を編集中</p>
+            <ExpenseInlineForm expense={e} onSave={onSave} onCancel={onCancelEdit} />
+          </div>
+        ) : (
         <div
           key={e.id}
           className="rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3"
@@ -9226,7 +9262,9 @@ function ExpenseList({ expenses, onEdit, onDelete }) {
             )}
             <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
               <span>{e.payment_method}</span>
+              {e.tax_amount_jpy != null && <span>消費税: {fmtJPY(e.tax_amount_jpy)}</span>}
               {e.invoice_number && <span>請求書番号: {e.invoice_number}</span>}
+              {e.invoice_registration_number && <span>登録番号: {e.invoice_registration_number}</span>}
               {e.receipt_file_url && (
                 <a href={e.receipt_file_url} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--mz-gold-soft)" }}>
                   領収書を見る
@@ -9256,6 +9294,7 @@ function ExpenseList({ expenses, onEdit, onDelete }) {
             </div>
           </div>
         </div>
+        )
       ))}
     </div>
   );
@@ -9353,6 +9392,9 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
     reimbursement_status: expense.reimbursement_status
       || (isAdvancePaymentMethod(expense.payment_method || EXPENSE_PAYMENT_METHOD_OPTIONS[0]) ? "未精算" : ""),
     invoice_number: expense.invoice_number || "",
+    // ★2026-08-24: インボイス登録番号(T+13桁)と消費税額(2.51参照)
+    invoice_registration_number: expense.invoice_registration_number || "",
+    tax_amount_jpy: expense.tax_amount_jpy != null ? String(expense.tax_amount_jpy) : "",
     item_name: expense.item_name || "",
     account_category: expense.account_category || EXPENSE_ACCOUNT_CATEGORY_OPTIONS[0],
     tax_category: expense.tax_category || EXPENSE_TAX_CATEGORY_OPTIONS[0],
@@ -9363,6 +9405,16 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
   });
   const [saving, setSaving] = useState(false);
   const [uploadingReceipt, setUploadingReceipt] = useState(false);
+  /* ★2026-08-24: 消費税額は金額・税区分から自動計算するが、レシートの記載額と1円ずれることがあるため
+     手入力で上書きできる。手で触った後に自動計算で勝手に戻さないよう、touchedフラグで制御する(2.51参照)。 */
+  const [taxTouched, setTaxTouched] = useState(expense.tax_amount_jpy != null);
+
+  const autoTaxJpy = calcExpenseTaxJpy(form.amount_incl_tax, form.tax_category);
+  // 金額・税区分を変えたら、手入力していない限り消費税額を自動で入れ直す
+  useEffect(() => {
+    if (taxTouched) return;
+    setForm((f) => ({ ...f, tax_amount_jpy: f.amount_incl_tax ? String(autoTaxJpy) : "" }));
+  }, [autoTaxJpy, taxTouched, form.amount_incl_tax]);
 
   const handleReceiptFile = async (file) => {
     setUploadingReceipt(true);
@@ -9505,15 +9557,63 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
         </div>
       </div>
 
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>請求書番号(任意)</label>
+          <input
+            type="text"
+            value={form.invoice_number}
+            onChange={(e) => setForm((f) => ({ ...f, invoice_number: e.target.value }))}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+        {/* ★2026-08-24: 適格請求書発行事業者の登録番号(T+13桁)。請求書番号とは別物(2.51参照) */}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>インボイス登録番号(任意)</label>
+          <input
+            type="text" placeholder="T1234567890123"
+            value={form.invoice_registration_number}
+            onChange={(e) => setForm((f) => ({ ...f, invoice_registration_number: e.target.value }))}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          />
+        </div>
+      </div>
+
+      {/* ★2026-08-24: 消費税額(2.51参照)。金額・税区分から自動計算し、必要なら手で直せる */}
       <div>
-        <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>請求書番号(任意)</label>
+        <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+          消費税額(内税) ― レシートに記載があればその金額、無ければ自動計算
+        </label>
         <input
-          type="text"
-          value={form.invoice_number}
-          onChange={(e) => setForm((f) => ({ ...f, invoice_number: e.target.value }))}
+          type="number" min="0" step="1"
+          value={form.tax_amount_jpy}
+          onChange={(e) => { setTaxTouched(true); setForm((f) => ({ ...f, tax_amount_jpy: e.target.value })); }}
           className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent"
           style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
         />
+        <div className="flex flex-wrap items-center gap-2 mt-1.5">
+          <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+            自動計算: {fmtJPY(autoTaxJpy)}
+            {form.tax_category === "課税10%" && "(税込 × 10 ÷ 110・1円未満切り捨て)"}
+            {form.tax_category === "課税8%(軽減)" && "(税込 × 8 ÷ 108・1円未満切り捨て)"}
+            {(form.tax_category === "非課税" || form.tax_category === "対象外") && "(税区分により0円)"}
+          </span>
+          {taxTouched && String(autoTaxJpy) !== String(form.tax_amount_jpy) && (
+            <>
+              <span className="text-xs" style={{ color: "#e3c489" }}>レシート記載額を採用中</span>
+              <button
+                type="button"
+                onClick={() => { setTaxTouched(false); setForm((f) => ({ ...f, tax_amount_jpy: String(autoTaxJpy) })); }}
+                className="text-[11px] px-2 py-1 rounded-md"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}
+              >
+                自動計算に戻す
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       <div>
@@ -9592,15 +9692,25 @@ function ExpensesPage() {
   const [filterCategory, setFilterCategory] = useState("all");
   const [formExpense, setFormExpense] = useState({}); // {}=新規(空), idを持つオブジェクト=編集, AI抽出結果(id無し)=新規への下書き反映
   const [formKey, setFormKey] = useState(0); // 変更するたびにExpenseInlineFormを再マウントし、内部stateを再初期化する
+  /* ★2026-08-24: 経費入力はAIレシート読み込みが主導線のため、手動入力フォームは既定で折りたたむ。
+     AI抽出で下書きが入ったときは自動的に開く(2.51参照)。 */
+  const [manualOpen, setManualOpen] = useState(false);
+  // 編集は一覧の行内で開く。上部フォームは新規登録専用にする
+  const [editingId, setEditingId] = useState(null);
 
   const loadExpenses = useCallback(async () => {
     setError(null);
     const { data, error } = await supabase
       .from("expenses")
-      .select("id,payment_date,payee,payment_method,reimbursement_status,invoice_number,item_name,account_category,tax_category,amount_incl_tax,memo,receipt_file_url,entry_method,created_at")
+      .select("id,payment_date,payee,payment_method,reimbursement_status,invoice_number,invoice_registration_number,item_name,account_category,tax_category,amount_incl_tax,tax_amount_jpy,memo,receipt_file_url,entry_method,created_at")
       .order("payment_date", { ascending: false });
+    /* 列不足(42703)は「マイグレーション未実行」と断定できるため、実行すべきSQLを名指しで出す(5章42番参照) */
     if (error) {
-      setError("経費データの取得に失敗しました");
+      setError(
+        error.code === "42703"
+          ? "経費データの取得に失敗しました。expensesに必要な列がありません。設計書2.51のマイグレーションSQL(invoice_registration_number / tax_amount_jpy の追加)を実行してください。"
+          : `経費データの取得に失敗しました(${error.message || error.code || "原因不明"})`
+      );
       setExpenses([]);
     } else {
       setExpenses(data || []);
@@ -9632,17 +9742,19 @@ function ExpensesPage() {
   const resetForm = () => {
     setFormExpense({});
     setFormKey((k) => k + 1);
+    setEditingId(null);
   };
 
   const handleEdit = (expense) => {
-    setFormExpense(expense);
-    setFormKey((k) => k + 1);
+    setEditingId(expense.id);
   };
 
   /* ---- AIレシート読み込みカードからの反映。id無しの新規下書きとしてフォームへ流し込む ---- */
   const handleExtracted = (mappedFields, uploadedUrl) => {
     setFormExpense({ ...mappedFields, receipt_file_url: uploadedUrl, _aiOrigin: true });
     setFormKey((k) => k + 1);
+    setManualOpen(true);   // 読み取り結果を確認・修正できるよう自動で開く
+    setEditingId(null);
   };
 
   const handleSave = async (form) => {
@@ -9652,6 +9764,11 @@ function ExpensesPage() {
       payment_method: form.payment_method,
       reimbursement_status: form.reimbursement_status || null,
       invoice_number: form.invoice_number.trim() || null,
+      // ★2026-08-24: インボイス登録番号と消費税額(2.51参照)。税額は未入力なら自動計算値を保存する
+      invoice_registration_number: (form.invoice_registration_number || "").trim() || null,
+      tax_amount_jpy: form.tax_amount_jpy !== "" && form.tax_amount_jpy != null
+        ? Number(form.tax_amount_jpy)
+        : calcExpenseTaxJpy(form.amount_incl_tax, form.tax_category),
       item_name: form.item_name.trim() || null,
       account_category: form.account_category,
       tax_category: form.tax_category,
@@ -9689,7 +9806,22 @@ function ExpensesPage() {
 
       <AiReceiptReaderCard onExtracted={handleExtracted} />
 
-      <ExpenseInlineForm key={formKey} expense={formExpense} onSave={handleSave} onCancel={resetForm} />
+      {/* ★2026-08-24: 手動入力は既定で折りたたむ。AIレシート読み込みで下書きが入ると自動で開く(2.51参照) */}
+      <div className="rounded-xl" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+        <button
+          onClick={() => setManualOpen((v) => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm"
+          style={{ color: "var(--mz-ink)" }}
+        >
+          <span>手動で経費を入力{formExpense._aiOrigin ? "(AI読み取り結果を反映中)" : ""}</span>
+          <span style={{ color: "var(--mz-ink-muted)" }}>{manualOpen ? "閉じる ▲" : "開く ▼"}</span>
+        </button>
+        {manualOpen && (
+          <div className="px-4 pb-4">
+            <ExpenseInlineForm key={formKey} expense={formExpense} onSave={handleSave} onCancel={resetForm} />
+          </div>
+        )}
+      </div>
 
       <div className="flex flex-wrap items-center gap-3 justify-between pt-2">
         <div className="flex flex-wrap gap-2">
@@ -9724,7 +9856,14 @@ function ExpensesPage() {
       {expenses === null ? (
         <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
       ) : (
-        <ExpenseList expenses={filteredExpenses} onEdit={handleEdit} onDelete={handleDelete} />
+        <ExpenseList
+          expenses={filteredExpenses}
+          editingId={editingId}
+          onEdit={handleEdit}
+          onCancelEdit={() => setEditingId(null)}
+          onSave={handleSave}
+          onDelete={handleDelete}
+        />
       )}
     </div>
   );
