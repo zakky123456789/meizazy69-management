@@ -4255,7 +4255,10 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品代(CNY)</label>
-                <input type="number" min="0" step="any" value={purchaseAmountCny} onChange={(e) => setPurchaseAmountCny(e.target.value)} required
+                {/* ★2026-08-24: requiredを外した。BuckyDrop等の返金が後から確定するため、
+                    登録時は空(=0円)のままにして、確定後に入れ直す運用が望ましい(5章26番参照)。
+                    requiredが付いていると、その運用がそもそもできなかった。 */}
+                <input type="number" min="0" step="any" value={purchaseAmountCny} onChange={(e) => setPurchaseAmountCny(e.target.value)}
                   className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
               </div>
               {/* ★2026-08-17実装: 中国国内送料。1点ごとに入力し、仕入れロットの按分対象には含めない(2.36参照) */}
@@ -4277,6 +4280,11 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
             </div>
             <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
               国際送料・その他手数料は仕入れロットを選ぶと自動で入ります。中国国内送料は1点ごとの金額なので、ロットとは関係なく手入力してください。
+              <br />
+              <span style={{ color: "#e3c489" }}>
+                金額は空欄のまま(0円で)登録できます。返金が後から確定する場合は、確定後にこの画面で入れ直してください。
+                その際は月次損益の再集計も必要です。
+              </span>
             </p>
 
             {costSource === COST_SOURCE_DIRECT ? (
@@ -5358,7 +5366,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24i";
+const BUILD_VERSION = "2026-08-24j";
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
