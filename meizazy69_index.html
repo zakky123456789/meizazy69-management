@@ -2782,6 +2782,11 @@ const CATEGORY_OPTIONS = ["トップス", "ボトムス", "セットアップ", 
      ProductsPageへページが切り替わる(コンポーネントがアンマウント/マウントされる)際にも
      値を保持できるようにするための、最小限の実装。 */
 let pendingProductPrefill = null;
+/* ★2026-08-24追加: 「再仕入れ検討」から登録画面へ移動したとき、どの販売明細から来たかを保持する。
+   従来は「再仕入れする」を押した時点で reorder_decided=true にしていたため、
+   **登録をキャンセルすると一覧から消えたまま戻らなかった**(2.31参照)。
+   実際に商品を登録できたときだけ判断済みにするため、明細idを持ち回る。 */
+let pendingReorderSaleItemId = null;
 
 /* ---- 画像リサイズ+JPEG圧縮(ブラウザ側、Canvas使用) ----
    ・Supabase Storageは無料枠の容量が限られるため、保存前に必ず圧縮する
@@ -2987,6 +2992,10 @@ function BatchFormModal({ batch, onClose, onSave }) {
   const [totalItems, setTotalItems] = useState(batch ? String(batch.total_items) : "");
   const [totalShippingCny, setTotalShippingCny] = useState(batch ? String(batch.total_shipping_cny) : "");
   const [totalFeeCny, setTotalFeeCny] = useState(batch ? String(batch.total_fee_cny) : "");
+  /* ★2026-08-24修正: BuckyDropの代購注文番号(2.38参照)。
+     入力欄は2026-08-18から存在していたが**stateの宣言が漏れており**、
+     このモーダルを開くと ReferenceError で画面が真っ白になっていた(5章48番参照)。 */
+  const [bdOrderNo, setBdOrderNo] = useState(batch ? (batch.bd_order_no || "") : "");
   const [saving, setSaving] = useState(false);
 
   const items = parseInt(totalItems, 10) || 0;
@@ -3008,6 +3017,7 @@ function BatchFormModal({ batch, onClose, onSave }) {
       total_fee_cny: fee,
       per_item_shipping_cny: perItemShipping,
       per_item_fee_cny: perItemFee,
+      bd_order_no: bdOrderNo.trim() || null,
     });
     setSaving(false);
   };
@@ -5348,7 +5358,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24h";
+const BUILD_VERSION = "2026-08-24i";
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
@@ -7287,6 +7297,7 @@ function ReorderReviewTab({ sales, onDecide }) {
             transactionDate: s.transaction_date,
             clubName: s.host_clubs ? s.host_clubs.name : "-",
             hostName: s.hosts ? s.hosts.name : null,
+            unitPriceJpy: it.unit_price_jpy != null ? Number(it.unit_price_jpy) : null, // 前回の実売価格
             product: it.products || {},
           });
         }
@@ -7299,6 +7310,8 @@ function ReorderReviewTab({ sales, onDecide }) {
   const handleReorder = (row) => {
     // ★2026-08-04実装: 「再仕入れする」を選ぶと、商品名・URL・カテゴリ等を引き継いだ状態で
     //   サンプル・在庫の新規登録画面を開く(既存のpendingProductPrefillの仕組みを再利用)
+    /* ★2026-08-24変更: ここでは判断済みにしない。実際に登録できた時点で消す(2.31参照)。
+       参考販売価格には前回の実売価格(unit_price_jpy)を入れる。 */
     pendingProductPrefill = {
       type: "sample",
       sample_purpose: "展示用",
@@ -7306,9 +7319,11 @@ function ReorderReviewTab({ sales, onDecide }) {
       product_url: row.product.product_url || "",
       product_name: row.product.product_name || "",
       category: row.product.category || "",
+      size: row.product.size || "",
       size_options: row.product.size_options || "",
+      selling_price_jpy: row.unitPriceJpy != null ? row.unitPriceJpy : (row.product.selling_price_jpy != null ? row.product.selling_price_jpy : null),
     };
-    onDecide(row.id);
+    pendingReorderSaleItemId = row.id;
     window.location.hash = "#/products";
   };
 
