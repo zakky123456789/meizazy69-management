@@ -537,16 +537,106 @@ function DashboardStatCard({ label, value, highlight }) {
    ・集計期間: 「全期間累計」+「今月分」の2本立て
    ・salesテーブル(total_amount_jpy)とsale_items(profit_jpy)を集計
    ============================================================ */
+/* ★2026-08-24実装: ダッシュボード最上部の「次回訪問予定」(2.10参照)。
+   ・visits.next_visit_date が今日以降のものだけを、日付の近い順に表示する。
+   ・**同じクラブに複数の予定が入っている場合は、一番近い1件だけを出す**
+     (訪問記録は都度追加されるため、過去の記録に入っている古い予定まで並ぶと予定表として使えない)。
+   ・クラブ名をタップするとそのクラブの詳細へ移動できる。 */
+function NextVisitsCard() {
+  const [rows, setRows] = useState(null); // null = 読み込み中
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from("visits")
+        .select("id,host_club_id,next_visit_date,host_clubs(name)")
+        .gte("next_visit_date", todayISO())
+        .order("next_visit_date", { ascending: true });
+      if (error) { setError("次回訪問予定の取得に失敗しました"); setRows([]); return; }
+      // クラブごとに最も近い1件だけ残す(取得順が日付の昇順なので、最初に出たものが最短)
+      const seen = {};
+      const list = [];
+      (data || []).forEach((v) => {
+        if (!v.next_visit_date || seen[v.host_club_id]) return;
+        seen[v.host_club_id] = true;
+        list.push(v);
+      });
+      setRows(list);
+    })();
+  }, []);
+
+  const today = todayISO();
+  const labelFor = (dateStr) => {
+    // 日付の差は文字列からUTCで作って求める(ローカル時刻の時差でずれないようにするため)
+    const diff = Math.round((Date.parse(`${dateStr}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
+    if (diff <= 0) return "今日";
+    if (diff === 1) return "明日";
+    return `あと${diff}日`;
+  };
+  const WEEK = ["日", "月", "火", "水", "木", "金", "土"];
+  const weekdayOf = (dateStr) => WEEK[new Date(`${dateStr}T00:00:00Z`).getUTCDay()];
+
+  return (
+    <section className="space-y-3">
+      <h3 className="font-display text-base">次回訪問予定</h3>
+      {error && <p className="text-sm" style={{ color: "#f2b8bd" }}>{error}</p>}
+      {rows === null && !error && (
+        <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+      )}
+      {rows !== null && rows.length === 0 && !error && (
+        <p className="text-sm rounded-xl px-4 py-4" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+          予定されている次回訪問はありません
+        </p>
+      )}
+      {rows !== null && rows.length > 0 && (
+        <div className="rounded-xl divide-y" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
+          {rows.map((v) => {
+            const soon = v.next_visit_date <= addDaysISO(today, 3);
+            return (
+              <a
+                key={v.id}
+                href={`#/host-clubs/${v.host_club_id}`}
+                className="flex items-center justify-between gap-3 px-4 py-3"
+                style={{ color: "var(--mz-ink)" }}
+              >
+                <div className="min-w-0">
+                  <p className="text-sm truncate">{(v.host_clubs || {}).name || "(不明なクラブ)"}</p>
+                  <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                    {v.next_visit_date}({weekdayOf(v.next_visit_date)})
+                  </p>
+                </div>
+                <span
+                  className="text-xs px-2.5 py-1 rounded-full shrink-0"
+                  style={soon
+                    ? { background: "rgba(199,168,105,0.18)", color: "var(--mz-gold-soft)" }
+                    : { background: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" }}
+                >
+                  {labelFor(v.next_visit_date)}
+                </span>
+              </a>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function DashboardPage() {
   const [sales, setSales] = useState(null); // null = 読み込み中
   const [error, setError] = useState(null);
 
   const loadSales = useCallback(async () => {
     setError(null);
-    // 集計にしか使わないため必要最小限のカラムのみ取得(total_amount_jpyとsale_items.profit_jpy)
+    /* ★2026-08-24変更: 利益は保存済みの sale_items.profit_jpy ではなく、
+       **商品の現在の確定原価から都度計算する**(2.10参照)。
+       profit_jpy は販売登録時点のスナップショットで、SQLで直接原価を直した場合などに
+       古い値が残る(1.12参照)。販売一覧(SaleCard)は既に都度計算しているため、
+       同じ画面のはずのダッシュボードだけ違う数字になっていた。 */
     const { data, error } = await supabase
       .from("sales")
-      .select("id,transaction_date,total_amount_jpy,sale_items(profit_jpy)")
+      .select("id,transaction_date,total_amount_jpy,sale_items(unit_price_jpy,products(purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
       .order("transaction_date", { ascending: false });
     if (error) { setError("売上データの取得に失敗しました"); setSales([]); return; }
     setSales(data || []);
@@ -564,7 +654,10 @@ function DashboardPage() {
       let totalProfit = 0;
       arr.forEach((s) => {
         totalAmount += Number(s.total_amount_jpy) || 0;
-        (s.sale_items || []).forEach((it) => { totalProfit += Number(it.profit_jpy) || 0; });
+        (s.sale_items || []).forEach((it) => {
+          const cost = it.products ? productCostJpy(it.products) : 0;
+          totalProfit += itemPretaxJpy(it.unit_price_jpy) - cost;
+        });
       });
       return { count: arr.length, totalAmount, totalProfit };
     };
@@ -578,6 +671,9 @@ function DashboardPage() {
         <p className="text-sm" style={{ color: "#f2b8bd" }}>{error}</p>
       )}
 
+      {/* ★2026-08-24: 次回訪問予定を最上部に置く(2.10参照) */}
+      <NextVisitsCard />
+
       <section className="space-y-3">
         <h3 className="font-display text-base">全期間累計</h3>
         {sales === null ? (
@@ -586,7 +682,7 @@ function DashboardPage() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <DashboardStatCard label="取引件数" value={`${summary.allTime.count}件`} />
             <DashboardStatCard label="売上合計" value={fmtJPY(summary.allTime.totalAmount)} highlight />
-            <DashboardStatCard label="利益合計" value={fmtJPY(summary.allTime.totalProfit)} highlight />
+            <DashboardStatCard label="利益合計(売上−原価)" value={fmtJPY(summary.allTime.totalProfit)} highlight />
           </div>
         )}
       </section>
@@ -599,7 +695,7 @@ function DashboardPage() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <DashboardStatCard label="取引件数" value={`${summary.thisMonth.count}件`} />
             <DashboardStatCard label="売上合計" value={fmtJPY(summary.thisMonth.totalAmount)} highlight />
-            <DashboardStatCard label="利益合計" value={fmtJPY(summary.thisMonth.totalProfit)} highlight />
+            <DashboardStatCard label="利益合計(売上−原価)" value={fmtJPY(summary.thisMonth.totalProfit)} highlight />
           </div>
         )}
       </section>
@@ -1932,7 +2028,7 @@ function HostClubDetailPage({ clubId }) {
         .eq("visits.host_club_id", clubId),
       supabase
         .from("sales")
-        .select("id,transaction_date,host_id,total_amount_jpy,hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,unit_price_jpy,profit_jpy,products(product_name,size,product_code))")
+        .select("id,transaction_date,host_id,total_amount_jpy,hosts(name),receipts!fk_sales_receipt_id(receipt_number),sale_items(id,unit_price_jpy,profit_jpy,products(product_name,size,product_code,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .eq("host_club_id", clubId)
         .order("transaction_date", { ascending: false }),
     ]);
@@ -1966,14 +2062,19 @@ function HostClubDetailPage({ clubId }) {
     return null;
   }, [visits]);
 
-  // 取引履歴サマリー(件数・売上合計・利益合計)。利益は各sale_itemsのprofit_jpyを合算。
+  /* 取引履歴サマリー(件数・売上合計・利益合計)。
+     ★2026-08-24変更: 利益は保存済みのprofit_jpyではなく、商品の現在の確定原価から都度計算する
+     (ダッシュボード・販売一覧と計算方法を揃えるため。2.8参照)。 */
   const salesSummary = useMemo(() => {
     const list = sales || [];
     let totalAmount = 0;
     let totalProfit = 0;
     list.forEach((s) => {
       totalAmount += Number(s.total_amount_jpy) || 0;
-      (s.sale_items || []).forEach((it) => { totalProfit += Number(it.profit_jpy) || 0; });
+      (s.sale_items || []).forEach((it) => {
+        const cost = it.products ? productCostJpy(it.products) : 0;
+        totalProfit += itemPretaxJpy(it.unit_price_jpy) - cost;
+      });
     });
     return { count: list.length, totalAmount, totalProfit };
   }, [sales]);
@@ -5366,7 +5467,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24j";
+const BUILD_VERSION = "2026-08-24l";
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
