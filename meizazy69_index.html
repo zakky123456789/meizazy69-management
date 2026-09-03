@@ -5467,7 +5467,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24l";
+const BUILD_VERSION = "2026-08-24m";
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
@@ -10375,7 +10375,13 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
             <div className="rounded-lg p-3 text-xs space-y-1" style={{ border: "1px solid var(--mz-border)" }}>
               <div className="flex justify-between"><span>売上合計</span><span>{fmtJPY(liveSales)} <Diff live={liveSales} savedValue={savedSales} /></span></div>
               <div className="flex justify-between"><span>− 仕入原価合計</span><span>{fmtJPY(liveCost)} <Diff live={liveCost} savedValue={savedCost} /></span></div>
-              <div className="flex justify-between"><span>− 一般経費合計</span><span>{fmtJPY(liveExpenses)} <Diff live={liveExpenses} savedValue={savedExpenses} /></span></div>
+              <div className="flex justify-between" style={{ color: "#8b8578" }}>
+                <span className="pl-3">うち 当月仕入れた商品</span><span>{fmtJPY(liveCostPurchased)}</span>
+              </div>
+              <div className="flex justify-between" style={{ color: "#8b8578" }}>
+                <span className="pl-3">うち 売れた在庫・サンプル</span><span>{fmtJPY(liveCostSold)}</span>
+              </div>
+              <div className="flex justify-between"><span>− その他の経費</span><span>{fmtJPY(liveExpenses)} <Diff live={liveExpenses} savedValue={savedExpenses} /></span></div>
               <div className="flex justify-between font-medium pt-1" style={{ borderTop: "1px solid var(--mz-border)" }}>
                 <span>= 粗利益</span>
                 <span style={{ color: liveGross >= 0 ? "var(--mz-gold-soft)" : "#f2b8bd" }}>
@@ -10424,7 +10430,7 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
             </div>
 
             <div>
-              <p className="text-sm mb-1.5">仕入原価・当月仕入分({data.counted.length}点) {fmtJPY(liveCostPurchased)}</p>
+              <p className="text-sm mb-1.5">当月仕入れた商品の原価({data.counted.length}点) {fmtJPY(liveCostPurchased)}<span style={{ color: "var(--mz-ink-muted)" }}> ― 受注 / サンプル・在庫</span></p>
               {data.counted.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
                 <div className="text-xs">
                   {data.counted.map((x) => (
@@ -10441,7 +10447,7 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
             </div>
 
             <div>
-              <p className="text-sm mb-1.5">仕入原価・当月販売分({data.soldUncounted.length}点) {fmtJPY(liveCostSold)}</p>
+              <p className="text-sm mb-1.5">売れた在庫・サンプルの原価({data.soldUncounted.length}点) {fmtJPY(liveCostSold)}</p>
               <p className="text-xs mb-1" style={{ color: "var(--mz-ink-muted)" }}>
                 計上開始日より前に仕入れたため<b>仕入れ時に経費計上していない商品</b>が、この月に売れた分です。
                 売上が立つこの月の原価として引きます(仕入れ時に計上済みの商品はここには出ません＝二重計上しません)。
@@ -10463,7 +10469,7 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
 
             <div>
               <p className="text-sm mb-1.5" style={{ color: "#d6a98f" }}>
-                仕入原価・未計上({data.excluded.length}点) {fmtJPY(data.excluded.reduce((a, x) => a + productCostJpy(x), 0))}
+どの月にも未計上の仕入れ({data.excluded.length}点) {fmtJPY(data.excluded.reduce((a, x) => a + productCostJpy(x), 0))}
               </p>
               <p className="text-xs mb-1" style={{ color: "var(--mz-ink-muted)" }}>
                 この月に仕入れたが計上開始日(受注: {PURCHASE_COST_BASIS_FROM_ORDER} / サンプル・在庫: {PURCHASE_COST_BASIS_FROM_SAMPLE})より前で、
@@ -10529,11 +10535,37 @@ function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, rec
           >
             <div className="flex-1 min-w-0">
               <p className="font-display text-base">{formatMonthLabel(p.target_month)}</p>
-              <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1.5 text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-                <span>売上合計: {fmtJPY(p.total_sales_jpy)}</span>
-                <span>仕入原価合計: {fmtJPY(p.total_purchase_cost_jpy)}</span>
-                <span>一般経費合計: {fmtJPY(p.total_general_expenses_jpy)}</span>
-              </div>
+              {/* ★2026-08-24: 仕入原価を内訳で表示する(2.45参照)。合計だけだと
+                  「何が入っている金額なのか」が分からず、数字の妥当性を判断できなかった。
+                  内訳の列が無い古い集計行(null)は、従来どおり合計のみ表示する。 */}
+              {(() => {
+                const hasBreakdown = p.cost_order_jpy != null || p.cost_sample_jpy != null || p.cost_sold_jpy != null;
+                const order = Number(p.cost_order_jpy) || 0;
+                const sample = Number(p.cost_sample_jpy) || 0;
+                const sold = Number(p.cost_sold_jpy) || 0;
+                const Row = ({ label, value, sub, minus }) => (
+                  <div className="flex justify-between gap-3" style={sub ? { paddingLeft: "12px" } : undefined}>
+                    <span>{minus ? "− " : ""}{label}</span>
+                    <span className="shrink-0">{fmtJPY(value)}</span>
+                  </div>
+                );
+                return (
+                  <div className="mt-2 text-xs space-y-0.5 max-w-md" style={{ color: "var(--mz-ink-muted)" }}>
+                    <Row label="売上" value={p.total_sales_jpy} />
+                    {hasBreakdown ? (
+                      <>
+                        <Row label="仕入原価" value={p.total_purchase_cost_jpy} minus />
+                        <Row label="受注の仕入れ" value={order} sub />
+                        <Row label="サンプル・在庫の仕入れ" value={sample} sub />
+                        <Row label="売れた在庫・サンプルの原価" value={sold} sub />
+                      </>
+                    ) : (
+                      <Row label="仕入原価" value={p.total_purchase_cost_jpy} minus />
+                    )}
+                    <Row label="その他の経費" value={p.total_general_expenses_jpy} minus />
+                  </div>
+                );
+              })()}
               {carriedLoss < 0 && (
                 <p className="text-xs mt-1" style={{ color: "#f2b8bd" }}>
                   前月までの繰越損失: {fmtJPY(carriedLoss)}(報酬基準額: {fmtJPY(commissionBase)})
@@ -11287,10 +11319,14 @@ function ContractorInvoicesPage() {
     setProfitError(null);
     const { data, error } = await supabase
       .from("monthly_profits")
-      .select("id,target_month,total_sales_jpy,total_purchase_cost_jpy,total_general_expenses_jpy,gross_profit_jpy,carried_loss_in_jpy,calculated_at")
+      .select("id,target_month,total_sales_jpy,total_purchase_cost_jpy,cost_order_jpy,cost_sample_jpy,cost_sold_jpy,total_general_expenses_jpy,gross_profit_jpy,carried_loss_in_jpy,calculated_at")
       .order("target_month", { ascending: false });
     if (error) {
-      setProfitError("月次損益データの取得に失敗しました");
+      setProfitError(
+        error.code === "42703"
+          ? "月次損益データの取得に失敗しました。monthly_profitsに必要な列がありません。設計書2.45のマイグレーションSQL(cost_order_jpy / cost_sample_jpy / cost_sold_jpy の追加)を実行してください。"
+          : `月次損益データの取得に失敗しました(${error.message || error.code || "原因不明"})`
+      );
       setMonthlyProfits([]);
     } else {
       setMonthlyProfits(data || []);
@@ -11540,6 +11576,8 @@ function ContractorInvoicesPage() {
          取得は「早い方の開始日」で絞り、実際の可否は isPurchaseCostCountable で1件ずつ判定する。 */
       const costStart = monthStart > PURCHASE_COST_BASIS_FROM_MIN ? monthStart : PURCHASE_COST_BASIS_FROM_MIN;
       let totalPurchaseCost = 0;
+      let costOrder = 0;    // 当月仕入分のうち受注商品
+      let costSample = 0;   // 当月仕入分のうちサンプル・在庫
       if (costStart < monthEndExclusive) {
         const { data: purchasedData, error: purchasedError } = await supabase
           .from("products")
@@ -11547,9 +11585,11 @@ function ContractorInvoicesPage() {
           .gte("purchase_date", costStart)
           .lt("purchase_date", monthEndExclusive);
         if (purchasedError) { setProfitError("仕入れ商品の取得に失敗しました"); setCalculating(false); return; }
-        totalPurchaseCost = (purchasedData || [])
-          .filter(isPurchaseCostCountable)
-          .reduce((sum, p) => sum + productCostJpy(p), 0);
+        const countable = (purchasedData || []).filter(isPurchaseCostCountable);
+        // ★2026-08-24: 内訳を保存するため、受注とサンプル・在庫を分けて集計する(2.45参照)
+        costOrder = countable.filter((p) => p.created_via_sale).reduce((sum, p) => sum + productCostJpy(p), 0);
+        costSample = countable.filter((p) => !p.created_via_sale).reduce((sum, p) => sum + productCostJpy(p), 0);
+        totalPurchaseCost = costOrder + costSample;
       }
       totalPurchaseCost += soldUncountedCost;
 
@@ -11581,6 +11621,10 @@ function ContractorInvoicesPage() {
         target_month: monthStart,
         total_sales_jpy: totalSales,
         total_purchase_cost_jpy: totalPurchaseCost,
+        // ★2026-08-24: 内訳(2.45参照)。合計は必ず cost_order + cost_sample + cost_sold と一致する
+        cost_order_jpy: costOrder,
+        cost_sample_jpy: costSample,
+        cost_sold_jpy: soldUncountedCost,
         total_general_expenses_jpy: totalExpenses,
         gross_profit_jpy: grossProfit,
         carried_loss_in_jpy: carriedLossIn,
