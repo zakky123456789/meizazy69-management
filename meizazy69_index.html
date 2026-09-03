@@ -5467,7 +5467,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24n";
+const BUILD_VERSION = "2026-08-24p";
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
@@ -10538,6 +10538,17 @@ function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, rec
         // ★2026-08-06実装: 繰越損失(前月までの赤字の繰越分)を加味した、報酬の実際の計算基準額
         const carriedLoss = Number(p.carried_loss_in_jpy) || 0;
         const commissionBase = gross + carriedLoss;
+        /* ★2026-08-24p: 繰越損失は「¥-36,471 → ¥-927」と数字を2つ並べていたが、
+           間の引き算が見えないため意味が読み取れないという指摘を受けた(実際に「意味がわからない」)。
+           計算式の続きとして行で見せたうえで、結果どうなるのか(報酬が出るのか、翌月へ繰り越すのか)を
+           文章で添える。金額はすべて正の数で表示し、符号は行頭の「−」で表す。 */
+        const carryNote = carriedLoss >= 0
+          ? null
+          : commissionBase > 0
+            ? `前の月までの赤字 ${fmtJPY(-carriedLoss)} を、この月の利益から先に差し引きます。残った ${fmtJPY(commissionBase)} に歩合率をかけた額が、この月の歩合報酬になります。`
+            : commissionBase === 0
+              ? `前の月までの赤字 ${fmtJPY(-carriedLoss)} を差し引くとちょうど0円になるため、この月の歩合報酬は0円です。翌月へ繰り越す赤字もありません。`
+              : `前の月までの赤字 ${fmtJPY(-carriedLoss)} を差し引くとマイナスになるため、この月の歩合報酬は0円です。残った ${fmtJPY(-commissionBase)} の赤字は翌月へ繰り越します。`;
         // ★2026-08-17実装: 集計後に原価・経費・売上が変わっていないかの判定結果(2.36参照)
         const stale = (staleProfits || {})[p.id] || null;
         return (
@@ -10582,13 +10593,19 @@ function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, rec
                       </>
                     )}
                     <Row label="その他の経費" value={p.total_general_expenses_jpy} sign="−" />
-                    <Row label="利益" value={p.gross_profit_jpy} sign="=" total />
+                    <Row label="利益" value={gross} sign="=" total />
+                    {carriedLoss < 0 && (
+                      <>
+                        <Row label="前の月までの赤字" value={-carriedLoss} sign="−" />
+                        <Row label="報酬の計算に使う金額" value={commissionBase} sign="=" total />
+                      </>
+                    )}
                   </div>
                 );
               })()}
-              {carriedLoss < 0 && (
-                <p className="text-xs mt-1" style={{ color: "#f2b8bd" }}>
-                  前の月までの赤字の繰越 {fmtJPY(carriedLoss)} → 報酬の計算に使う金額 {fmtJPY(commissionBase)}
+              {carryNote && (
+                <p className="text-xs mt-1.5 rounded-lg px-2.5 py-2 max-w-md" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
+                  {carryNote}
                 </p>
               )}
               <p className="text-xs mt-1" style={{ color: "var(--mz-ink-muted)" }}>
