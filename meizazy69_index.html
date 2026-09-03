@@ -5467,7 +5467,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24m";
+const BUILD_VERSION = "2026-08-24n";
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
@@ -10339,6 +10339,11 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
 
   const liveSales = data ? sum(data.sales, (x) => x.total_amount_jpy) : 0;
   const liveCostPurchased = data ? data.counted.reduce((a, x) => a + productCostJpy(x), 0) : 0;
+  /* ★2026-08-24: サマリーの内訳を一覧(MonthlyProfitList)と同じ3行に揃えるため、
+     当月仕入分を「注文」「サンプル・在庫」に分けて出す(2.50.1参照)。
+     一覧とモーダルで見出しや粒度が違うと、同じ数字を見ているのに別物に見えてしまう。 */
+  const liveCostOrder = data ? data.counted.filter((x) => x.created_via_sale).reduce((a, x) => a + productCostJpy(x), 0) : 0;
+  const liveCostSample = data ? data.counted.filter((x) => !x.created_via_sale).reduce((a, x) => a + productCostJpy(x), 0) : 0;
   const liveCostSold = data ? data.soldUncounted.reduce((a, x) => a + productCostJpy(x), 0) : 0;
   const liveCost = liveCostPurchased + liveCostSold;
   const liveExpenses = data ? sum(data.expenses, (x) => x.amount_incl_tax) : 0;
@@ -10373,32 +10378,35 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
         {data && (
           <>
             <div className="rounded-lg p-3 text-xs space-y-1" style={{ border: "1px solid var(--mz-border)" }}>
-              <div className="flex justify-between"><span>売上合計</span><span>{fmtJPY(liveSales)} <Diff live={liveSales} savedValue={savedSales} /></span></div>
-              <div className="flex justify-between"><span>− 仕入原価合計</span><span>{fmtJPY(liveCost)} <Diff live={liveCost} savedValue={savedCost} /></span></div>
+              <div className="flex justify-between"><span>売上</span><span>{fmtJPY(liveSales)} <Diff live={liveSales} savedValue={savedSales} /></span></div>
+              <div className="flex justify-between"><span>− 仕入れ</span><span>{fmtJPY(liveCost)} <Diff live={liveCost} savedValue={savedCost} /></span></div>
               <div className="flex justify-between" style={{ color: "#8b8578" }}>
-                <span className="pl-3">うち 当月仕入れた商品</span><span>{fmtJPY(liveCostPurchased)}</span>
+                <span className="pl-4">注文が入って仕入れた分</span><span>{fmtJPY(liveCostOrder)}</span>
               </div>
               <div className="flex justify-between" style={{ color: "#8b8578" }}>
-                <span className="pl-3">うち 売れた在庫・サンプル</span><span>{fmtJPY(liveCostSold)}</span>
+                <span className="pl-4">サンプル・在庫として仕入れた分</span><span>{fmtJPY(liveCostSample)}</span>
+              </div>
+              <div className="flex justify-between" style={{ color: "#8b8578" }}>
+                <span className="pl-4">前からの在庫が売れた分</span><span>{fmtJPY(liveCostSold)}</span>
               </div>
               <div className="flex justify-between"><span>− その他の経費</span><span>{fmtJPY(liveExpenses)} <Diff live={liveExpenses} savedValue={savedExpenses} /></span></div>
               <div className="flex justify-between font-medium pt-1" style={{ borderTop: "1px solid var(--mz-border)" }}>
-                <span>= 粗利益</span>
+                <span>= 利益</span>
                 <span style={{ color: liveGross >= 0 ? "var(--mz-gold-soft)" : "#f2b8bd" }}>
                   {fmtJPY(liveGross)} <Diff live={liveGross} savedValue={savedGross} />
                 </span>
               </div>
               <p style={{ color: "var(--mz-ink-muted)" }}>
-                ※「保存値」が出ている行は、集計したあとに実データが変わっています。再集計すると左の数字になります。
+                ※ 右に「保存値」と出ている行は、集計したあとで元のデータが変わっています。集計し直すと左の数字になります。
               </p>
             </div>
 
             <div>
               <p className="text-sm mb-1.5">売上({data.sales.length}件) {fmtJPY(liveSales)}</p>
               <p className="text-xs mb-1" style={{ color: "var(--mz-ink-muted)" }}>
-                各行の「原価」は売れた商品の原価。<span style={{ color: "#d6a98f" }}>仕入月に計上済</span>と付いている分は、
-                仕入れた月に既に経費計上しているため、この月の原価には入っていません(二重計上を避けるため)。
-                それ以外は上の「当月販売分」としてこの月の原価に入っています。
+                「原価」は、その売上で売れた商品の仕入れ値です。
+                <span style={{ color: "#d6a98f" }}>仕入れた月に経費済</span>と付いている分は、仕入れたときにすでに経費へ入れているので、
+                ここでは引きません(同じ金額を2回引かないため)。付いていない分は、売れたこの月の経費になります。
               </p>
               {data.sales.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
                 <div className="text-xs">
@@ -10419,7 +10427,7 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
                         <div style={{ color: "var(--mz-ink-muted)" }}>
                           {its.length}点 ・ 原価 {fmtJPY(costAll)}
                           {outside > 0 && (
-                            <span style={{ color: "#d6a98f" }}>(うち仕入月に計上済 {fmtJPY(outside)})</span>
+                            <span style={{ color: "#d6a98f" }}>(うち {fmtJPY(outside)} は仕入れた月に経費済)</span>
                           )}
                         </div>
                       </div>
@@ -10430,13 +10438,16 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
             </div>
 
             <div>
-              <p className="text-sm mb-1.5">当月仕入れた商品の原価({data.counted.length}点) {fmtJPY(liveCostPurchased)}<span style={{ color: "var(--mz-ink-muted)" }}> ― 受注 / サンプル・在庫</span></p>
+              <p className="text-sm mb-1.5">この月に仕入れた商品({data.counted.length}点) {fmtJPY(liveCostPurchased)}</p>
+              <p className="text-xs mb-1" style={{ color: "var(--mz-ink-muted)" }}>
+                この月に仕入れて、この月の経費に入れた商品です。売れたかどうかは関係ありません。
+              </p>
               {data.counted.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
                 <div className="text-xs">
                   {data.counted.map((x) => (
                     <div key={x.id} className="flex justify-between py-1 gap-3" style={rowStyle}>
                       <span className="min-w-0 truncate">
-                        {x.purchase_date} [{x.created_via_sale ? "受注" : "サンプル/在庫"}]
+                        {x.purchase_date} [{x.created_via_sale ? "注文" : "サンプル・在庫"}]
                         {x.product_code ? ` No.${x.product_code}` : ""} {x.product_name || ""}
                       </span>
                       <span className="shrink-0">{fmtJPY(productCostJpy(x))}</span>
@@ -10447,10 +10458,11 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
             </div>
 
             <div>
-              <p className="text-sm mb-1.5">売れた在庫・サンプルの原価({data.soldUncounted.length}点) {fmtJPY(liveCostSold)}</p>
+              <p className="text-sm mb-1.5">前からの在庫が売れた分({data.soldUncounted.length}点) {fmtJPY(liveCostSold)}</p>
               <p className="text-xs mb-1" style={{ color: "var(--mz-ink-muted)" }}>
-                計上開始日より前に仕入れたため<b>仕入れ時に経費計上していない商品</b>が、この月に売れた分です。
-                売上が立つこの月の原価として引きます(仕入れ時に計上済みの商品はここには出ません＝二重計上しません)。
+                経費に入れ始めた日より前に仕入れた商品は、仕入れたときには経費にしていません。
+                <b>売れたときに初めて経費になります</b>。その分です。
+                (仕入れたときに経費へ入れた商品は、ここには出ません＝同じ金額を2回引きません)
               </p>
               {data.soldUncounted.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
                 <div className="text-xs">
@@ -10458,7 +10470,7 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
                     <div key={x.id} className="flex justify-between py-1 gap-3" style={rowStyle}>
                       <span className="min-w-0 truncate">
                         販売 {x._saleDate} ・ 仕入 {x.purchase_date || "(日付なし)"}
-                        [{x.created_via_sale ? "受注" : "サンプル/在庫"}] {x.product_name || ""}
+                        [{x.created_via_sale ? "注文" : "サンプル・在庫"}] {x.product_name || ""}
                       </span>
                       <span className="shrink-0">{fmtJPY(productCostJpy(x))}</span>
                     </div>
@@ -10469,18 +10481,19 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
 
             <div>
               <p className="text-sm mb-1.5" style={{ color: "#d6a98f" }}>
-どの月にも未計上の仕入れ({data.excluded.length}点) {fmtJPY(data.excluded.reduce((a, x) => a + productCostJpy(x), 0))}
+まだ経費になっていない在庫({data.excluded.length}点) {fmtJPY(data.excluded.reduce((a, x) => a + productCostJpy(x), 0))}
               </p>
               <p className="text-xs mb-1" style={{ color: "var(--mz-ink-muted)" }}>
-                この月に仕入れたが計上開始日(受注: {PURCHASE_COST_BASIS_FROM_ORDER} / サンプル・在庫: {PURCHASE_COST_BASIS_FROM_SAMPLE})より前で、
-                まだ売れてもいないため、どの月にも計上されていない分です。売れた時点でその月の原価になります。
+                この月に仕入れましたが、経費に入れ始めた日(注文: {PURCHASE_COST_BASIS_FROM_ORDER} / サンプル・在庫: {PURCHASE_COST_BASIS_FROM_SAMPLE})より前なので、
+                仕入れたときには経費にしていません。まだ売れていないので、いまはどの月の経費にも入っていません。
+                <b>売れた月に経費になります</b>。
               </p>
               {data.excluded.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
                 <div className="text-xs">
                   {data.excluded.map((x) => (
                     <div key={x.id} className="flex justify-between py-1 gap-3" style={rowStyle}>
                       <span className="min-w-0 truncate">
-                        {x.purchase_date} [{x.created_via_sale ? "受注" : "サンプル/在庫"}]
+                        {x.purchase_date} [{x.created_via_sale ? "注文" : "サンプル・在庫"}]
                         {x.product_code ? ` No.${x.product_code}` : ""} {x.product_name || ""}
                       </span>
                       <span className="shrink-0">{fmtJPY(productCostJpy(x))}</span>
@@ -10491,7 +10504,7 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
             </div>
 
             <div>
-              <p className="text-sm mb-1.5">一般経費({data.expenses.length}件) {fmtJPY(liveExpenses)}</p>
+              <p className="text-sm mb-1.5">その他の経費({data.expenses.length}件) {fmtJPY(liveExpenses)}</p>
               {data.expenses.length === 0 ? <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>なし</p> : (
                 <div className="text-xs">
                   {data.expenses.map((x) => (
@@ -10543,32 +10556,39 @@ function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, rec
                 const order = Number(p.cost_order_jpy) || 0;
                 const sample = Number(p.cost_sample_jpy) || 0;
                 const sold = Number(p.cost_sold_jpy) || 0;
-                const Row = ({ label, value, sub, minus }) => (
-                  <div className="flex justify-between gap-3" style={sub ? { paddingLeft: "12px" } : undefined}>
-                    <span>{minus ? "− " : ""}{label}</span>
+                const Row = ({ label, value, sub, sign, total }) => (
+                  <div
+                    className="flex justify-between gap-3"
+                    style={{
+                      paddingLeft: sub ? "14px" : undefined,
+                      borderTop: total ? "1px solid var(--mz-border)" : undefined,
+                      marginTop: total ? "4px" : undefined,
+                      paddingTop: total ? "4px" : undefined,
+                    }}
+                  >
+                    <span>{sign ? sign + " " : ""}{label}</span>
                     <span className="shrink-0">{fmtJPY(value)}</span>
                   </div>
                 );
                 return (
                   <div className="mt-2 text-xs space-y-0.5 max-w-md" style={{ color: "var(--mz-ink-muted)" }}>
                     <Row label="売上" value={p.total_sales_jpy} />
-                    {hasBreakdown ? (
+                    <Row label="仕入れ" value={p.total_purchase_cost_jpy} sign="−" />
+                    {hasBreakdown && (
                       <>
-                        <Row label="仕入原価" value={p.total_purchase_cost_jpy} minus />
-                        <Row label="受注の仕入れ" value={order} sub />
-                        <Row label="サンプル・在庫の仕入れ" value={sample} sub />
-                        <Row label="売れた在庫・サンプルの原価" value={sold} sub />
+                        <Row label="注文が入って仕入れた分" value={order} sub />
+                        <Row label="サンプル・在庫として仕入れた分" value={sample} sub />
+                        <Row label="前からの在庫が売れた分" value={sold} sub />
                       </>
-                    ) : (
-                      <Row label="仕入原価" value={p.total_purchase_cost_jpy} minus />
                     )}
-                    <Row label="その他の経費" value={p.total_general_expenses_jpy} minus />
+                    <Row label="その他の経費" value={p.total_general_expenses_jpy} sign="−" />
+                    <Row label="利益" value={p.gross_profit_jpy} sign="=" total />
                   </div>
                 );
               })()}
               {carriedLoss < 0 && (
                 <p className="text-xs mt-1" style={{ color: "#f2b8bd" }}>
-                  前月までの繰越損失: {fmtJPY(carriedLoss)}(報酬基準額: {fmtJPY(commissionBase)})
+                  前の月までの赤字の繰越 {fmtJPY(carriedLoss)} → 報酬の計算に使う金額 {fmtJPY(commissionBase)}
                 </p>
               )}
               <p className="text-xs mt-1" style={{ color: "var(--mz-ink-muted)" }}>
@@ -10585,17 +10605,17 @@ function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, rec
                     <p>⚠️ 前の月の集計が古いため、この月の繰越損失も古くなっています。<strong>この月だけ再集計しても直りません。</strong>前の月から順に集計し直してください。</p>
                   )}
                   {stale.savedGross !== stale.currentGross && (
-                    <p>粗利益: {fmtJPY(stale.savedGross)} → <strong>{fmtJPY(stale.currentGross)}</strong></p>
+                    <p>利益: {fmtJPY(stale.savedGross)} → <strong>{fmtJPY(stale.currentGross)}</strong></p>
                   )}
                   {stale.savedBase !== stale.currentBase && (
-                    <p>報酬の計算基準額(繰越損失を差し引いた後): {fmtJPY(stale.savedBase)} → <strong>{fmtJPY(stale.currentBase)}</strong></p>
+                    <p>報酬の計算に使う金額(前の月までの赤字を引いた後): {fmtJPY(stale.savedBase)} → <strong>{fmtJPY(stale.currentBase)}</strong></p>
                   )}
                 </div>
               )}
             </div>
             <div className="flex items-center gap-3 shrink-0">
               <span className="font-display text-lg" style={{ color: gross >= 0 ? "var(--mz-gold-soft)" : "#f2b8bd" }}>
-                粗利益 {fmtJPY(gross)}
+利益 {fmtJPY(gross)}
               </span>
               {stale && stale.diffs.length > 0 && onRecalculate && (
                 <button
@@ -11699,7 +11719,7 @@ function ContractorInvoicesPage() {
       if (!rate) {
         notes.push("この担当者・対象月に適用できる歩合率が設定されていないため、歩合報酬は¥0として計算しています(「歩合率設定」タブで登録できます)。");
       } else if (commissionBase <= 0) {
-        notes.push(`報酬基準額が${fmtJPY(commissionBase)}(粗利益${fmtJPY(mp.gross_profit_jpy)} + 繰越損失${fmtJPY(carriedLoss)})のため、この月の歩合報酬は発生しません。この赤字は翌月以降に自動で繰り越されます。`);
+        notes.push(`報酬の計算に使う金額が${fmtJPY(commissionBase)}(この月の利益${fmtJPY(mp.gross_profit_jpy)} + 前の月までの赤字の繰越${fmtJPY(carriedLoss)})のため、この月の歩合報酬は発生しません。この赤字は翌月以降に自動で繰り越されます。`);
       } else {
         amount = Math.round(commissionBase * (Number(rate.rate_percent) || 0) / 100);
       }
@@ -12001,11 +12021,11 @@ function ContractorInvoicesPage() {
               {calculating ? "集計中..." : "この月を集計する"}
             </button>
             <p className="text-xs w-full" style={{ color: "var(--mz-ink-muted)" }}>
-              売上合計(税込)・その月に仕入れた商品の原価合計(仕入れ日基準・売れたかどうかは問いません)・一般経費合計から粗利益を自動算出します。既にこの対象月のデータがあれば上書き(再集計)されます。
+              その月の売上から、仕入れにかかったお金と、その他の経費を引いて利益を出します。同じ月をもう一度集計すると、前の結果は上書きされます。
               <br />
               <span style={{ color: "#e3c489" }}>
-                仕入原価の計上開始日: 受注商品(オーダー)は{PURCHASE_COST_BASIS_FROM_ORDER}以降、
-                サンプル・在庫は{PURCHASE_COST_BASIS_FROM_SAMPLE}以降に仕入れた分のみ計上します(それより前の仕入れは対象外)。
+                仕入れを「仕入れた月の経費」に入れ始めた日は、注文が{PURCHASE_COST_BASIS_FROM_ORDER}、サンプル・在庫が{PURCHASE_COST_BASIS_FROM_SAMPLE}です。
+                それより前に仕入れた商品は、仕入れた月ではなく<b>売れた月の経費</b>になります(売れるまでは経費になりません)。
               </span>
             </p>
           </div>
@@ -12089,11 +12109,11 @@ function ContractorInvoicesPage() {
                 style={{ border: "1px solid var(--mz-border)" }}
               >
                 <div className="text-xs space-y-1" style={{ color: "var(--mz-ink-muted)" }}>
-                  <p>対象月の粗利益: {fmtJPY(invoicePreview.monthlyProfit.gross_profit_jpy)}</p>
+                  <p>この月の利益: {fmtJPY(invoicePreview.monthlyProfit.gross_profit_jpy)}</p>
                   {invoicePreview.carriedLoss < 0 && (
-                    <p>前月までの繰越損失: {fmtJPY(invoicePreview.carriedLoss)}</p>
+                    <p>前の月までの赤字の繰越: {fmtJPY(invoicePreview.carriedLoss)}</p>
                   )}
-                  <p>報酬基準額: {fmtJPY(invoicePreview.commissionBase)}</p>
+                  <p>報酬の計算に使う金額: {fmtJPY(invoicePreview.commissionBase)}</p>
                   <p>適用歩合率: {invoicePreview.rate ? `${invoicePreview.rate.rate_percent}%` : "(未設定)"}</p>
                   <p>歩合報酬(税込): {fmtJPY(invoicePreview.amount)}
                     <span style={{ color: "#8b8578" }}>
