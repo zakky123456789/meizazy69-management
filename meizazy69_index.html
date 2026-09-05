@@ -623,6 +623,100 @@ function NextVisitsCard() {
   );
 }
 
+/* ---- まだ経費になっていない在庫(★2026-09-05実装。2.54参照) ---- */
+/* 仕入原価の計上開始日(2.45)より前に仕入れた商品は、仕入れた月には経費にしていない。
+   売れたときに初めてその月の原価になるため、**売れるまではどの月の経費にも入らない**。
+   その「経費として眠っている金額」は、そのままにしておくと帳簿上の利益を実態より
+   大きく見せ続けるため、ダッシュボードと月次損益タブの両方に常設で出す。
+
+   判定は必ず isPurchaseCostCountable を通すこと。ここだけ独自条件を書くと、
+   月次損益の「まだ経費になっていない在庫」(内訳モーダル)と数字が食い違う。 */
+function UncountedStockCard() {
+  const [data, setData] = useState(null); // null = 読み込み中
+  const [error, setError] = useState(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      /* 種類ごとに計上開始日が違うため、PostgRESTの条件だけでは絞り切れない。
+         「遅いほうの開始日より前(+仕入れ日なし)」で広めに取ってから、
+         isPurchaseCostCountable で正確に判定する。 */
+      const [productRes, itemRes] = await Promise.all([
+        supabase
+          .from("products")
+          .select("id,purchase_date,created_via_sale,product_code,product_name,size,status,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+          .or(`purchase_date.is.null,purchase_date.lt.${PURCHASE_COST_BASIS_FROM_MAX}`),
+        // 一度でも売れた商品は、売れた月の原価に入っているため対象外
+        supabase.from("sale_items").select("product_id"),
+      ]);
+      if (productRes.error || itemRes.error) {
+        setError("まだ経費になっていない在庫の集計に失敗しました");
+        return;
+      }
+      const soldIds = {};
+      (itemRes.data || []).forEach((si) => { if (si.product_id) soldIds[si.product_id] = true; });
+      const items = (productRes.data || [])
+        .filter((x) => !isPurchaseCostCountable(x) && !soldIds[x.id])
+        .map((x) => ({ ...x, _cost: productCostJpy(x) }))
+        .sort((a, b) => b._cost - a._cost);
+      setData({
+        items,
+        total: items.reduce((a, x) => a + x._cost, 0),
+        // 返品在庫は仕様上コスト0円で登録されるため、点数には出るが金額には効かない(2.16)
+        pricedCount: items.filter((x) => x._cost > 0).length,
+      });
+    })();
+  }, []);
+
+  return (
+    <section className="space-y-3">
+      <h3 className="font-display text-base">まだ経費になっていない在庫</h3>
+      {error ? (
+        <p className="text-sm" style={{ color: "#f2b8bd" }}>{error}</p>
+      ) : data === null ? (
+        <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+      ) : (
+        <div className="rounded-xl p-4 space-y-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+          <div className="flex items-baseline justify-between gap-3 flex-wrap">
+            <span className="font-display text-lg" style={{ color: "var(--mz-gold-soft)" }}>
+              {data.items.length}点 ・ {fmtJPY(data.total)}
+            </span>
+            {data.items.length > 0 && (
+              <button
+                onClick={() => setOpen((v) => !v)}
+                className="text-xs px-2.5 py-1.5 rounded-lg"
+                style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+              >
+                {open ? "内訳を閉じる" : "内訳を見る"}
+              </button>
+            )}
+          </div>
+          <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+            経費に入れ始めた日(注文: {PURCHASE_COST_BASIS_FROM_ORDER} / サンプル・在庫: {PURCHASE_COST_BASIS_FROM_SAMPLE})より前に仕入れて、
+            <b>まだ売れていない</b>商品です。仕入れたときには経費にしていないので、<b>売れた月に初めてその原価が経費になります</b>。
+            {data.items.length > data.pricedCount &&
+              `(うち${data.items.length - data.pricedCount}点は原価0円の返品在庫のため、金額には含まれていません)`}
+          </p>
+          {open && (
+            <div className="text-xs pt-1" style={{ borderTop: "1px solid var(--mz-border)" }}>
+              {data.items.map((x) => (
+                <div key={x.id} className="flex justify-between gap-3 py-1" style={{ borderBottom: "1px solid var(--mz-border)" }}>
+                  <span className="min-w-0 truncate" style={{ color: "var(--mz-ink-muted)" }}>
+                    {x.purchase_date || "(仕入れ日なし)"}
+                    {x.product_code ? ` No.${x.product_code}` : ""} {x.product_name || ""}
+                    {x.size ? ` - ${x.size}` : ""}
+                  </span>
+                  <span className="shrink-0">{fmtJPY(x._cost)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function DashboardPage() {
   const [sales, setSales] = useState(null); // null = 読み込み中
   const [error, setError] = useState(null);
@@ -682,9 +776,16 @@ function DashboardPage() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <DashboardStatCard label="取引件数" value={`${summary.allTime.count}件`} />
             <DashboardStatCard label="売上合計" value={fmtJPY(summary.allTime.totalAmount)} highlight />
-            <DashboardStatCard label="利益合計(売上−原価)" value={fmtJPY(summary.allTime.totalProfit)} highlight />
+            <DashboardStatCard label="販売差益(売上−売れた商品の原価)" value={fmtJPY(summary.allTime.totalProfit)} highlight />
           </div>
         )}
+        {/* ★2026-08-24s: 月次損益の「利益」と数字が違うのは当然(別の指標)だが、
+            どちらも「利益」と呼んでいたため食い違いに見えていた(2.53参照)。
+            何が入っていないのかをその場に書いて、見るべき画面を案内する。 */}
+        <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+          販売差益は「売れた商品」だけで計算した差益です。<b>まだ売れていない在庫・サンプルの仕入れ代金と、その他の経費(送料・交通費・倉庫代など)は含みません。</b>
+          それらを差し引いた最終的な利益は「外注費請求書 → 月次損益」で確認できます。
+        </p>
       </section>
 
       <section className="space-y-3">
@@ -695,10 +796,15 @@ function DashboardPage() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <DashboardStatCard label="取引件数" value={`${summary.thisMonth.count}件`} />
             <DashboardStatCard label="売上合計" value={fmtJPY(summary.thisMonth.totalAmount)} highlight />
-            <DashboardStatCard label="利益合計(売上−原価)" value={fmtJPY(summary.thisMonth.totalProfit)} highlight />
+            <DashboardStatCard label="販売差益(売上−売れた商品の原価)" value={fmtJPY(summary.thisMonth.totalProfit)} highlight />
           </div>
         )}
       </section>
+
+      {/* ★2026-09-05: まだどの月の経費にも入っていない在庫(2.54参照)。
+          売上・差益は「流れた金額」だが、これは「まだ経費として落ちていない残高」なので
+          月別の集計とは別枠で最後に置く。 */}
+      <UncountedStockCard />
     </div>
   );
 }
@@ -2300,7 +2406,7 @@ function HostClubDetailPage({ clubId }) {
             <div className="grid grid-cols-3 gap-2">
               <ClubSalesStat label="取引件数" value={`${salesSummary.count}件`} />
               <ClubSalesStat label="売上合計" value={fmtJPY(salesSummary.totalAmount)} highlight />
-              <ClubSalesStat label="利益合計" value={fmtJPY(salesSummary.totalProfit)} highlight />
+              <ClubSalesStat label="販売差益" value={fmtJPY(salesSummary.totalProfit)} highlight />
             </div>
             <div className="space-y-2">
               {sales.map((s) => (
@@ -4752,7 +4858,7 @@ async function updateProductCore(form, original, options) {
     if (!sync.ok) {
       return {
         ok: true,
-        warning: `商品情報は更新されましたが、販売明細の利益(profit_jpy)の再計算に失敗しました: ${sync.message}\nダッシュボード・ホストクラブ別の利益合計が古い値のままになっている可能性があります。`,
+        warning: `商品情報は更新されましたが、販売明細の利益(profit_jpy)の再計算に失敗しました: ${sync.message}\nダッシュボード・ホストクラブ別の販売差益が古い値のままになっている可能性があります。`,
       };
     }
   }
@@ -4955,7 +5061,7 @@ function ProductsPage() {
         .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
         .eq("created_via_sale", false) // ★2026-08-04実装: 販売登録からの新規仕入はサンプル・在庫の一覧から除外(2.30参照)
         .order("created_at", { ascending: false }),
-      supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
+      supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny,bd_order_no").order("purchase_date", { ascending: false }),
       supabase.from("agent_charge_consumptions").select("id,product_id"),
       // ★2026-08-17修正: ロットの紐付け点数は「全商品」を対象に数える必要がある。上のproductsクエリは
       //   created_via_sale=false(=受注商品を除外)で取得しているため、これを使って数えると、
@@ -5182,7 +5288,7 @@ function ProductsPage() {
   // 「+ 新規ロット登録」の両方で共通利用する)。
   const createBatch = async (form) => {
     const { data, error } = await supabase.from("purchase_batches").insert(form).select().single();
-    if (error || !data) return { ok: false, message: "ロットの登録に失敗しました" };
+    if (error || !data) return { ok: false, message: batchWriteErrorMessage(error, "登録") };
     return { ok: true, batch: data };
   };
 
@@ -5206,7 +5312,7 @@ function ProductsPage() {
       (Number(patch.total_items) || 0) !== (Number(before.total_items) || 0);
 
     const { error } = await supabase.from("purchase_batches").update(patch).eq("id", id);
-    if (error) { alert("ロットの更新に失敗しました"); return; }
+    if (error) { alert(batchWriteErrorMessage(error, "更新")); return; }
 
     const linkedCount = usageCountByBatch[id] || 0;
     if (amountsChanged && linkedCount > 0) {
@@ -5467,7 +5573,20 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-08-24p";
+const BUILD_VERSION = "2026-09-05b";
+
+/* ★2026-09-05追加: purchase_batches への書き込みが失敗したときのメッセージ。
+   「ロットの登録に失敗しました」だけでは原因が分からず、原因の切り分けに時間がかかる(5章42番)。
+   列不足(PostgRESTは 42703 または PGRST204 を返す)は「マイグレーション未実行」と断定できるため、
+   実行すべきSQLを名指しする。それ以外はサーバーからのメッセージをそのまま出す。 */
+function batchWriteErrorMessage(error, verb) {
+  const code = (error || {}).code;
+  if (code === "42703" || code === "PGRST204") {
+    return `ロットの${verb}に失敗しました。purchase_batchesに必要な列がありません。`
+      + `設計書1.9のマイグレーションSQL(bd_order_no の追加)を実行してください。`;
+  }
+  return `ロットの${verb}に失敗しました(${(error || {}).message || code || "原因不明"})`;
+}
 
 /* ★2026-08-24追加: 仕入原価を月次損益へ計上し始める日(2.45参照)。
    「その月に仕入れた商品の原価をその月の経費にする」方式へ切り替えた際、
@@ -5487,6 +5606,13 @@ const PURCHASE_COST_BASIS_FROM_ORDER = "2026-08-01";   // 受注商品(オーダ
 const PURCHASE_COST_BASIS_FROM_SAMPLE = "2026-08-28";  // サンプル・在庫
 const PURCHASE_COST_BASIS_FROM_MIN =
   PURCHASE_COST_BASIS_FROM_ORDER < PURCHASE_COST_BASIS_FROM_SAMPLE
+    ? PURCHASE_COST_BASIS_FROM_ORDER : PURCHASE_COST_BASIS_FROM_SAMPLE;
+/* ★2026-09-05追加: 2つの開始日のうち遅いほう。
+   「計上対象外になりうる商品」をDB側で広めに絞り込む上限として使う(UncountedStockCard)。
+   種類ごとに開始日が違うためPostgRESTの条件だけでは絞り切れず、
+   **必ずこの上限で広めに取ってから isPurchaseCostCountable で正確に判定する**。 */
+const PURCHASE_COST_BASIS_FROM_MAX =
+  PURCHASE_COST_BASIS_FROM_ORDER > PURCHASE_COST_BASIS_FROM_SAMPLE
     ? PURCHASE_COST_BASIS_FROM_ORDER : PURCHASE_COST_BASIS_FROM_SAMPLE;
 
 /* その商品を仕入原価として計上してよいか(計上開始日の判定)。
@@ -6709,7 +6835,7 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
           onSave={handleSaveCostEdit}
           onCreateBatch={async (form) => {
             const { data, error: batchErr } = await supabase.from("purchase_batches").insert(form).select().single();
-            if (batchErr || !data) return { ok: false, message: "ロットの登録に失敗しました" };
+            if (batchErr || !data) return { ok: false, message: batchWriteErrorMessage(batchErr, "登録") };
             return { ok: true, batch: data };
           }}
         />
@@ -8456,7 +8582,7 @@ function SalesPage() {
         .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number,recipient_name,honorific,memo),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
-      supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny").order("purchase_date", { ascending: false }),
+      supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny,bd_order_no").order("purchase_date", { ascending: false }),
     ]);
     // sales取得が失敗しても、同時に取得できたクラブ・ロットは反映する(販売登録モーダルを使えなくしないため)
     setClubs(clubsRes.data || []);
@@ -8680,7 +8806,7 @@ function SalesPage() {
   // ★2026-08-04実装: 「仕入れ商品」タブ内のProductFormModalから「+ 新規ロット登録」した場合のロット作成(2.30参照)
   const handleCreateBatchInlineSales = async (form) => {
     const { data, error } = await supabase.from("purchase_batches").insert(form).select().single();
-    if (error || !data) return { ok: false, message: "ロットの登録に失敗しました" };
+    if (error || !data) return { ok: false, message: batchWriteErrorMessage(error, "登録") };
     loadAll();
     return { ok: true, batch: data };
   };
@@ -9395,9 +9521,23 @@ function ExpenseList({ expenses, editingId, onEdit, onCancelEdit, onSave, onDele
       </p>
     );
   }
-  return (
-    <div className="space-y-2">
-      {expenses.map((e) => (
+  /* ★2026-08-24q: 支払月ごとに区切って表示する(2.52参照)。
+     一覧が伸びると「どこからどこまでが何月分か」が読み取れず、月次損益の
+     「その他の経費」と突き合わせるのに毎回フィルタを操作する必要があった。
+     並び順は呼び出し側(支払日の降順)をそのまま使い、ここでは並べ替えない。
+     ソート条件が2箇所に分かれると、片方だけ直したときに静かにズレるため。 */
+  const groups = [];
+  const groupIndexByMonth = {};
+  expenses.forEach((e) => {
+    const ym = (e.payment_date || "").slice(0, 7) || "unknown";
+    if (groupIndexByMonth[ym] == null) {
+      groupIndexByMonth[ym] = groups.length;
+      groups.push({ ym, items: [] });
+    }
+    groups[groupIndexByMonth[ym]].items.push(e);
+  });
+
+  const renderRow = (e) => (
         e.id === editingId ? (
           <div
             key={e.id}
@@ -9463,7 +9603,28 @@ function ExpenseList({ expenses, editingId, onEdit, onCancelEdit, onSave, onDele
           </div>
         </div>
         )
-      ))}
+  );
+
+  return (
+    <div className="space-y-6">
+      {groups.map((g) => {
+        const subtotal = g.items.reduce((a, x) => a + (Number(x.amount_incl_tax) || 0), 0);
+        return (
+          <div key={g.ym} className="space-y-2">
+            <div
+              className="flex items-baseline justify-between gap-3 px-1 pb-1"
+              style={{ borderBottom: "1px solid var(--mz-border)" }}
+            >
+              <span className="font-display text-base">
+                {g.ym === "unknown" ? "支払日が未入力" : formatMonthLabel(`${g.ym}-01`)}
+                <span className="text-xs ml-2" style={{ color: "var(--mz-ink-muted)" }}>{g.items.length}件</span>
+              </span>
+              <span className="text-sm" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(subtotal)}</span>
+            </div>
+            <div className="space-y-2">{g.items.map(renderRow)}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -9856,7 +10017,11 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
 function ExpensesPage() {
   const [expenses, setExpenses] = useState(null); // null = 読み込み中
   const [error, setError] = useState(null);
-  const [filterMonth, setFilterMonth] = useState("all"); // "all" | "YYYY-MM"
+  /* ★2026-08-24r: 対象月の既定を「当月」にする(2.52参照)。
+     経費の入力・確認は当月分に対して行うのが大半で、既定が「すべて」だと毎回絞り直す必要があった。
+     過去やすべての期間は、このプルダウンから自分で選べる。 */
+  const currentMonth = todayISO().slice(0, 7);
+  const [filterMonth, setFilterMonth] = useState(currentMonth); // "all" | "YYYY-MM"
   const [filterCategory, setFilterCategory] = useState("all");
   const [formExpense, setFormExpense] = useState({}); // {}=新規(空), idを持つオブジェクト=編集, AI抽出結果(id無し)=新規への下書き反映
   const [formKey, setFormKey] = useState(0); // 変更するたびにExpenseInlineFormを再マウントし、内部stateを再初期化する
@@ -9887,11 +10052,21 @@ function ExpensesPage() {
 
   useEffect(() => { loadExpenses(); }, [loadExpenses]);
 
+  /* データのある月に加えて、当月と「いま選んでいる月」を必ず選択肢に含める。
+     ★2026-08-24r: 既定が当月になったため、当月の経費がまだ1件も無いと選択肢に当月が現れず、
+     <select>の表示が空欄になってしまう(値はあるのに対応するoptionが無い状態)。 */
   const monthOptions = useMemo(() => {
-    if (!expenses) return [];
-    const set = new Set(expenses.map((e) => (e.payment_date || "").slice(0, 7)).filter(Boolean));
+    const set = new Set((expenses || []).map((e) => (e.payment_date || "").slice(0, 7)).filter(Boolean));
+    set.add(currentMonth);
+    if (filterMonth !== "all") set.add(filterMonth);
     return Array.from(set).sort((a, b) => b.localeCompare(a));
-  }, [expenses]);
+  }, [expenses, currentMonth, filterMonth]);
+
+  /* 支払日が未入力の経費は月で絞り込むと出てこない。黙って消えると気づけないため件数を控えておく(5章35番) */
+  const noDateCount = useMemo(
+    () => (expenses || []).filter((e) => !e.payment_date).length,
+    [expenses]
+  );
 
   const filteredExpenses = useMemo(() => {
     if (!expenses) return [];
@@ -9999,8 +10174,12 @@ function ExpensesPage() {
             className="rounded-lg px-3 py-2 text-sm bg-transparent"
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           >
-            <option value="all">対象月: すべて</option>
-            {monthOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+            <option value="all">対象月: すべての期間</option>
+            {monthOptions.map((m) => (
+              <option key={m} value={m}>
+                対象月: {formatMonthLabel(`${m}-01`)}{m === currentMonth ? "(今月)" : ""}
+              </option>
+            ))}
           </select>
           <select
             value={filterCategory}
@@ -10021,8 +10200,29 @@ function ExpensesPage() {
         </div>
       )}
 
+      {/* 月で絞り込むと支払日が未入力の経費は出てこない。黙って消えると気づけないので件数を出す(5章35番) */}
+      {expenses !== null && filterMonth !== "all" && noDateCount > 0 && (
+        <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
+          支払日が未入力の経費が{noDateCount}件あります。月で絞り込んでいる間は表示されません(「対象月: すべての期間」で確認できます)。
+        </p>
+      )}
+
       {expenses === null ? (
         <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+      ) : filteredExpenses.length === 0 && filterMonth !== "all" ? (
+        <div className="rounded-xl p-8 text-center space-y-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+          <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>
+            {formatMonthLabel(`${filterMonth}-01`)}の経費はまだありません。
+            {filterCategory !== "all" && `(勘定科目「${filterCategory}」で絞り込み中)`}
+          </p>
+          <button
+            onClick={() => { setFilterMonth("all"); setFilterCategory("all"); }}
+            className="text-xs px-3 py-2 rounded-lg"
+            style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+          >
+            すべての期間を表示
+          </button>
+        </div>
       ) : (
         <ExpenseList
           expenses={filteredExpenses}
@@ -12055,6 +12255,10 @@ function ContractorInvoicesPage() {
               下の警告表示は最新でない可能性があります。報酬を発行する前に、対象月を一度集計し直すことをおすすめします。
             </p>
           )}
+
+          {/* ★2026-09-05: 月次損益の数字を見るときに必ず併せて見てほしい残高(2.54参照)。
+              この金額は今後売れた月の原価として効いてくるため、月別の利益だけを見ていると見落とす。 */}
+          <UncountedStockCard />
 
           {monthlyProfits === null ? (
             <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
