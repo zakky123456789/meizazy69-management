@@ -2473,6 +2473,19 @@ function preciseCny(n) {
   return Math.round((Number(n) || 0) * 10000) / 10000;
 }
 
+/* ★2026-09-15追加: JPYは円未満を持たないため、CNY(小数点4桁保持)とは違い整数に丸める。
+   端数は「最終品吸収方式」で最後の1点が吸収するので、合計は必ずロット合計と一致する(2.55参照)。 */
+function preciseJpy(n) {
+  return Math.round(Number(n) || 0);
+}
+
+/* ★2026-09-15追加: 仕入れロットの支払い経路(2.55参照)。
+   ウォレット(BuckyDrop)= 既定 / 直接支払い(ウォレットを使わない別の転送業者)の2値。
+   商品の cost_source(2.46)と違い「仕入れなし」は無い(仕入れていない物に送料の按分は発生しないため)。
+   未設定(null)は既存ロットなので必ずウォレット扱いにフォールバックさせること。 */
+const batchCostSourceOf = (b) =>
+  ((b || {}).cost_source === COST_SOURCE_DIRECT ? COST_SOURCE_DIRECT : COST_SOURCE_WALLET);
+
 /* ★2026-08-04実装: ロットの送料・手数料を商品へ配分する際、「最後の1点」に端数をすべて吸収させることで、
    ロットに紐づく全商品の合計が、常にロットの合計金額(total_shipping_cny/total_fee_cny)と完全に一致するようにする。
    ・まだロットの登録済み点数が総点数(total_items)未満なら、通常通り1点あたりの金額(preciseCny)を返す。
@@ -2480,10 +2493,20 @@ function preciseCny(n) {
      「ロット合計 − すでに登録済みの商品に保存されている実際の合計」を差額として返す。
    excludeProductId: 編集時に自分自身をカウントから除外するため(任意) */
 async function computeBatchItemAmounts(batch, excludeProductId) {
-  const fallback = { shipping: preciseCny(batch.per_item_shipping_cny), fee: preciseCny(batch.per_item_fee_cny) };
+  /* ★2026-09-15: 直接支払いのロットはJPYも同じ「最終品吸収方式」で按分する(2.55参照)。
+     ウォレットのロットではJPYはFIFO消化が決めるため、ここでは一切触らない(0を返す)。 */
+  const direct = batchCostSourceOf(batch) === COST_SOURCE_DIRECT;
+  const costSource = direct ? COST_SOURCE_DIRECT : COST_SOURCE_WALLET;
+  const fallback = {
+    shipping: preciseCny(batch.per_item_shipping_cny),
+    fee: preciseCny(batch.per_item_fee_cny),
+    shippingJpy: direct ? preciseJpy(batch.per_item_shipping_jpy) : 0,
+    feeJpy: direct ? preciseJpy(batch.per_item_fee_jpy) : 0,
+    costSource,
+  };
   if (!batch.total_items) return fallback; // total_itemsが無い(古いデータ等)場合は従来通り
 
-  let query = supabase.from("products").select("shipping_cny,fee_cny").eq("batch_id", batch.id);
+  let query = supabase.from("products").select("shipping_cny,fee_cny,shipping_jpy,fee_jpy").eq("batch_id", batch.id);
   if (excludeProductId) query = query.neq("id", excludeProductId);
   const { data, error } = await query;
   if (error || !data) return fallback;
@@ -2493,9 +2516,14 @@ async function computeBatchItemAmounts(batch, excludeProductId) {
 
   const usedShipping = data.reduce((sum, p) => sum + (Number(p.shipping_cny) || 0), 0);
   const usedFee = data.reduce((sum, p) => sum + (Number(p.fee_cny) || 0), 0);
+  const usedShippingJpy = data.reduce((sum, p) => sum + (Number(p.shipping_jpy) || 0), 0);
+  const usedFeeJpy = data.reduce((sum, p) => sum + (Number(p.fee_jpy) || 0), 0);
   return {
     shipping: preciseCny((Number(batch.total_shipping_cny) || 0) - usedShipping),
     fee: preciseCny((Number(batch.total_fee_cny) || 0) - usedFee),
+    shippingJpy: direct ? preciseJpy((Number(batch.total_shipping_jpy) || 0) - usedShippingJpy) : 0,
+    feeJpy: direct ? preciseJpy((Number(batch.total_fee_jpy) || 0) - usedFeeJpy) : 0,
+    costSource,
   };
 }
 
@@ -3203,13 +3231,23 @@ function BatchFormModal({ batch, onClose, onSave }) {
      入力欄は2026-08-18から存在していたが**stateの宣言が漏れており**、
      このモーダルを開くと ReferenceError で画面が真っ白になっていた(5章48番参照)。 */
   const [bdOrderNo, setBdOrderNo] = useState(batch ? (batch.bd_order_no || "") : "");
+  /* ★2026-09-15: ロットの支払い経路(2.55参照)。ウォレットはBuckyDropを使った便だけで、
+     別の転送業者を使った便はウォレットを経由しない。既存ロットは必ずウォレット扱いに倒す。 */
+  const [costSource, setCostSource] = useState(batchCostSourceOf(batch));
+  const [totalShippingJpy, setTotalShippingJpy] = useState(batch && batch.total_shipping_jpy != null ? String(batch.total_shipping_jpy) : "");
+  const [totalFeeJpy, setTotalFeeJpy] = useState(batch && batch.total_fee_jpy != null ? String(batch.total_fee_jpy) : "");
   const [saving, setSaving] = useState(false);
 
+  const isDirect = costSource === COST_SOURCE_DIRECT;
   const items = parseInt(totalItems, 10) || 0;
   const shipping = parseFloat(totalShippingCny) || 0;
   const fee = parseFloat(totalFeeCny) || 0;
   const perItemShipping = items > 0 ? shipping / items : 0;
   const perItemFee = items > 0 ? fee / items : 0;
+  const shippingJpy = parseFloat(totalShippingJpy) || 0;
+  const feeJpy = parseFloat(totalFeeJpy) || 0;
+  const perItemShippingJpy = items > 0 ? shippingJpy / items : 0;
+  const perItemFeeJpy = items > 0 ? feeJpy / items : 0;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -3225,6 +3263,13 @@ function BatchFormModal({ batch, onClose, onSave }) {
       per_item_shipping_cny: perItemShipping,
       per_item_fee_cny: perItemFee,
       bd_order_no: bdOrderNo.trim() || null,
+      /* ウォレットのロットではJPYはFIFO消化が決めるため、0を入れて残さない。
+         経路を直接支払い→ウォレットに戻したときに古いJPYが残り続けるのを防ぐ。 */
+      cost_source: costSource,
+      total_shipping_jpy: isDirect ? shippingJpy : 0,
+      total_fee_jpy: isDirect ? feeJpy : 0,
+      per_item_shipping_jpy: isDirect ? perItemShippingJpy : 0,
+      per_item_fee_jpy: isDirect ? perItemFeeJpy : 0,
     });
     setSaving(false);
   };
@@ -3270,6 +3315,20 @@ function BatchFormModal({ batch, onClose, onSave }) {
           <input type="number" min="1" step="1" value={totalItems} onChange={(e) => setTotalItems(e.target.value)} required
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
         </div>
+        {/* ★2026-09-15実装: ロットの支払い経路(2.55参照) */}
+        <div>
+          <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>支払い経路</label>
+          <select value={costSource} onChange={(e) => setCostSource(e.target.value)}
+            className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+            <option value={COST_SOURCE_WALLET}>ウォレット(BuckyDrop)</option>
+            <option value={COST_SOURCE_DIRECT}>直接支払い(ウォレットを使わない別の転送業者)</option>
+          </select>
+          <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+            {isDirect
+              ? "ウォレットは使いません。CNYは記録用で、JPYが実際に支払った金額として原価になります。このロットを選んだ商品は自動で「直接支払い」になります。"
+              : "BuckyDropへのチャージ残高(ウォレット)からFIFOで自動消化します。"}
+          </p>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>国際送料合計(CNY)</label>
@@ -3282,8 +3341,31 @@ function BatchFormModal({ batch, onClose, onSave }) {
               className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
           </div>
         </div>
+        {isDirect && (
+          <div className="pt-1" style={{ borderTop: "1px solid var(--mz-border)" }}>
+            <p className="text-xs mt-2 mb-2" style={{ color: "var(--mz-ink-muted)" }}>
+              実際に支払った金額(JPY)。<b>この金額が原価になります</b>(上のCNYは記録用)。
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>国際送料合計(JPY)</label>
+                <input type="number" min="0" step="any" value={totalShippingJpy} onChange={(e) => setTotalShippingJpy(e.target.value)}
+                  className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+              </div>
+              <div>
+                <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>その他手数料合計(JPY)</label>
+                <input type="number" min="0" step="any" value={totalFeeJpy} onChange={(e) => setTotalFeeJpy(e.target.value)}
+                  className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+              </div>
+            </div>
+          </div>
+        )}
         <div className="rounded-lg px-3 py-2 text-xs" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" }}>
           1点あたり自動按分: 送料 {perItemShipping.toFixed(2)} CNY ・ 手数料 {perItemFee.toFixed(2)} CNY
+          {isDirect && (
+            <><br />(JPY) 送料 {fmtJPY(preciseJpy(perItemShippingJpy))} ・ 手数料 {fmtJPY(preciseJpy(perItemFeeJpy))}
+            <br />割り切れない分は最後の1点で差額調整され、合計は必ずロット合計と一致します。</>
+          )}
         </div>
         <div className="flex gap-2 pt-1">
           <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>キャンセル</button>
@@ -3731,7 +3813,15 @@ function BatchList({ batches, usageCountByBatch, onEdit, onDelete, deletingBatch
         return (
         <div key={b.id} className="rounded-xl p-4" style={{ background: "var(--mz-surface)", border: `1px solid ${remaining > 0 ? "#7a5a3a" : "var(--mz-border)"}` }}>
           <div className="flex items-center justify-between flex-wrap gap-2">
-            <p className="text-sm font-medium">{b.name ? `${b.name}(${b.purchase_date})` : b.purchase_date}</p>
+            <p className="text-sm font-medium">
+              {b.name ? `${b.name}(${b.purchase_date})` : b.purchase_date}
+              {/* ★2026-09-15: ウォレットを使わないロットは一目で分かるようにする(2.55参照) */}
+              {batchCostSourceOf(b) === COST_SOURCE_DIRECT && (
+                <span className="text-xs ml-2 px-2 py-0.5 rounded-full" style={{ background: "var(--mz-surface-hover)", color: "#9fb8d6" }}>
+                  直接支払い
+                </span>
+              )}
+            </p>
             <div className="flex items-center gap-2">
               <span className="text-xs" style={{ color: remaining === 0 ? "var(--mz-ink-muted)" : "#d6a98f" }}>
                 紐付け済み: {linked} / {total} 点
@@ -3757,10 +3847,21 @@ function BatchList({ batches, usageCountByBatch, onEdit, onDelete, deletingBatch
           <div className="text-xs mt-1.5 flex flex-wrap gap-x-4 gap-y-1" style={{ color: "var(--mz-ink-muted)" }}>
             <span>送料合計: {b.total_shipping_cny} CNY(1点 {Number(b.per_item_shipping_cny).toFixed(2)})</span>
             <span>手数料合計: {b.total_fee_cny} CNY(1点 {Number(b.per_item_fee_cny).toFixed(2)})</span>
+            {/* 直接支払いのロットは、原価になるのはJPYのほう(CNYは記録用)。2.55参照 */}
+            {batchCostSourceOf(b) === COST_SOURCE_DIRECT && (
+              <>
+                <span>送料合計: {fmtJPY(b.total_shipping_jpy)}(1点 {fmtJPY(preciseJpy(b.per_item_shipping_jpy))})</span>
+                <span>手数料合計: {fmtJPY(b.total_fee_jpy)}(1点 {fmtJPY(preciseJpy(b.per_item_fee_jpy))})</span>
+              </>
+            )}
           </div>
           {remaining > 0 && (
             <p className="text-xs mt-2 rounded-lg px-2.5 py-1.5" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
-              ⚠️ 残り{remaining}点が未紐付けです。この分の送料・手数料はまだウォレットから消化されていません(残高が実態より多く見えています)。販売登録ページの「ロット紐付け」タブから商品に紐付けてください。
+              ⚠️ 残り{remaining}点が未紐付けです。
+              {batchCostSourceOf(b) === COST_SOURCE_DIRECT
+                ? "この分の送料・手数料はまだどの商品の原価にもなっていません。"
+                : "この分の送料・手数料はまだウォレットから消化されていません(残高が実態より多く見えています)。"}
+              販売登録ページの「ロット紐付け」タブから商品に紐付けてください。
             </p>
           )}
           {remaining < 0 && (
@@ -4006,15 +4107,24 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
     return [...batches, ...extraBatches.filter((b) => !ids.has(b.id))];
   }, [batches, extraBatches]);
 
+  /* ★2026-09-15: 直接支払いのロットを選んだら、商品側の支払い経路も自動で直接支払いに切り替え、
+     JPYの按分額も流し込む(2.55参照)。選び忘れでウォレットが意図せず減る事故を防ぐため。
+     ウォレットのロットでは経路を触らない(仕入れなしの商品にロットを付ける運用は無いため)。 */
+  const applyBatchAmounts = (amounts) => {
+    setShippingCny(String(amounts.shipping));
+    setFeeCny(String(amounts.fee));
+    if (amounts.costSource === COST_SOURCE_DIRECT) {
+      setCostSource(COST_SOURCE_DIRECT);
+      setShippingJpy(String(amounts.shippingJpy));
+      setFeeJpy(String(amounts.feeJpy));
+    }
+  };
+
   const handleBatchChange = async (id) => {
     setBatchId(id);
     if (!id) return;
     const b = allBatches.find((x) => x.id === id);
-    if (b) {
-      const amounts = await computeBatchItemAmounts(b, product.id || null);
-      setShippingCny(String(amounts.shipping));
-      setFeeCny(String(amounts.fee));
-    }
+    if (b) applyBatchAmounts(await computeBatchItemAmounts(b, product.id || null));
   };
 
   const handleBatchCreated = async (form) => {
@@ -4023,9 +4133,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
     setExtraBatches((prev) => [...prev, res.batch]);
     setBatchModalOpen(false);
     setBatchId(res.batch.id);
-    const amounts = await computeBatchItemAmounts(res.batch, product.id || null);
-    setShippingCny(String(amounts.shipping));
-    setFeeCny(String(amounts.fee));
+    applyBatchAmounts(await computeBatchItemAmounts(res.batch, product.id || null));
   };
 
   // ★2026-07-10実装: カラーバリエーション一括登録用のチェック切り替え・金額入力ハンドラ
@@ -4907,26 +5015,51 @@ async function reallocateBatchAmounts(batch) {
   const perShipping = preciseCny(totalShipping / totalItems);
   const perFee = preciseCny(totalFee / totalItems);
 
+  /* ★2026-09-15: 直接支払いのロットはJPYも同じ規則で配分し直す(2.55参照)。
+     ウォレットのロットではJPYはFIFO消化(updateProductCore)が決めるため、ここでは触らない。 */
+  const direct = batchCostSourceOf(batch) === COST_SOURCE_DIRECT;
+  const totalShippingJpy = Number(batch.total_shipping_jpy) || 0;
+  const totalFeeJpy = Number(batch.total_fee_jpy) || 0;
+  const perShippingJpy = preciseJpy(totalShippingJpy / totalItems);
+  const perFeeJpy = preciseJpy(totalFeeJpy / totalItems);
+
   // 先に配分表を確定させる(i+1 が総点数に達する1点だけが差額を吸収する)
   let sumShipping = 0;
   let sumFee = 0;
+  let sumShippingJpy = 0;
+  let sumFeeJpy = 0;
   const plan = list.map((product, i) => {
     const isLast = (i + 1) === totalItems;
     const shipping = isLast ? preciseCny(totalShipping - sumShipping) : perShipping;
     const fee = isLast ? preciseCny(totalFee - sumFee) : perFee;
+    const shippingJpy = isLast ? preciseJpy(totalShippingJpy - sumShippingJpy) : perShippingJpy;
+    const feeJpy = isLast ? preciseJpy(totalFeeJpy - sumFeeJpy) : perFeeJpy;
     sumShipping += shipping;
     sumFee += fee;
-    return { product, shipping, fee };
+    sumShippingJpy += shippingJpy;
+    sumFeeJpy += feeJpy;
+    return { product, shipping, fee, shippingJpy, feeJpy };
   });
 
   const messages = [];
   const changedIds = [];
   let failed = null;
-  for (const { product, shipping, fee } of plan) {
-    // 金額が変わらない商品はウォレットを触らない(無駄な取り消し→再消化でレートが変わるのを避ける)
-    if ((Number(product.shipping_cny) || 0) === shipping && (Number(product.fee_cny) || 0) === fee) continue;
+  for (const { product, shipping, fee, shippingJpy, feeJpy } of plan) {
+    /* 金額が変わらない商品はウォレットを触らない(無駄な取り消し→再消化でレートが変わるのを避ける)。
+       ★2026-09-15: 直接支払いのロットでは、CNYが同じでもJPYや経路が変わることがあるため、
+       そちらも比較対象に含める。ここを見落とすとJPYだけ古い値のまま残る。 */
+    const sameCny = (Number(product.shipping_cny) || 0) === shipping && (Number(product.fee_cny) || 0) === fee;
+    const sameJpy = !direct || (
+      (Number(product.shipping_jpy) || 0) === shippingJpy
+      && (Number(product.fee_jpy) || 0) === feeJpy
+      && costSourceOf(product) === COST_SOURCE_DIRECT
+    );
+    if (sameCny && sameJpy) continue;
+    const nextForm = direct
+      ? { ...product, shipping_cny: shipping, fee_cny: fee, cost_source: COST_SOURCE_DIRECT, shipping_jpy: shippingJpy, fee_jpy: feeJpy }
+      : { ...product, shipping_cny: shipping, fee_cny: fee };
     // 利益(profit_jpy)の同期はループの後でまとめて行うため、ここでは個別同期を止める
-    const res = await updateProductCore({ ...product, shipping_cny: shipping, fee_cny: fee }, product, { syncProfits: false });
+    const res = await updateProductCore(nextForm, product, { syncProfits: false });
     const name = product.product_name || product.product_code || "(名称未設定)";
     if (!res.ok) {
       // ウォレットの払い戻し途中で失敗している可能性があるため、後続は処理せず中断する
@@ -5059,7 +5192,7 @@ function ProductsPage() {
         .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
         .eq("created_via_sale", false) // ★2026-08-04実装: 販売登録からの新規仕入はサンプル・在庫の一覧から除外(2.30参照)
         .order("created_at", { ascending: false }),
-      supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny,bd_order_no").order("purchase_date", { ascending: false }),
+      supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny,bd_order_no,cost_source,total_shipping_jpy,total_fee_jpy,per_item_shipping_jpy,per_item_fee_jpy").order("purchase_date", { ascending: false }),
       supabase.from("agent_charge_consumptions").select("id,product_id"),
       // ★2026-08-17修正: ロットの紐付け点数は「全商品」を対象に数える必要がある。上のproductsクエリは
       //   created_via_sale=false(=受注商品を除外)で取得しているため、これを使って数えると、
@@ -5304,10 +5437,15 @@ function ProductsPage() {
   const handleUpdateBatch = async (form) => {
     const { id, ...patch } = form;
     const before = editingBatch || {};
+    /* ★2026-09-15: JPY合計と支払い経路の変更も「配分し直すか」の判定に入れる(2.55参照)。
+       ここを漏らすと、経路を直接支払いに変えても紐付け済み商品がウォレット消化のまま残る。 */
     const amountsChanged =
       (Number(patch.total_shipping_cny) || 0) !== (Number(before.total_shipping_cny) || 0) ||
       (Number(patch.total_fee_cny) || 0) !== (Number(before.total_fee_cny) || 0) ||
-      (Number(patch.total_items) || 0) !== (Number(before.total_items) || 0);
+      (Number(patch.total_items) || 0) !== (Number(before.total_items) || 0) ||
+      (Number(patch.total_shipping_jpy) || 0) !== (Number(before.total_shipping_jpy) || 0) ||
+      (Number(patch.total_fee_jpy) || 0) !== (Number(before.total_fee_jpy) || 0) ||
+      batchCostSourceOf(patch) !== batchCostSourceOf(before);
 
     const { error } = await supabase.from("purchase_batches").update(patch).eq("id", id);
     if (error) { alert(batchWriteErrorMessage(error, "更新")); return; }
@@ -5571,7 +5709,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-09-15a";
+const BUILD_VERSION = "2026-09-15b";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -5604,7 +5742,8 @@ function batchWriteErrorMessage(error, verb) {
   const code = (error || {}).code;
   if (code === "42703" || code === "PGRST204") {
     return `ロットの${verb}に失敗しました。purchase_batchesに必要な列がありません。`
-      + `設計書1.9のマイグレーションSQL(bd_order_no の追加)を実行してください。`;
+      + `設計書1.9のマイグレーションSQL(bd_order_no / cost_source / total_shipping_jpy / total_fee_jpy / `
+      + `per_item_shipping_jpy / per_item_fee_jpy の追加)を実行してください。`;
   }
   return `ロットの${verb}に失敗しました(${(error || {}).message || code || "原因不明"})`;
 }
@@ -5924,6 +6063,12 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
       const amounts = await computeBatchItemAmounts(b, null);
       setShippingCny(String(amounts.shipping));
       setFeeCny(String(amounts.fee));
+      // ★2026-09-15: 直接支払いのロットなら経路とJPYも合わせる(2.55参照)
+      if (amounts.costSource === COST_SOURCE_DIRECT) {
+        setCostSource(COST_SOURCE_DIRECT);
+        setShippingJpy(String(amounts.shippingJpy));
+        setFeeJpy(String(amounts.feeJpy));
+      }
     }
   };
 
@@ -7981,7 +8126,12 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
       const p = items[i];
       setRowStatus((prev) => ({ ...prev, [p.id]: "pending" }));
       const amounts = await computeBatchItemAmounts(batch, p.id);
-      const form = { ...p, batch_id: batch.id, shipping_cny: amounts.shipping, fee_cny: amounts.fee };
+      /* ★2026-09-15: 直接支払いのロットへ紐付けるときは、経路とJPYも一緒に切り替える(2.55参照)。
+         ここでCNYだけ入れるとウォレットから消化されてしまう。 */
+      const form = amounts.costSource === COST_SOURCE_DIRECT
+        ? { ...p, batch_id: batch.id, shipping_cny: amounts.shipping, fee_cny: amounts.fee,
+            cost_source: COST_SOURCE_DIRECT, shipping_jpy: amounts.shippingJpy, fee_jpy: amounts.feeJpy }
+        : { ...p, batch_id: batch.id, shipping_cny: amounts.shipping, fee_cny: amounts.fee };
       // 利益(profit_jpy)の同期はループの後でまとめて行うため、ここでは個別同期を止める
       const res = await updateProductCore(form, p, { syncProfits: false });
 
@@ -8067,6 +8217,12 @@ function BulkBatchAssignModal({ products, batches, onCreateBatch, onClose, onSav
               <p>
                 1点あたり: 送料 {preciseCny(selectedBatch.per_item_shipping_cny)} CNY ・ 手数料 {preciseCny(selectedBatch.per_item_fee_cny)} CNY
                 (割り切れない分は最後の1点で差額調整され、合計は必ずロット合計と一致します)
+                {/* ★2026-09-15: 直接支払いのロットは原価になるのがJPYのほうなので必ず併記する(2.55参照) */}
+                {batchCostSourceOf(selectedBatch) === COST_SOURCE_DIRECT && (
+                  <>
+                    <br />このロットは<b>直接支払い</b>です。1点あたり 送料 {fmtJPY(preciseJpy(selectedBatch.per_item_shipping_jpy))} ・ 手数料 {fmtJPY(preciseJpy(selectedBatch.per_item_fee_jpy))} が原価になり、<b>ウォレットからは引かれません</b>。紐付けた商品の支払い経路も自動で「直接支払い」に変わります。
+                  </>
+                )}
               </p>
             )}
             {countCheck.matches ? (
@@ -8601,7 +8757,7 @@ function SalesPage() {
         .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number,recipient_name,honorific,memo),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
-      supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny,bd_order_no").order("purchase_date", { ascending: false }),
+      supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny,bd_order_no,cost_source,total_shipping_jpy,total_fee_jpy,per_item_shipping_jpy,per_item_fee_jpy").order("purchase_date", { ascending: false }),
     ]);
     // sales取得が失敗しても、同時に取得できたクラブ・ロットは反映する(販売登録モーダルを使えなくしないため)
     setClubs(clubsRes.data || []);
