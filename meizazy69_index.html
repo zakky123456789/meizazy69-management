@@ -5709,7 +5709,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-09-15b";
+const BUILD_VERSION = "2026-09-15c";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -7710,7 +7710,10 @@ function ReorderReviewTab({ sales, onDecide }) {
     // ★2026-08-04実装: 「再仕入れする」を選ぶと、商品名・URL・カテゴリ等を引き継いだ状態で
     //   サンプル・在庫の新規登録画面を開く(既存のpendingProductPrefillの仕組みを再利用)
     /* ★2026-08-24変更: ここでは判断済みにしない。実際に登録できた時点で消す(2.31参照)。
-       参考販売価格には前回の実売価格(unit_price_jpy)を入れる。 */
+       ★2026-09-15変更: 参考販売価格には**前回の参考販売価格(products.selling_price_jpy)**を入れる。
+       以前は実売価格(sale_items.unit_price_jpy)を入れていたが、実売価格は現場判断で値引きした
+       結果であることが多く、それを引き継ぐと**値引き額が次回の定価として固定されてしまう**。
+       参考販売価格が未設定の商品でのみ、実売価格をフォールバックとして使う。 */
     pendingProductPrefill = {
       type: "sample",
       sample_purpose: "展示用",
@@ -7720,7 +7723,7 @@ function ReorderReviewTab({ sales, onDecide }) {
       category: row.product.category || "",
       size: row.product.size || "",
       size_options: row.product.size_options || "",
-      selling_price_jpy: row.unitPriceJpy != null ? row.unitPriceJpy : (row.product.selling_price_jpy != null ? row.product.selling_price_jpy : null),
+      selling_price_jpy: row.product.selling_price_jpy != null ? row.product.selling_price_jpy : (row.unitPriceJpy != null ? row.unitPriceJpy : null),
     };
     pendingReorderSaleItemId = row.id;
     window.location.hash = "#/products";
