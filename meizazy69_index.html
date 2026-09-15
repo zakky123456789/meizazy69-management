@@ -4497,9 +4497,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
             {costSource === COST_SOURCE_DIRECT ? (
               <>
                 <div className="pt-1" style={{ borderTop: "1px solid var(--mz-border)" }}>
-                  <p className="text-xs mt-2 mb-2" style={{ color: "var(--mz-ink-muted)" }}>
-                    実際に支払った金額(JPY)。ここに入れた金額がそのまま原価になり、<b>仕入れ日の月の経費</b>として月次損益に計上されます。
-                  </p>
+                  <DirectPayCostNote purchaseDate={purchaseDate} createdViaSale={product.created_via_sale} />
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品代(JPY)</label>
@@ -5573,7 +5571,30 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-09-05b";
+const BUILD_VERSION = "2026-09-15a";
+
+/* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
+   従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
+   **計上開始日(2.45)より前の仕入れ日ではこれは嘘になる**(その場合は売れた月の経費)。
+   古い在庫を後から登録する場面で実際に誤解を招いたため、入力中の仕入れ日を見て文面を出し分ける。 */
+function DirectPayCostNote({ purchaseDate, createdViaSale }) {
+  const countable = isPurchaseCostCountable({ purchase_date: purchaseDate, created_via_sale: !!createdViaSale });
+  const from = createdViaSale ? PURCHASE_COST_BASIS_FROM_ORDER : PURCHASE_COST_BASIS_FROM_SAMPLE;
+  if (countable) {
+    return (
+      <p className="text-xs mt-2 mb-2" style={{ color: "var(--mz-ink-muted)" }}>
+        実際に支払った金額(JPY)。ここに入れた金額がそのまま原価になり、<b>仕入れ日の月の経費</b>として月次損益に計上されます。
+      </p>
+    );
+  }
+  return (
+    <p className="text-xs mt-2 mb-2 rounded-lg px-2.5 py-2" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
+      実際に支払った金額(JPY)。ここに入れた金額がそのまま原価になります。
+      ただし仕入れ日が<b>経費に入れ始めた日({from})より前</b>のため、<b>仕入れた月の経費にはなりません</b>。
+      この商品が<b>売れた月の経費</b>として計上されます(売れるまでは「まだ経費になっていない在庫」に入ります)。
+    </p>
+  );
+}
 
 /* ★2026-09-05追加: purchase_batches への書き込みが失敗したときのメッセージ。
    「ロットの登録に失敗しました」だけでは原因が分からず、原因の切り分けに時間がかかる(5章42番)。
@@ -6165,9 +6186,7 @@ function NewPurchaseModal({ batches, onClose, onCreated }) {
 
         {costSource === COST_SOURCE_DIRECT && (
           <div className="pt-1" style={{ borderTop: "1px solid var(--mz-border)" }}>
-            <p className="text-xs mt-2 mb-2" style={{ color: "var(--mz-ink-muted)" }}>
-              実際に支払った金額(JPY)。ここに入れた金額がそのまま原価になり、<b>仕入れ日の月の経費</b>として月次損益に計上されます。
-            </p>
+            <DirectPayCostNote purchaseDate={purchaseDate} createdViaSale />
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>商品代(JPY)</label>
