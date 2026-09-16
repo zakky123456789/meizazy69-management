@@ -2789,7 +2789,36 @@ const USAGE_TYPE_STYLES = {
   "その他手数料": { bg: "#3a3220", color: "var(--mz-gold-soft)" },
 };
 
-function ConsumptionHistorySection({ consumptions, chargeMap }) {
+function ConsumptionHistorySection({ consumptions, chargeMap, productMap }) {
+  /* ★2026-09-16h: 商品番号・商品名での絞り込み(2.58参照)。
+     FIFOは1つの仕入れを複数のチャージに分けて消化するため、
+     「商品代148 CNY」が画面上は 89.10 と 58.90 の2行になる。
+     行を1つずつ眺めても合計が合っているか分からないので、
+     **商品で絞って合計を出せる**ようにするのが要点。 */
+  const [q, setQ] = useState("");
+
+  const labelOf = (c) => {
+    const p = (productMap || {})[c.product_id];
+    if (!p) return c.product_id ? "(削除された商品)" : "(商品なし)";
+    return `${p.product_code ? `No.${p.product_code} ` : ""}${p.product_name || "(名称未設定)"}${p.size ? ` - ${p.size}` : ""}`;
+  };
+
+  const filtered = useMemo(() => {
+    const key = q.trim().toLowerCase();
+    if (!key) return consumptions;
+    return consumptions.filter((c) => {
+      const p = (productMap || {})[c.product_id];
+      if (!p) return false;
+      const hay = `${p.product_code || ""} ${p.product_name || ""} ${p.size || ""}`.toLowerCase();
+      return hay.includes(key);
+    });
+  }, [consumptions, productMap, q]);
+
+  const totals = useMemo(() => ({
+    cny: filtered.reduce((a, c) => a + (Number(c.consumed_cny) || 0), 0),
+    jpy: filtered.reduce((a, c) => a + (Number(c.consumed_jpy) || 0), 0),
+  }), [filtered]);
+
   return (
     <section className="space-y-3">
       <h3 className="font-display text-base">消化履歴</h3>
@@ -2801,32 +2830,65 @@ function ConsumptionHistorySection({ consumptions, chargeMap }) {
           まだ消化履歴はありません。サンプル・在庫登録(products)機能の実装後、商品を仕入れるたびにここへ自動記録されます(商品代・国際送料・その他手数料は、いずれも仕入れ確定時にこのウォレットからFIFOで消化されます)。
         </div>
       ) : (
-        <div className="space-y-2">
-          {consumptions.map((c) => {
-            const style = USAGE_TYPE_STYLES[c.usage_type] || { bg: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" };
-            const charge = chargeMap[c.charge_id];
-            return (
-              <div
-                key={c.id}
-                className="rounded-xl p-3 flex items-center justify-between gap-3 flex-wrap"
-                style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
-              >
-                <div className="flex items-center gap-2 flex-wrap min-w-0">
-                  <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: style.bg, color: style.color }}>
-                    {c.usage_type}
-                  </span>
-                  <span className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>
-                    元チャージ: {charge ? charge.charge_date : "—"}
-                  </span>
+        <>
+          <div className="rounded-xl p-3 space-y-2" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+            <input
+              type="text" value={q} onChange={(e) => setQ(e.target.value)}
+              placeholder="商品番号・商品名で絞り込み(例: P-0030)"
+              className="w-full rounded-lg px-3 py-2 text-sm bg-transparent"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
+            />
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <span style={{ color: "var(--mz-ink-muted)" }}>
+                {q.trim() ? `絞り込み中 ${filtered.length}件の合計` : `全${filtered.length}件の合計`}
+              </span>
+              <span style={{ color: "var(--mz-gold-soft)" }}>
+                {fmtCNY(totals.cny)} ・ {fmtJPY(totals.jpy)}
+              </span>
+            </div>
+            {/* 1件の仕入れが複数行に分かれるのは正常。それを知らないと「金額が見つからない」と誤読する */}
+            <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+              1回の仕入れでもチャージ残高が足りなければ<b>複数のチャージに分かれて消化されます</b>。
+              その場合この一覧では複数行になるため、合計で確認してください。
+            </p>
+          </div>
+
+          {filtered.length === 0 ? (
+            <p className="text-sm text-center py-8" style={{ color: "var(--mz-ink-muted)" }}>該当する消化履歴はありません</p>
+          ) : (
+          <div className="space-y-2">
+            {filtered.map((c) => {
+              const style = USAGE_TYPE_STYLES[c.usage_type] || { bg: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" };
+              const charge = chargeMap[c.charge_id];
+              return (
+                <div
+                  key={c.id}
+                  className="rounded-xl p-3 flex items-center justify-between gap-3 flex-wrap"
+                  style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
+                >
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap min-w-0">
+                      <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: style.bg, color: style.color }}>
+                        {c.usage_type}
+                      </span>
+                      <span className="text-xs truncate" style={{ color: "var(--mz-ink-muted)" }}>
+                        元チャージ: {charge ? charge.charge_date : "—"}
+                        {charge && charge.exchange_rate != null ? ` ・ レート ${charge.exchange_rate}` : ""}
+                      </span>
+                    </div>
+                    {/* ★どの商品の消化なのかを必ず出す。これが無いと確認のたびにSQLが要る */}
+                    <p className="text-xs truncate" style={{ color: "var(--mz-ink)" }}>{labelOf(c)}</p>
+                  </div>
+                  <div className="text-xs text-right shrink-0" style={{ color: "var(--mz-ink-muted)" }}>
+                    <div>{fmtCNY(c.consumed_cny)}</div>
+                    <div>{fmtJPY(c.consumed_jpy)}</div>
+                  </div>
                 </div>
-                <div className="text-xs text-right shrink-0" style={{ color: "var(--mz-ink-muted)" }}>
-                  <div>{fmtCNY(c.consumed_cny)}</div>
-                  <div>{fmtJPY(c.consumed_jpy)}</div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+          )}
+        </>
       )}
     </section>
   );
@@ -2836,6 +2898,7 @@ function ConsumptionHistorySection({ consumptions, chargeMap }) {
 function WalletPage() {
   const [charges, setCharges] = useState(null); // null = 読み込み中
   const [consumptions, setConsumptions] = useState([]);
+  const [productMap, setProductMap] = useState({}); // ★2026-09-16h: 消化履歴に出す商品情報(2.58参照)
   const [error, setError] = useState(null);
   const [modalCharge, setModalCharge] = useState(null); // null=閉じる, {}=新規, obj=編集
 
@@ -2855,7 +2918,24 @@ function WalletPage() {
       return;
     }
     setCharges(chargesRes.data || []);
-    setConsumptions(consumptionsRes.data || []);
+    const rows = consumptionsRes.data || [];
+    setConsumptions(rows);
+
+    /* ★2026-09-16h: 消化履歴に商品番号・商品名を出す(2.58参照)。
+       これが無いと「この消化がどの商品のものか」が画面から分からず、確認のたびにSQLを叩くことになる。
+       実際、FIFOで2つのチャージに分かれた消化(89.10 + 58.90 = 148.00)を
+       「148が見つからない」と誤読する事故が起きた。
+       商品は別クエリで引く。消化履歴のクエリに埋め込むと、商品側の都合で
+       ウォレット画面ごと落ちる可能性があるため(5章67番)。 */
+    const productIds = [...new Set(rows.map((r) => r.product_id).filter(Boolean))];
+    if (productIds.length === 0) { setProductMap({}); return; }
+    const { data: prods } = await supabase
+      .from("products")
+      .select("id,product_code,product_name,size")
+      .in("id", productIds);
+    const map = {};
+    (prods || []).forEach((x) => { map[x.id] = x; });
+    setProductMap(map);
   }, []);
 
   useEffect(() => { loadAll(); }, [loadAll]);
@@ -2942,7 +3022,7 @@ function WalletPage() {
             )}
           </section>
 
-          <ConsumptionHistorySection consumptions={consumptions} chargeMap={chargeMap} />
+          <ConsumptionHistorySection consumptions={consumptions} chargeMap={chargeMap} productMap={productMap} />
         </>
       )}
 
@@ -6464,7 +6544,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-09-16g";
+const BUILD_VERSION = "2026-09-16h";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
