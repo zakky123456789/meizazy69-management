@@ -3219,6 +3219,62 @@ async function consumeAndFinalizeProductCost(productId, { purchaseCny, shippingC
   return { ok: true };
 }
 
+/* ★2026-09-16c追加: BuckyDropの配送先は海外向けフォームのため、国と都道府県はローマ字で入れる(2.56参照)。
+   キーは「都/道/府/県」を除いた形で持ち、引くときに接尾辞を落として照合する。
+   ただし「北海道」は接尾辞を落とすと「北海」になってしまうため、そのままの形をキーにしている。 */
+const SHIPPING_COUNTRY_ROMAJI = "Japan";
+const PREFECTURE_ROMAJI = {
+  "北海道": "Hokkaido",
+  "青森": "Aomori", "岩手": "Iwate", "宮城": "Miyagi", "秋田": "Akita", "山形": "Yamagata", "福島": "Fukushima",
+  "茨城": "Ibaraki", "栃木": "Tochigi", "群馬": "Gunma", "埼玉": "Saitama", "千葉": "Chiba", "東京": "Tokyo", "神奈川": "Kanagawa",
+  "新潟": "Niigata", "富山": "Toyama", "石川": "Ishikawa", "福井": "Fukui", "山梨": "Yamanashi", "長野": "Nagano",
+  "岐阜": "Gifu", "静岡": "Shizuoka", "愛知": "Aichi", "三重": "Mie",
+  "滋賀": "Shiga", "京都": "Kyoto", "大阪": "Osaka", "兵庫": "Hyogo", "奈良": "Nara", "和歌山": "Wakayama",
+  "鳥取": "Tottori", "島根": "Shimane", "岡山": "Okayama", "広島": "Hiroshima", "山口": "Yamaguchi",
+  "徳島": "Tokushima", "香川": "Kagawa", "愛媛": "Ehime", "高知": "Kochi",
+  "福岡": "Fukuoka", "佐賀": "Saga", "長崎": "Nagasaki", "熊本": "Kumamoto", "大分": "Oita", "宮崎": "Miyazaki",
+  "鹿児島": "Kagoshima", "沖縄": "Okinawa",
+};
+/* 変換できなかった場合は**空文字を返す**。勝手に元の漢字を返すと、
+   ローマ字だと思って貼った結果そこだけ漢字になる、という気づきにくい間違いになる。
+   画面側は空のときだけ「変換できませんでした」と出して、人に判断させる。 */
+function prefectureRomaji(name) {
+  const v = String(name || "").trim();
+  if (!v) return "";
+  if (PREFECTURE_ROMAJI[v]) return PREFECTURE_ROMAJI[v];
+  const stripped = v.replace(/[都道府県]$/, "");
+  return PREFECTURE_ROMAJI[stripped] || "";
+}
+
+/* ★2026-09-16追加: 配送先(host_shipping_addresses)を1行の住所文字列にする。
+   ShippingAddressesModalの表示と同じ並び(〒→都道府県→市区町村→番地→建物)。 */
+function shippingAddressText(a) {
+  if (!a) return "";
+  const zip = a.postal_code ? `〒${a.postal_code} ` : "";
+  const body = `${a.prefecture || ""}${a.city || ""}${a.address_line || ""}${a.building ? ` ${a.building}` : ""}`;
+  return `${zip}${body}`.trim();
+}
+
+/* ★2026-09-16b変更: 発注先(BuckyDrop)の配送先入力は欄が分かれているため、
+   「まとめてコピー」は**欄名つきの控え**として使う想定にする(1本の住所文字列ではない)。
+   1欄ずつ貼るときは CopyFieldRow を使う。2.56参照。 */
+function shippingAddressClipboardText(a) {
+  if (!a) return "";
+  return [
+    ["名前", a.name],
+    ["電話番号", a.phone],
+    ["国/地域", SHIPPING_COUNTRY_ROMAJI],
+    ["都道府県/州", prefectureRomaji(a.prefecture) || a.prefecture],
+    ["市区町村", a.city],
+    ["郵便番号", a.postal_code],
+    ["番地", a.address_line],
+    ["建物名・部屋番号", a.building],
+  ]
+    .filter(([, v]) => v != null && String(v).trim() !== "")
+    .map(([k, v]) => `${k}: ${String(v).trim()}`)
+    .join("\n");
+}
+
 /* ---- 仕入れロット 登録モーダル ---- */
 function BatchFormModal({ batch, onClose, onSave }) {
   const isEdit = !!batch;
@@ -5709,7 +5765,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-09-15c";
+const BUILD_VERSION = "2026-09-16c";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -7604,6 +7660,72 @@ function CopyUrlButton({ url }) {
   );
 }
 
+/* ★2026-09-16b追加: 配送先を**項目ごとに**コピーする行(2.56参照)。
+   BuckyDropの配送先入力は「名前 / 電話番号 / 都道府県 / 市区町村 / 郵便番号 / 番地 /
+   建物名・部屋番号」と欄が分かれているため、住所を1本の文字列でコピーしても
+   結局そこから手で切り分けることになる。行そのものをタップでコピーできるようにする。
+   値が空の項目は押しても意味が無いので、コピー不可として薄く出す。 */
+function CopyFieldRow({ label, value, hint }) {
+  const [copied, setCopied] = useState(false);
+  const text = (value == null ? "" : String(value)).trim();
+  const handleCopy = async () => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      window.prompt("コピーしてください:", text);
+      return;
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+  return (
+    <button
+      type="button" onClick={handleCopy} disabled={!text}
+      className="w-full flex items-baseline gap-2 text-left px-2 py-1 rounded-md disabled:cursor-default"
+      style={{ background: copied ? "rgba(199,168,105,0.18)" : "transparent" }}
+    >
+      <span className="text-xs shrink-0" style={{ color: "var(--mz-ink-muted)", minWidth: "7.5em" }}>{label}</span>
+      <span className="text-xs min-w-0 flex-1 break-words" style={{ color: text ? "var(--mz-ink)" : "var(--mz-ink-muted)" }}>
+        {text || "(未入力)"}
+        {/* 変換した値を出す欄では、元の値も併記して取り違えに気づけるようにする */}
+        {hint && <span style={{ color: "var(--mz-ink-muted)" }}> {hint}</span>}
+      </span>
+      {text && (
+        <span className="text-xs shrink-0" style={{ color: copied ? "var(--mz-gold)" : "var(--mz-gold-soft)" }}>
+          {copied ? "済" : "コピー"}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/* ★2026-09-16追加: 任意のテキストをコピーするボタン(CopyUrlButtonと同じ作法)。
+   配送先を発注先の画面へそのまま貼れるようにするために使う(2.56参照)。 */
+function CopyTextButton({ text, label }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      // クリップボードが使えない環境(非HTTPS等)でも、手動コピーできるように必ず逃がす
+      window.prompt("コピーしてください:", text);
+      return;
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button" onClick={handleCopy}
+      className="text-xs px-2.5 py-1 rounded-lg shrink-0"
+      style={copied ? { border: "1px solid var(--mz-gold)", color: "var(--mz-gold)" } : { border: "1px solid var(--mz-border)", color: "var(--mz-gold-soft)" }}
+    >
+      {copied ? "コピーしました" : label}
+    </button>
+  );
+}
+
 /* ============================================================
    未発注リスト(UnorderedListTab) ★2026-07-19実装
    ・全ての販売記録を横断して、「新規仕入で追加」かつ未確認(order_confirmed=false)の
@@ -7622,6 +7744,7 @@ function UnorderedListTab({ sales, onConfirmOrder }) {
             transactionDate: s.transaction_date,
             clubName: s.host_clubs ? s.host_clubs.name : "-",
             hostName: s.hosts ? s.hosts.name : null,
+            hostId: s.host_id || null,   // ★2026-09-16: 配送先の取得に使う(2.56参照)
             product: it.products || {},
           });
         }
@@ -7632,18 +7755,61 @@ function UnorderedListTab({ sales, onConfirmOrder }) {
     return rows;
   }, [sales]);
 
+  /* ★2026-09-16実装: 発注時に必要な配送先(host_shipping_addresses)を表示する(2.56参照)。
+     **sales本体のクエリに埋め込まない**。あそこは販売一覧・領収書・明細すべての土台で、
+     埋め込みを1つ増やして失敗すると販売ページ全体が落ちる(5章1番のFK曖昧性の件もある)。
+     ここでは必要なhost_idぶんだけ別クエリで取る(PendingPurchasesTabと同じ2段階取得)。 */
+  const [addressesByHost, setAddressesByHost] = useState(null); // null=読込中
+  const [addressError, setAddressError] = useState(null);
+  const hostIdsKey = useMemo(
+    () => [...new Set(unorderedItems.map((r) => r.hostId).filter(Boolean))].sort().join(","),
+    [unorderedItems]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const ids = hostIdsKey ? hostIdsKey.split(",") : [];
+      if (ids.length === 0) { setAddressesByHost({}); setAddressError(null); return; }
+      const { data, error } = await supabase
+        .from("host_shipping_addresses")
+        .select("id,host_id,name,phone,postal_code,prefecture,city,address_line,building")
+        .in("host_id", ids)
+        .order("created_at", { ascending: true });
+      if (cancelled) return;
+      if (error) {
+        // 黙って空にすると「配送先が未登録」と誤表示になるため、取得失敗は必ず区別して出す(5章42番)
+        setAddressError("配送先の取得に失敗しました(未登録かどうかは判断できません)");
+        setAddressesByHost({});
+        return;
+      }
+      const map = {};
+      (data || []).forEach((a) => {
+        if (!map[a.host_id]) map[a.host_id] = [];
+        map[a.host_id].push(a);
+      });
+      setAddressesByHost(map);
+      setAddressError(null);
+    })();
+    return () => { cancelled = true; };
+  }, [hostIdsKey]);
+
   return (
     <div className="space-y-4">
       <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
         「新規仕入で追加」した商品のうち、まだ発注確認が済んでいないものを全ての販売記録から横断して一覧表示します({unorderedItems.length}点)。
       </p>
+      {addressError && (
+        <p className="text-xs rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{addressError}</p>
+      )}
 
       {unorderedItems.length === 0 ? (
         <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>未発注の商品はありません</p>
       ) : (
         <div className="rounded-lg divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
           {unorderedItems.map((row) => (
-            <div key={row.id} className="flex items-center gap-3 px-3 py-3">
+            <div key={row.id} className="px-3 py-3 space-y-2">
+            <div className="flex items-center gap-3">
               {row.product.product_image_url ? (
                 <img src={row.product.product_image_url} alt="" className="w-14 h-14 rounded-md object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
               ) : (
@@ -7670,6 +7836,75 @@ function UnorderedListTab({ sales, onConfirmOrder }) {
                   発注確認済みにする
                 </button>
               </div>
+            </div>
+
+            {/* ★2026-09-16実装: 発注先に入力する配送先(2.56参照)。
+                この一覧を見ている目的が「これから発注する」ことなので、住所を探しに別画面へ
+                行かずに済むよう、その場に出してコピーできるようにする。 */}
+            {(() => {
+              if (!row.hostId) {
+                return (
+                  <p className="text-xs rounded-lg px-2.5 py-1.5" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" }}>
+                    配送先: ホスト未指定(クラブ宛)のため登録された配送先はありません
+                  </p>
+                );
+              }
+              if (addressesByHost === null) {
+                return <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>配送先を読み込み中...</p>;
+              }
+              const list = addressesByHost[row.hostId] || [];
+              if (list.length === 0) {
+                return (
+                  <p className="text-xs rounded-lg px-2.5 py-1.5" style={{ background: "#3a2a1f", color: "#d6a98f" }}>
+                    ⚠️ {row.hostName || "このホスト"}の配送先が登録されていません。ホストクラブのページから登録してください。
+                  </p>
+                );
+              }
+              return (
+                <div className="rounded-lg px-2.5 py-2 space-y-2" style={{ background: "var(--mz-surface-hover)" }}>
+                  {/* 複数登録されている場合は自動で選べないため、必ず人が選ぶ前提だと明示する */}
+                  {list.length > 1 && (
+                    <p className="text-xs" style={{ color: "#d6a98f" }}>
+                      ⚠️ 配送先が{list.length}件登録されています。どれに送るかは確認してください。
+                    </p>
+                  )}
+                  {list.map((a, i) => (
+                    <div key={a.id} className="space-y-0.5">
+                      <p className="text-xs px-2" style={{ color: "var(--mz-ink-muted)" }}>
+                        配送先{list.length > 1 ? `${i + 1}` : ""}(項目をタップするとコピーできます)
+                      </p>
+                      {/* ★2026-09-16b: BuckyDropの配送先入力の欄名に合わせて並べる(2.56参照)。
+                          「国/地域」は選択式なので、コピーではなく何を選ぶかだけ案内する。 */}
+                      <CopyFieldRow label="名前" value={a.name} />
+                      <CopyFieldRow label="電話番号" value={a.phone} />
+                      <CopyFieldRow label="国/地域" value={SHIPPING_COUNTRY_ROMAJI} />
+                      {/* ★2026-09-16c: 都道府県はローマ字でコピーし、元の漢字を併記する(2.56参照)。
+                          変換表に無い表記のときは勝手に漢字を渡さず、変換できなかったことを出す。 */}
+                      {prefectureRomaji(a.prefecture) ? (
+                        <CopyFieldRow
+                          label="都道府県/州"
+                          value={prefectureRomaji(a.prefecture)}
+                          hint={a.prefecture ? `(${a.prefecture})` : ""}
+                        />
+                      ) : (
+                        <div className="px-2 py-1">
+                          <p className="text-xs" style={{ color: "#d6a98f" }}>
+                            都道府県/州: {a.prefecture ? `「${a.prefecture}」をローマ字に変換できませんでした。手で入力してください。` : "(未入力)"}
+                          </p>
+                        </div>
+                      )}
+                      <CopyFieldRow label="市区町村" value={a.city} />
+                      <CopyFieldRow label="郵便番号" value={a.postal_code} />
+                      <CopyFieldRow label="番地" value={a.address_line} />
+                      <CopyFieldRow label="建物名・部屋番号" value={a.building} />
+                      <div className="flex items-center justify-end gap-2 px-2 pt-1">
+                        <CopyTextButton text={shippingAddressClipboardText(a)} label="まとめてコピー" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
             </div>
           ))}
         </div>
