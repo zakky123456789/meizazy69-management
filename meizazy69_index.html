@@ -3318,6 +3318,20 @@ function StockCheckTab() {
   const [working, setWorking] = useState(false);
 
   const staff = useMemo(() => currentStaffFromStorage(), []);
+
+  /* ★2026-09-16f: 進捗バーを画面上部に固定する(2.57参照)。
+     TopBarがsticky top-0のため、その高さぶん下げないと裏に隠れる。
+     高さは端末幅やフォントで変わるので**実測する**(決め打ちにしない)。 */
+  const [stickyTop, setStickyTop] = useState(64);
+  useEffect(() => {
+    const measure = () => {
+      const el = document.querySelector("header");
+      if (el) setStickyTop(Math.round(el.getBoundingClientRect().height));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
   const current = useMemo(
     () => (sessions || []).find((x) => x.id === currentId) || null,
     [sessions, currentId]
@@ -3525,31 +3539,56 @@ function StockCheckTab() {
           </p>
         )}
 
-        {current && (
-          <>
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+        {current && readOnly && (
+          <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+            この棚卸しは完了しています(記録の閲覧のみ)。
+          </p>
+        )}
+      </div>
+
+      {/* ★2026-09-16f: 進捗と「写真を撮って追加」は作業中ずっと見たい・押したいので、
+          スクロールしても画面上部に貼り付けておく(2.57参照)。
+          セッションの選択や「完了する」は作業中に触らないので、上の非固定カードに残す。 */}
+      {current && (
+        <div
+          className="rounded-xl px-3 py-2.5 space-y-2"
+          style={{
+            position: "sticky",
+            top: `${stickyTop}px`,
+            zIndex: 20,
+            background: "var(--mz-surface)",
+            border: "1px solid var(--mz-border)",
+            boxShadow: "0 6px 16px rgba(0,0,0,0.35)",
+          }}
+        >
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-sm">
               <span style={{ color: "var(--mz-gold-soft)" }}>あり {counts.found}</span>
               <span style={{ color: "#f2b8bd" }}>無い {counts.missing}</span>
               <span style={{ color: "var(--mz-ink-muted)" }}>未確認 {counts.unchecked}</span>
               <span style={{ color: "var(--mz-ink-muted)" }}>/ 全 {counts.all}点</span>
             </div>
-            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--mz-surface-hover)" }}>
-              <div
-                className="h-full"
-                style={{
-                  width: counts.all > 0 ? `${Math.round(((counts.found + counts.missing) / counts.all) * 100)}%` : "0%",
-                  background: "var(--mz-gold)",
-                }}
-              />
-            </div>
-            {readOnly && (
-              <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-                この棚卸しは完了しています(記録の閲覧のみ)。
-              </p>
+            {!readOnly && (
+              <button
+                onClick={() => setExtraOpen(true)}
+                className="text-xs px-3 py-2 rounded-lg font-medium whitespace-nowrap shrink-0"
+                style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+              >
+                📷 未登録品を撮る{extras.length > 0 ? `(${extras.length})` : ""}
+              </button>
             )}
-          </>
-        )}
-      </div>
+          </div>
+          <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "var(--mz-surface-hover)" }}>
+            <div
+              className="h-full"
+              style={{
+                width: counts.all > 0 ? `${Math.round(((counts.found + counts.missing) / counts.all) * 100)}%` : "0%",
+                background: "var(--mz-gold)",
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {!current ? (
         <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>
@@ -3643,20 +3682,10 @@ function StockCheckTab() {
 
           {/* 棚にあるのに登録されていない現物。写真だけ撮って先に進める(2.57参照) */}
           <div className="rounded-xl p-4 space-y-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-sm">未登録の現物({extras.length}点)</p>
-              {!readOnly && (
-                <button
-                  onClick={() => setExtraOpen(true)}
-                  className="text-xs px-3 py-1.5 rounded-lg font-medium"
-                  style={{ background: "var(--mz-gold)", color: "#1a1710" }}
-                >
-                  + 写真を撮って追加
-                </button>
-              )}
-            </div>
+            <p className="text-sm">未登録の現物({extras.length}点)</p>
             <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
               棚にあるのにシステムに登録されていない現物です。倉庫では<b>写真だけ撮って先に進み</b>、あとから写真を見ながら正式登録してください。
+              追加は上に固定されている「📷 未登録品を撮る」から。
             </p>
             {extras.length > 0 && (
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -6319,7 +6348,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-09-16d";
+const BUILD_VERSION = "2026-09-16f";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
