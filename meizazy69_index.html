@@ -4791,6 +4791,76 @@ function ImageDropZone({ label, previewUrl, uploading, onFile, helperText, accep
   );
 }
 
+/* ============================================================
+   追加の商品画像(ExtraImagesField) ★2026-10-20実装。2.61参照
+   ・メイン画像(products.product_image_url)とは別に、追加の画像をproducts.extra_image_urls(text[])へ持つ。
+   ・メイン画像は従来どおり一覧・サムネイル・領収書等で使う。追加画像は公開カタログの拡大表示で見せる。
+   ・「メインにする」でメイン画像と入れ替えられる(元のメイン画像は追加側へ回る)。
+   ============================================================ */
+const EXTRA_IMAGE_MAX = 5;
+
+function ExtraImagesField({ mainUrl, urls, onChange, onMainChange }) {
+  const [uploading, setUploading] = useState(false);
+  const inputRef = useRef(null);
+  const remaining = EXTRA_IMAGE_MAX - urls.length;
+
+  const handleFiles = async (fileList) => {
+    const files = Array.from(fileList || []).slice(0, Math.max(remaining, 0));
+    if (files.length === 0) return;
+    setUploading(true);
+    const added = [];
+    for (const file of files) {
+      const res = await uploadProductImage(file);
+      if (!res.ok) { alert(res.message); break; }
+      added.push(res.url);
+    }
+    setUploading(false);
+    if (added.length > 0) onChange([...urls, ...added]);
+  };
+
+  const makeMain = (i) => {
+    const next = urls.slice();
+    const picked = next[i];
+    if (mainUrl) next[i] = mainUrl; else next.splice(i, 1);
+    onMainChange(picked);
+    onChange(next);
+  };
+
+  return (
+    <div>
+      <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>
+        追加の商品画像(最大{EXTRA_IMAGE_MAX}枚・公開カタログの拡大画面で見られます)
+      </label>
+      <div className="flex flex-wrap gap-2">
+        {urls.map((u, i) => (
+          <div key={u + i} className="relative w-16">
+            <img src={u} alt="" className="w-16 h-16 rounded-lg object-cover" style={{ border: "1px solid var(--mz-border)" }} />
+            <button type="button" onClick={() => onChange(urls.filter((_, k) => k !== i))}
+              className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full text-xs leading-none"
+              style={{ background: "#3a1f22", color: "#f2b8bd", border: "1px solid var(--mz-border)" }}
+              aria-label="この画像を外す">×</button>
+            <button type="button" onClick={() => makeMain(i)}
+              className="mt-1 w-full text-[10px] rounded py-0.5"
+              style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>メインにする</button>
+          </div>
+        ))}
+        {remaining > 0 && (
+          <button type="button" onClick={() => inputRef.current && inputRef.current.click()} disabled={uploading}
+            className="w-16 h-16 rounded-lg flex items-center justify-center text-xs text-center disabled:opacity-50"
+            style={{ border: "1.5px dashed var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+            {uploading ? "送信中..." : "+ 追加"}
+          </button>
+        )}
+      </div>
+      <input ref={inputRef} type="file" accept="image/*" multiple className="hidden"
+        onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }} />
+      <p className="text-[11px] mt-1" style={{ color: "var(--mz-ink-muted)" }}>
+        {urls.length}/{EXTRA_IMAGE_MAX}枚。まとめて選択できます。一覧・サムネイルにはメイン画像が使われます。
+      </p>
+    </div>
+  );
+}
+
 /* ---- サンプル商品番号の自動採番("S-0001"形式、既存最大値+1) ---- */
 async function generateNextProductCode(type) {
   const prefix = type === "sample" ? "S" : "P";
@@ -4818,6 +4888,10 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
   const [extraBatches, setExtraBatches] = useState([]); // この画面内で新規作成したロット(親のbatches propに反映されるまでの一時保持)
   const [batchModalOpen, setBatchModalOpen] = useState(false);
   const [imageUrl, setImageUrl] = useState(product.product_image_url || "");
+  /* ★2026-10-20: 追加画像(2.61参照)。この商品のデータにextra_image_urls列が含まれていないとき
+     (SELECTに列が無い画面から開いたとき)は、保存時に書かない(空配列で上書きして画像が消えるのを防ぐ)。 */
+  const extraLoaded = !product.id || Array.isArray(product.extra_image_urls);
+  const [extraImageUrls, setExtraImageUrls] = useState(Array.isArray(product.extra_image_urls) ? product.extra_image_urls : []);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [extractImageUrl, setExtractImageUrl] = useState("");
   const [uploadingExtractImage, setUploadingExtractImage] = useState(false);
@@ -5023,6 +5097,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           status,
           sample_purpose: type === "sample" ? samplePurpose : null,
           product_image_url: colorImages[c] || imageUrl || null,
+          extra_image_urls: extraImageUrls,
           product_url: productUrl.trim() || null,
           product_code: code,
           product_name: `${productName.trim()}(${c})`,
@@ -5057,6 +5132,7 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
       status,
       sample_purpose: type === "sample" ? samplePurpose : null,
       product_image_url: imageUrl || null,
+      extra_image_urls: extraLoaded ? extraImageUrls : undefined,
       product_url: productUrl.trim() || null,
       product_code: productCode.trim() || null,
       product_name: productName.trim(),
@@ -5098,6 +5174,16 @@ function ProductFormModal({ product, batches, onClose, onSave, onCreateBatch }) 
           onFile={handleProductImageFile}
           helperText="サムネイル・一覧表示に使用されます"
         />
+
+        {/* ★2026-10-20: 追加の商品画像(2.61参照)。列が読めていない画面では出さない */}
+        {extraLoaded && (
+          <ExtraImagesField
+            mainUrl={imageUrl}
+            urls={extraImageUrls}
+            onChange={setExtraImageUrls}
+            onMainChange={setImageUrl}
+          />
+        )}
 
         {/* AI自動抽出用スクショ(商品画像とは別に登録) */}
         <div>
@@ -5750,6 +5836,9 @@ async function updateProductCore(form, original, options) {
     // ★2026-08-23: 仕入れ予想価格。原価ではないので消化・利益計算には一切使わない(2.47参照)
     estimated_purchase_cny: form.estimated_purchase_cny != null ? form.estimated_purchase_cny : null,
   };
+  /* ★2026-10-20: 追加画像(2.61参照)。formに含まれているときだけ書く。含まれていない(undefined)ときに
+     書くと、既存の追加画像が空で上書きされて消える。 */
+  if (Array.isArray(form.extra_image_urls)) patch.extra_image_urls = form.extra_image_urls;
   /* 直接支払いの場合は、入力されたJPYをそのまま確定額として保存する(ウォレット消化は行わない)。
      ウォレットへ戻した場合は、この後のFIFO消化で上書きされるため、いったん0にしておく
      (消化が失敗したときに古い直接入力額が残り続けるのを防ぐ)。 */
@@ -5815,7 +5904,7 @@ async function updateProductCore(form, original, options) {
    ・ウォレットは updateProductCore 経由で1点ずつ取り消し→再消化する(並列にすると残高が壊れる)。 */
 /* updateProductCore が書き込む列を漏れなく含んだ、商品編集用のSELECT列。
    1列でも欠けると、その値が undefined としてDBに書き戻され、既存の値が消える(2.36参照)。 */
-const PRODUCT_EDIT_SELECT = "id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny";
+const PRODUCT_EDIT_SELECT = "id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny,extra_image_urls";
 
 async function reallocateBatchAmounts(batch) {
   const { data: rows, error } = await supabase
@@ -6006,7 +6095,7 @@ function ProductsPage() {
     setCodeSearching(true);
     const { data, error } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny,extra_image_urls")
       .ilike("product_code", `%${code}%`);
     setCodeSearching(false);
     setCodeSearchResult(error ? [] : (data || []));
@@ -6017,7 +6106,7 @@ function ProductsPage() {
     setError(null);
     const [productsRes, batchesRes, consumptionsRes, batchLinkRes] = await Promise.all([
       supabase.from("products")
-        .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
+        .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,return_date,return_source_product_id,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny,extra_image_urls")
         .eq("created_via_sale", false) // ★2026-08-04実装: 販売登録からの新規仕入はサンプル・在庫の一覧から除外(2.30参照)
         .order("created_at", { ascending: false }),
       supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny,bd_order_no,cost_source,total_shipping_jpy,total_fee_jpy,per_item_shipping_jpy,per_item_fee_jpy").order("purchase_date", { ascending: false }),
@@ -6120,6 +6209,7 @@ function ProductsPage() {
       status: item.status,
       sample_purpose: item.type === "sample" ? (item.sample_purpose || "展示用") : null,
       product_image_url: item.product_image_url,
+      ...(Array.isArray(item.extra_image_urls) && item.extra_image_urls.length > 0 ? { extra_image_urls: item.extra_image_urls } : {}),
       product_url: item.product_url,
       product_code: item.product_code,
       product_name: item.product_name,
@@ -6544,7 +6634,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-09-16h";
+const BUILD_VERSION = "2026-10-20a";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -6609,6 +6699,23 @@ const PURCHASE_COST_BASIS_FROM_MIN =
 const PURCHASE_COST_BASIS_FROM_MAX =
   PURCHASE_COST_BASIS_FROM_ORDER > PURCHASE_COST_BASIS_FROM_SAMPLE
     ? PURCHASE_COST_BASIS_FROM_ORDER : PURCHASE_COST_BASIS_FROM_SAMPLE;
+
+/* ★2026-09-17追加: 仕入れ金額がまだ1円も入っていない商品か(2.60参照)。
+   運用上、登録時点では金額を入れず、転送業者からの返金が確定してから入れる(5章26番)。
+   ・CNY・JPYの**8項目すべてが0(または未入力)**のときだけ「未入力」とみなす。
+     どれか1つでも入っていれば、入力途中ではなく「その金額で確定している」とみなす。
+   ・仕入れなし(カタログ用のみ)は金額を持たないのが正しい状態なので対象外(2.47参照)。
+   ・返品在庫もコスト0円が正しい状態なので対象外(1.10参照)。 */
+function isUnpricedProduct(p) {
+  if (!p) return false;
+  if (costSourceOf(p) === COST_SOURCE_NONE) return false;
+  if (p.return_source_product_id) return false;
+  const vals = [
+    p.purchase_amount_cny, p.shipping_cny, p.fee_cny, p.domestic_shipping_cny,
+    p.purchase_amount_jpy, p.shipping_jpy, p.fee_jpy, p.domestic_shipping_jpy,
+  ];
+  return vals.every((v) => !(Number(v) > 0));
+}
 
 /* その商品を仕入原価として計上してよいか(計上開始日の判定)。
    種類ごとに開始日が違うため、必ずこの関数を通して判定すること。 */
@@ -7455,7 +7562,7 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
     setCostEditLoading(true);
     const { data, error: fetchErr } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny,extra_image_urls")
       .eq("id", productId)
       .single();
     setCostEditLoading(false);
@@ -9334,6 +9441,7 @@ function BatchLinkTab({ batches, onCreateBatch }) {
   const [searchText, setSearchText] = useState("");
   const [selectedIds, setSelectedIds] = useState([]);
   const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
+  const [processing, setProcessing] = useState(false); // ★2026-09-17: 紐付け不要の一括更新中(2.59参照)
   const [loadError, setLoadError] = useState(null);
   // ★紐付けが全点数分そろっていないロット(= ウォレット未消化分が残っているロット)
   const [pendingBatches, setPendingBatches] = useState([]);
@@ -9343,15 +9451,28 @@ function BatchLinkTab({ batches, onCreateBatch }) {
     setLoadError(null);
     let query = supabase
       .from("products")
-      .select("id,type,status,sample_purpose,created_via_sale,return_source_product_id,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
+      .select("id,type,status,sample_purpose,created_via_sale,return_source_product_id,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,batch_exempt,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny,extra_image_urls")
       // ★返品在庫(return_source_product_idあり)は常に除外する。返品登録はコスト0円・ウォレット消化なしで
       //   作られる行(1.10参照)で、batch_idが永久にnullのままのため、除外しないとこの一覧に residual として
       //   出続け、誤って選択するとウォレットから送料を二重に消化してしまう。
       .is("return_source_product_id", null)
       .order("created_at", { ascending: false });
+    /* ★2026-09-17: 「紐付け不要」(batch_exempt)の絞り込みを入れたため、
+       batch_idの条件だけではなくクライアント側でまとめて判定する(下のfilteredを参照)。
+       ここでDB側に条件を足すと、batch_exemptがNULLの既存行が静かに落ちる(5章40番)。 */
     if (linkFilter === "unlinked") query = query.is("batch_id", null);
+    if (linkFilter === "exempt") query = query.is("batch_id", null);
     const { data: productsData, error } = await query;
-    if (error) { setLoadError("商品の読み込みに失敗しました"); setProducts([]); return; }
+    if (error) {
+      /* 列不足(42703)は「マイグレーション未実行」と断定できるので名指しする(5章42番) */
+      setLoadError(
+        error.code === "42703"
+          ? "商品の読み込みに失敗しました。productsに必要な列がありません。設計書2.59のマイグレーションSQL(batch_exempt の追加)を実行してください。"
+          : `商品の読み込みに失敗しました(${error.message || error.code || "原因不明"})`
+      );
+      setProducts([]);
+      return;
+    }
 
     // どの販売に紐づいているかを併記する(PendingPurchasesTabと同じく、埋め込みではなく2段階取得。2.30参照)
     const ids = (productsData || []).map((p) => p.id);
@@ -9404,6 +9525,10 @@ function BatchLinkTab({ batches, onCreateBatch }) {
     if (!products) return [];
     const q = searchText.trim().toLowerCase();
     return products.filter((p) => {
+      /* ★2026-09-17: 紐付け不要にした商品は、既定の「未紐付け」一覧から外す(2.59参照)。
+         NULLはfalse扱い(既存行はすべて未設定のため)。 */
+      if (linkFilter === "unlinked" && p.batch_exempt === true) return false;
+      if (linkFilter === "exempt" && p.batch_exempt !== true) return false;
       if (kindFilter === "order" && !p.created_via_sale) return false;
       if (kindFilter === "sample" && (p.created_via_sale || p.type !== "sample")) return false;
       if (kindFilter === "stock" && (p.created_via_sale || p.type !== "stock")) return false;
@@ -9413,7 +9538,7 @@ function BatchLinkTab({ batches, onCreateBatch }) {
       }
       return true;
     });
-  }, [products, kindFilter, searchText]);
+  }, [products, kindFilter, searchText, linkFilter]);
 
   // フィルタや再読み込みで一覧から消えた商品の選択は自動的に外す
   useEffect(() => {
@@ -9422,6 +9547,26 @@ function BatchLinkTab({ batches, onCreateBatch }) {
 
   const toggleSelect = (id) => {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  /* ★2026-09-17実装: ロットに紐付ける必要が無い商品を一覧から外す(2.59参照)。
+     単品で仕入れた商品などは永久に紐付かないので、そのままだと未紐付け一覧に残り続け、
+     **本当に紐付けが必要な商品が埋もれる**。金額には一切影響しない(表示上の仕分けだけ)。 */
+  const setExempt = async (ids, value) => {
+    if (ids.length === 0) return;
+    setProcessing(true);
+    const { error } = await supabase.from("products").update({ batch_exempt: value }).in("id", ids);
+    setProcessing(false);
+    if (error) {
+      alert(
+        error.code === "42703" || error.code === "PGRST204"
+          ? "productsに必要な列がありません。設計書2.59のマイグレーションSQL(batch_exempt の追加)を実行してください。"
+          : `更新に失敗しました(${error.message || error.code || "原因不明"})`
+      );
+      return;
+    }
+    setSelectedIds([]);
+    loadAll();
   };
   const allSelected = filtered.length > 0 && selectedIds.length === filtered.length;
   const toggleSelectAll = () => {
@@ -9434,6 +9579,7 @@ function BatchLinkTab({ batches, onCreateBatch }) {
   return (
     <div className="space-y-4">
       <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+        ロットに紐付ける必要が無い商品(単品仕入れなど)は、選んで「紐付け不要にする」を押すと一覧から外せます。金額には影響しません。
         仕入れロットが確定した後で、そのロットに含まれる商品をまとめて紐付けるための画面です。販売登録済み(販売済み)の受注商品も、
         サンプル・在庫も、状態を問わずここに表示されます。チェックを入れて「仕入れロットへ一括登録」を押すと、選択した全商品に同じロットが割り当てられ、
         国際送料・その他手数料が自動計算されます(商品代と中国国内送料は変更されません)。返品在庫はコスト0円で扱うため、この一覧には表示されません。
@@ -9462,7 +9608,8 @@ function BatchLinkTab({ batches, onCreateBatch }) {
       <div className="rounded-xl p-4 space-y-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
         <div className="flex flex-wrap gap-2">
           <select value={linkFilter} onChange={(e) => setLinkFilter(e.target.value)} className={selectClass} style={selectStyle}>
-            <option value="unlinked">ロット未紐付けのみ</option>
+            <option value="unlinked">未紐付け(紐付け不要を除く)</option>
+            <option value="exempt">紐付け不要にしたもの</option>
             <option value="all">すべて(紐付け済みも表示)</option>
           </select>
           <select value={kindFilter} onChange={(e) => setKindFilter(e.target.value)} className={selectClass} style={selectStyle}>
@@ -9493,11 +9640,27 @@ function BatchLinkTab({ batches, onCreateBatch }) {
             <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
               {selectedIds.length > 0 ? `${selectedIds.length}件選択中` : "商品を選択してください"}
             </span>
-            <button type="button" onClick={() => setBulkAssignOpen(true)} disabled={selectedIds.length === 0}
-              className="text-xs px-3 py-1.5 rounded-lg ml-auto disabled:opacity-40"
-              style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
-              仕入れロットへ一括登録
-            </button>
+            <div className="flex items-center gap-2 ml-auto">
+              {/* 紐付け不要にした一覧を見ているときは「戻す」操作に切り替える */}
+              {linkFilter === "exempt" ? (
+                <button type="button" onClick={() => setExempt(selectedIds, false)} disabled={selectedIds.length === 0 || processing}
+                  className="text-xs px-3 py-1.5 rounded-lg disabled:opacity-40"
+                  style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
+                  紐付けが必要に戻す
+                </button>
+              ) : (
+                <button type="button" onClick={() => setExempt(selectedIds, true)} disabled={selectedIds.length === 0 || processing}
+                  className="text-xs px-3 py-1.5 rounded-lg disabled:opacity-40"
+                  style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
+                  紐付け不要にする
+                </button>
+              )}
+              <button type="button" onClick={() => setBulkAssignOpen(true)} disabled={selectedIds.length === 0 || processing}
+                className="text-xs px-3 py-1.5 rounded-lg disabled:opacity-40"
+                style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+                仕入れロットへ一括登録
+              </button>
+            </div>
           </div>
 
           <div className="rounded-lg divide-y" style={{ border: "1px solid var(--mz-border)", borderColor: "var(--mz-border)" }}>
@@ -9527,6 +9690,9 @@ function BatchLinkTab({ batches, onCreateBatch }) {
                       {p.linkedSale.hosts ? ` / ${p.linkedSale.hosts.name}` : ""}
                     </p>
                   ) : null}
+                  {p.batch_exempt === true && (
+                    <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>紐付け不要にしています</p>
+                  )}
                   {p.batch_id && (
                     <p className="text-xs mt-0.5" style={{ color: "#d6a98f" }}>
                       ロット紐付け済み{(() => {
@@ -9549,6 +9715,145 @@ function BatchLinkTab({ batches, onCreateBatch }) {
           onCreateBatch={onCreateBatch}
           onClose={() => setBulkAssignOpen(false)}
           onSaved={() => { setSelectedIds([]); loadAll(); loadPendingBatches(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   仕入れ値が未入力の商品(UnpricedProductsTab) ★2026-09-17実装。2.60参照
+   ・運用上、商品登録の時点では金額を入れない(転送業者からの返金が確定してから入れる。5章26番)。
+     そのため「金額がまだ入っていない商品」が常に一定数あり、入れ忘れると原価0円のまま売れてしまい、
+     利益が実際より大きく出る。
+   ・**受注商品(created_via_sale)も含めて横断表示する**。サンプル・在庫の一覧には受注商品が
+     出ないため(2.30)、そちらだけ見ていても入れ忘れは見つからない。
+   ============================================================ */
+function UnpricedProductsTab({ batches, onCreateBatch }) {
+  const [products, setProducts] = useState(null); // null=読込中
+  const [error, setError] = useState(null);
+  const [kindFilter, setKindFilter] = useState("all"); // all | order | sample | stock
+  const [searchText, setSearchText] = useState("");
+  const [editing, setEditing] = useState(null);
+
+  const loadAll = useCallback(async () => {
+    setError(null);
+    const { data, error: err } = await supabase
+      .from("products")
+      .select(PRODUCT_EDIT_SELECT + ",created_via_sale")
+      .order("created_at", { ascending: false });
+    if (err) { setError(`商品の読み込みに失敗しました(${err.message || err.code || "原因不明"})`); setProducts([]); return; }
+    /* 「未入力」の判定はクライアント側で行う。CNY/JPYの4項目すべてを見る必要があり、
+       PostgRESTの条件では書ききれないうえ、NULLの扱いを間違えやすい(5章40番)。 */
+    setProducts((data || []).filter(isUnpricedProduct));
+  }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  const filtered = useMemo(() => {
+    const q = searchText.trim().toLowerCase();
+    return (products || []).filter((p) => {
+      if (kindFilter === "order" && !p.created_via_sale) return false;
+      if (kindFilter === "sample" && (p.created_via_sale || p.type !== "sample")) return false;
+      if (kindFilter === "stock" && (p.created_via_sale || p.type !== "stock")) return false;
+      if (q) {
+        const hay = `${p.product_name || ""} ${p.product_code || ""} ${p.size || ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [products, kindFilter, searchText]);
+
+  const kindOf = (p) => {
+    if (p.created_via_sale) return "受注";
+    if (p.return_source_product_id) return "返品在庫";
+    if (p.type === "sample") return `サンプル(${p.sample_purpose || "展示用"})`;
+    return "在庫";
+  };
+
+  const handleSave = async (form) => {
+    const res = await updateProductCore(form, editing);
+    if (!res.ok) { alert(res.message); return; }
+    if (res.warning) alert(res.warning);
+    setEditing(null);
+    loadAll();
+  };
+
+  const selectStyle = { border: "1px solid var(--mz-border)", color: "var(--mz-ink)" };
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+        仕入れ金額がまだ1円も入っていない商品の一覧です({(products || []).length}点)。
+        返金が確定したらここから金額を入れてください。<b>入れ忘れると原価0円のまま売れてしまい、利益が実際より大きく出ます。</b>
+        受注商品も含めて横断表示しています。カタログ用のみ(仕入れなし)の商品は金額を持たないため対象外です。
+      </p>
+
+      {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
+
+      <div className="rounded-xl p-4 space-y-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+        <select value={kindFilter} onChange={(e) => setKindFilter(e.target.value)} className="rounded-lg px-3 py-2 text-sm bg-transparent" style={selectStyle}>
+          <option value="all">区分: すべて</option>
+          <option value="order">受注(新規仕入対応)</option>
+          <option value="sample">サンプル</option>
+          <option value="stock">在庫</option>
+        </select>
+        <input
+          type="text" value={searchText} onChange={(e) => setSearchText(e.target.value)}
+          placeholder="商品名・商品番号・サイズで絞り込み"
+          className="w-full rounded-lg px-3 py-2 text-sm bg-transparent" style={selectStyle}
+        />
+      </div>
+
+      {products === null ? (
+        <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>
+      ) : filtered.length === 0 ? (
+        <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>
+          {(products || []).length === 0 ? "金額が未入力の商品はありません" : "該当する商品はありません"}
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map((p) => (
+            <div key={p.id} className="rounded-xl p-3 flex items-center gap-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+              {p.product_image_url ? (
+                <img src={p.product_image_url} alt="" className="w-12 h-12 rounded-md object-cover shrink-0" style={{ border: "1px solid var(--mz-border)" }} />
+              ) : (
+                <div className="w-12 h-12 rounded-md flex items-center justify-center shrink-0" style={{ background: "var(--mz-surface-hover)" }}>
+                  <Icon name="tag" className="w-5 h-5" style={{ color: "var(--mz-ink-muted)" }} />
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-sm truncate">{p.product_name || "(名称未設定)"}</p>
+                <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
+                  {[kindOf(p), p.status, p.size, p.product_code ? `No.${p.product_code}` : ""].filter(Boolean).join(" / ")}
+                </p>
+                <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
+                  仕入れ日: {p.purchase_date || "(未入力)"} ・ {costSourceOf(p)}
+                </p>
+                {/* 売れてしまっている商品は優先度が高い。原価0円のまま利益が計上されている */}
+                {p.status === "販売済み" && (
+                  <p className="text-xs mt-0.5" style={{ color: "#f2b8bd" }}>⚠️ すでに販売済みです。原価0円のまま利益が計上されています</p>
+                )}
+              </div>
+              <button
+                onClick={() => setEditing(p)}
+                className="text-xs px-3 py-1.5 rounded-lg shrink-0 font-medium"
+                style={{ background: "var(--mz-gold)", color: "#1a1710" }}
+              >
+                金額を入れる
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <ProductFormModal
+          product={editing}
+          batches={batches}
+          onClose={() => setEditing(null)}
+          onSave={handleSave}
+          onCreateBatch={onCreateBatch}
         />
       )}
     </div>
@@ -9581,7 +9886,7 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
     setCodeSearching(true);
     const { data, error } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny,extra_image_urls")
       .ilike("product_code", `%${code}%`);
     setCodeSearching(false);
     setCodeSearchResult(error ? [] : (data || []));
@@ -9590,7 +9895,7 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
   const loadAll = useCallback(async () => {
     const { data: productsData, error } = await supabase
       .from("products")
-      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny")
+      .select("id,type,status,sample_purpose,product_url,product_code,product_image_url,product_name,category,size,size_options,selling_price_jpy,purchase_date,created_at,batch_id,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,cost_source,estimated_purchase_cny,extra_image_urls")
       .eq("created_via_sale", true)
       .eq("status", "未販売")
       .order("created_at", { ascending: false });
@@ -9771,7 +10076,7 @@ function SalesPage() {
     const [salesRes, clubsRes, batchesRes] = await Promise.all([
       supabase
         .from("sales")
-        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number,recipient_name,honorific,memo),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
+        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number,recipient_name,honorific,memo),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,selling_price_jpy,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .order("transaction_date", { ascending: false }),
       supabase.from("host_clubs").select("id,name").order("name"),
       supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny,bd_order_no,cost_source,total_shipping_jpy,total_fee_jpy,per_item_shipping_jpy,per_item_fee_jpy").order("purchase_date", { ascending: false }),
@@ -10061,6 +10366,14 @@ function SalesPage() {
         >
           ロット紐付け
         </button>
+        {/* ★2026-09-17実装: 仕入れ金額の入れ忘れを拾うタブ(2.60参照) */}
+        <button
+          type="button" onClick={() => setActiveTab("unpriced")}
+          className="text-xs px-3 py-1.5 rounded-md whitespace-nowrap"
+          style={activeTab === "unpriced" ? { background: "var(--mz-gold)", color: "#1a1710" } : { color: "var(--mz-ink-muted)" }}
+        >
+          仕入れ値未入力
+        </button>
       </div>
       </div>
 
@@ -10087,6 +10400,10 @@ function SalesPage() {
 
       {activeTab === "pending" && (
         <PendingPurchasesTab batches={batches} clubs={clubs} onCreateBatch={handleCreateBatchInlineSales} onSaveSale={handleSaveSale} />
+      )}
+
+      {activeTab === "unpriced" && (
+        <UnpricedProductsTab batches={batches} onCreateBatch={handleCreateBatchInlineSales} />
       )}
 
       {activeTab === "batchlink" && (
@@ -13732,6 +14049,14 @@ function PublicCatalogItemCard({ item, onZoom }) {
         ) : (
           <Icon name="tag" className="w-8 h-8" style={{ color: "var(--mz-ink-muted)" }} />
         )}
+        {item.images && item.images.length > 1 && (
+          <span
+            className="absolute bottom-2 right-2 text-[10px] px-2 py-0.5 rounded-full"
+            style={{ background: "rgba(0,0,0,0.65)", color: "#fff" }}
+          >
+            画像{item.images.length}枚
+          </span>
+        )}
         {isDisposal && (
           <span
             className="absolute top-2 left-2 text-[10px] px-2 py-0.5 rounded-full"
@@ -13788,6 +14113,11 @@ function PublicCatalogItemCard({ item, onZoom }) {
      画像が無い商品は送り先に含めない(押しても真っ白になるだけのため)。 */
 function PublicCatalogLightbox({ items, index, onClose, onMove }) {
   const item = items[index];
+  /* ★2026-10-20実装: 1商品に複数画像があるとき(2.61参照)。画像の切り替えは「左右スワイプ」と下のサムネイル。
+     「← 前 / 次 →」と←→キーは従来どおり商品の切り替え(画像ではない)。商品を移ったら1枚目に戻す。 */
+  const [imgIdx, setImgIdx] = useState(0);
+  const touchX = useRef(null);
+  useEffect(() => { setImgIdx(0); }, [index]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -13800,6 +14130,7 @@ function PublicCatalogLightbox({ items, index, onClose, onMove }) {
   }, [onClose, onMove]);
 
   if (!item) return null;
+  const images = item.images && item.images.length > 0 ? item.images : [item.product_image_url].filter(Boolean);
 
   return (
     <div
@@ -13809,7 +14140,7 @@ function PublicCatalogLightbox({ items, index, onClose, onMove }) {
     >
       <div className="flex items-center justify-between p-3 shrink-0">
         <span className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
-          {index + 1} / {items.length}
+          {index + 1} / {items.length}{images.length > 1 ? `(画像 ${Math.min(imgIdx, images.length - 1) + 1}/${images.length})` : ""}
         </span>
         <button
           onClick={onClose}
@@ -13820,14 +14151,34 @@ function PublicCatalogLightbox({ items, index, onClose, onMove }) {
         </button>
       </div>
 
-      <div className="flex-1 min-h-0 flex items-center justify-center px-2">
+      <div
+        className="flex-1 min-h-0 flex items-center justify-center px-2"
+        onTouchStart={(e) => { touchX.current = e.touches[0].clientX; }}
+        onTouchEnd={(e) => {
+          if (touchX.current === null || images.length < 2) return;
+          const dx = e.changedTouches[0].clientX - touchX.current;
+          touchX.current = null;
+          if (Math.abs(dx) < 40) return;
+          setImgIdx((prev) => ((prev + (dx < 0 ? 1 : -1)) % images.length + images.length) % images.length);
+        }}
+      >
         <img
-          src={item.product_image_url}
+          src={images[Math.min(imgIdx, images.length - 1)]}
           alt={item.product_name || ""}
           className="max-w-full max-h-full object-contain"
           onClick={(e) => e.stopPropagation()}
         />
       </div>
+      {images.length > 1 && (
+        <div className="shrink-0 flex items-center justify-center gap-2 px-3 pb-1" onClick={(e) => e.stopPropagation()}>
+          {images.map((u, i) => (
+            <button key={u + i} type="button" onClick={() => setImgIdx(i)} aria-label={`${i + 1}枚目の画像`}>
+              <img src={u} alt="" className="w-11 h-11 rounded-md object-cover"
+                style={{ border: i === imgIdx ? "2px solid var(--mz-gold)" : "1px solid var(--mz-border)", opacity: i === imgIdx ? 1 : 0.6 }} />
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="shrink-0 p-4 text-center space-y-1" onClick={(e) => e.stopPropagation()}>
         <p className="font-display text-base">{item.product_name || "(名称未設定)"}</p>
@@ -13854,7 +14205,17 @@ function PublicCatalogLightbox({ items, index, onClose, onMove }) {
 }
 
 function PublicCatalogPage({ token }) {
-  const [items, setItems] = useState(null); // null = 読み込み中
+  const [baseItems, setItems] = useState(null); // null = 読み込み中
+  /* ★2026-10-20実装: 追加の商品画像(2.61参照)。get_public_catalogとは別のRPC(get_public_catalog_images)で取る。
+     既存RPCの戻り値を変えないため、新RPCが未作成・失敗でもカタログ本体は今までどおり表示される。 */
+  const [extraMap, setExtraMap] = useState({});
+  const items = useMemo(() => {
+    if (baseItems === null) return null;
+    return baseItems.map((it) => ({
+      ...it,
+      images: [it.product_image_url, ...(extraMap[it.product_id] || [])].filter(Boolean),
+    }));
+  }, [baseItems, extraMap]);
   const [catalogName, setCatalogName] = useState("");
   const [notFound, setNotFound] = useState(false);
   // ★2026-08-23: 画像拡大表示(2.49参照)。画像がある商品だけを送り対象にする
@@ -13872,6 +14233,12 @@ function PublicCatalogPage({ token }) {
       }
       setCatalogName(data[0].catalog_name || "");
       setItems(data);
+    });
+    supabase.rpc("get_public_catalog_images", { p_token: token }).then(({ data, error }) => {
+      if (cancelled || error || !Array.isArray(data)) return;
+      const m = {};
+      data.forEach((r) => { if (Array.isArray(r.extra_image_urls) && r.extra_image_urls.length > 0) m[r.product_id] = r.extra_image_urls; });
+      setExtraMap(m);
     });
     return () => { cancelled = true; };
   }, [token]);
