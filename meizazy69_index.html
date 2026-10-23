@@ -6634,7 +6634,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-10-20a";
+const BUILD_VERSION = "2026-10-23a";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -10505,6 +10505,9 @@ function CatalogCard({ catalog, itemCount, onEdit, onDuplicate, onDelete, onShar
 function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
   const isNew = !catalog.id;
   const [name, setName] = useState(catalog.name || "");
+  /* ★2026-10-23実装: このカタログで「サンプル品なし(お取り寄せ)」の表示を出さない(2.62参照)。
+     既定は出す(false)。複製した場合も引き継ぐ。 */
+  const [hideOrderOnlyBadge, setHideOrderOnlyBadge] = useState(catalog.hide_order_only_badge === true);
   const [saving, setSaving] = useState(false);
 
   const [allProducts, setAllProducts] = useState(null); // null = 読み込み中
@@ -10596,7 +10599,7 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
     if (!name.trim()) return;
     if (selectedProducts.length === 0) { alert("商品を1点以上選択してください"); return; }
     setSaving(true);
-    await onSave({ id: catalog.id || null, name: name.trim(), productIds: selectedProducts.map((p) => p.id) });
+    await onSave({ id: catalog.id || null, name: name.trim(), hideOrderOnlyBadge, productIds: selectedProducts.map((p) => p.id) });
     setSaving(false);
   };
 
@@ -10618,6 +10621,16 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           />
         </div>
+
+        {/* ★2026-10-23: 「サンプル品なし(お取り寄せ)」表示の出し分け(カタログごと。2.62参照) */}
+        <label className="flex items-start gap-2.5 cursor-pointer">
+          <input type="checkbox" checked={!hideOrderOnlyBadge} onChange={(e) => setHideOrderOnlyBadge(!e.target.checked)}
+            className="mt-0.5 w-4 h-4 shrink-0" />
+          <span className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
+            <span style={{ color: "var(--mz-ink)" }}>「サンプル品なし(お取り寄せ)」と表示する</span><br />
+            仕入れていない商品の写真に出る表示です。オフにすると、このカタログではホストに表示されません。
+          </span>
+        </label>
 
         <div>
           <div className="flex items-center justify-between mb-1.5">
@@ -10824,7 +10837,7 @@ function CatalogsPage() {
     setError(null);
     const { data, error } = await supabase
       .from("catalogs")
-      .select("id,name,share_token,created_at,catalog_items(count)")
+      .select("id,name,share_token,created_at,hide_order_only_badge,catalog_items(count)")
       .order("created_at", { ascending: false });
     if (error) { setError("カタログの取得に失敗しました"); setCatalogs([]); return; }
     setCatalogs(data || []);
@@ -10847,7 +10860,7 @@ function CatalogsPage() {
 
   const handleSave = async (form) => {
     if (form.id) {
-      const { error: updErr } = await supabase.from("catalogs").update({ name: form.name }).eq("id", form.id);
+      const { error: updErr } = await supabase.from("catalogs").update({ name: form.name, hide_order_only_badge: form.hideOrderOnlyBadge === true }).eq("id", form.id);
       if (updErr) { alert("更新に失敗しました"); return; }
       const { error: delErr } = await supabase.from("catalog_items").delete().eq("catalog_id", form.id);
       if (delErr) { alert("掲載商品の更新に失敗しました(カタログ名は更新済みです)"); return; }
@@ -10857,7 +10870,7 @@ function CatalogsPage() {
     } else {
       const { data: inserted, error: insErr } = await supabase
         .from("catalogs")
-        .insert({ name: form.name, share_token: generateShareToken() })
+        .insert({ name: form.name, share_token: generateShareToken(), hide_order_only_badge: form.hideOrderOnlyBadge === true })
         .select("id")
         .single();
       if (insErr) { alert("登録に失敗しました"); return; }
@@ -10891,7 +10904,7 @@ function CatalogsPage() {
 
     const { data: inserted, error: insErr } = await supabase
       .from("catalogs")
-      .insert({ name, share_token: generateShareToken() })
+      .insert({ name, share_token: generateShareToken(), hide_order_only_badge: catalog.hide_order_only_badge === true })
       .select("id")
       .single();
     if (insErr || !inserted) { alert("カタログの複製に失敗しました"); return; }
@@ -14018,7 +14031,7 @@ function AppShell({ staffName, onSwitchStaff, onSignOut }) {
    get_public_catalog RPC(SECURITY DEFINER)経由でのみデータ取得し、
    catalogs/products テーブルへの直接アクセスは行わない。
    ============================================================ */
-function PublicCatalogItemCard({ item, onZoom }) {
+function PublicCatalogItemCard({ item, onZoom, hideOrderOnlyBadge }) {
   // ★2026-07-12実装: 処分用サンプルは「その1点しかない現品」であり、サイズ展開(選べる範囲)を
   //   見せると誤解を招くため、登録された実サイズのみを表示し、「現品限り」の注記を添える。
   const isDisposal = item.sample_purpose === "処分用";
@@ -14029,7 +14042,7 @@ function PublicCatalogItemCard({ item, onZoom }) {
        (現品限りの方がホストにとって影響が大きい情報のため)。
      ・cost_sourceはget_public_catalog RPCの戻り値に追加が必要(2.48参照)。RPC未更新の間は
        undefinedになりバッジが出ないだけで、他の表示は壊れない。 */
-  const isOrderOnly = !isDisposal && item.cost_source === COST_SOURCE_NONE;
+  const isOrderOnly = !isDisposal && item.cost_source === COST_SOURCE_NONE && !hideOrderOnlyBadge;
 
   return (
     <div
@@ -14209,6 +14222,9 @@ function PublicCatalogPage({ token }) {
   /* ★2026-10-20実装: 追加の商品画像(2.61参照)。get_public_catalogとは別のRPC(get_public_catalog_images)で取る。
      既存RPCの戻り値を変えないため、新RPCが未作成・失敗でもカタログ本体は今までどおり表示される。 */
   const [extraMap, setExtraMap] = useState({});
+  /* ★2026-10-23実装: このカタログで「サンプル品なし(お取り寄せ)」を出すか(2.62参照)。
+     別のRPC(get_public_catalog_settings)で取る。未作成・失敗のときは従来どおり出す(false)。 */
+  const [hideOrderOnlyBadge, setHideOrderOnlyBadge] = useState(false);
   const items = useMemo(() => {
     if (baseItems === null) return null;
     return baseItems.map((it) => ({
@@ -14240,6 +14256,11 @@ function PublicCatalogPage({ token }) {
       data.forEach((r) => { if (Array.isArray(r.extra_image_urls) && r.extra_image_urls.length > 0) m[r.product_id] = r.extra_image_urls; });
       setExtraMap(m);
     });
+    supabase.rpc("get_public_catalog_settings", { p_token: token }).then(({ data, error }) => {
+      if (cancelled || error) return;
+      const row = Array.isArray(data) ? data[0] : data;
+      if (row && row.hide_order_only_badge === true) setHideOrderOnlyBadge(true);
+    });
     return () => { cancelled = true; };
   }, [token]);
 
@@ -14268,6 +14289,7 @@ function PublicCatalogPage({ token }) {
               <PublicCatalogItemCard
                 key={item.product_id}
                 item={item}
+                hideOrderOnlyBadge={hideOrderOnlyBadge}
                 onZoom={(it) => {
                   const idx = zoomableItems.findIndex((x) => x.product_id === it.product_id);
                   if (idx >= 0) setZoomIndex(idx);
