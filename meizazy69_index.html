@@ -6859,7 +6859,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-08g";
+const BUILD_VERSION = "2026-11-08h";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -13442,8 +13442,10 @@ function MyInvoicesPage() {
   );
 }
 
-function ContractorInvoicesPage() {
+function ContractorInvoicesPage({ autoRecalc = false }) {
   const [tab, setTab] = useState("rates");
+  const [staleChecked, setStaleChecked] = useState(false); // 古さ判定が一度終わったか(自動集計の開始条件)
+  const [autoNote, setAutoNote] = useState(null);
   const [staffList, setStaffList] = useState([]);
   const [rates, setRates] = useState(null); // null = 読み込み中
   const [error, setError] = useState(null);
@@ -13545,7 +13547,7 @@ function ContractorInvoicesPage() {
     const isCurrent = () => runId === staleRunRef.current;
 
     if (!profits || profits.length === 0) {
-      if (isCurrent()) { setStaleProfits({}); setStaleCheckError(false); }
+      if (isCurrent()) { setStaleProfits({}); setStaleCheckError(false); setStaleChecked(true); }
       return;
     }
     const monthsAsc = profits.map((x) => String(x.target_month).slice(0, 7)).sort();
@@ -13581,6 +13583,7 @@ function ContractorInvoicesPage() {
       || (productRes.data || []).length >= ROW_CAP;
     if (salesRes.error || expenseRes.error || productRes.error || truncated) {
       setStaleCheckError(true); // 直前の判定結果(staleProfits)はあえて消さずに残す
+      setStaleChecked(true);
       return;
     }
 
@@ -13663,7 +13666,7 @@ function ContractorInvoicesPage() {
         };
       }
     });
-    if (isCurrent()) { setStaleProfits(result); setStaleCheckError(false); }
+    if (isCurrent()) { setStaleProfits(result); setStaleCheckError(false); setStaleChecked(true); }
   }, []);
 
   // monthlyProfitsが読み込まれ/更新されるたびに、保存値が最新かどうかを再判定する
@@ -13865,6 +13868,30 @@ function ContractorInvoicesPage() {
       setCalculating(false);
     }
   };
+
+  /* ★2026-11-08実装: 月次損益の自動集計(2.67参照)。オーナーがシステムを開いたとき(または請求書画面を開いたとき)に、
+     「今月」と、古くなっている「先月」を、前の月から順に自動で再集計する。「この月を集計する」ボタンは不要になった。
+     ・**請求書を発行済みの月は絶対に自動では触らない**(発行済みの数字と食い違わせないため。古さの警告で手動判断する)。
+     ・それより前の月のズレは自動では直さず、従来どおり警告だけ出す。
+     ・5分以内に実行済みならやり直さない(画面の行き来で何度も走らせないため)。 */
+  useEffect(() => {
+    if (!autoRecalc || monthlyProfits === null || invoices === null || !staleChecked) return;
+    const now = Date.now();
+    if (window.__mzAutoRecalcAt && now - window.__mzAutoRecalcAt < 5 * 60 * 1000) return;
+    window.__mzAutoRecalcAt = now;
+    (async () => {
+      const cur = todayISO().slice(0, 7);
+      const prev = prevMonthFirstDay(cur).slice(0, 7);
+      const issued = new Set((invoices || []).map((i) => String(i.target_month).slice(0, 7)));
+      const staleMonths = new Set((monthlyProfits || []).filter((x) => staleProfits[x.id]).map((x) => String(x.target_month).slice(0, 7)));
+      const hasRow = (m) => (monthlyProfits || []).some((x) => String(x.target_month).slice(0, 7) === m);
+      const targets = [];
+      if (!issued.has(prev) && (staleMonths.has(prev) || !hasRow(prev))) targets.push(prev);
+      if (!issued.has(cur)) targets.push(cur);
+      for (const m of targets) { await handleCalculateMonthlyProfit(m); } // 前の月から順に(繰越損失の連鎖のため)
+      if (targets.length > 0) setAutoNote(`${targets.map((m) => formatMonthLabel(`${m}-01`)).join("・")}を自動で集計しました`);
+    })();
+  }, [autoRecalc, monthlyProfits, invoices, staleChecked, staleProfits]);
 
   /* ---- 請求内容の計算(実際のinsertは行わず、プレビューをstateに保持するだけ) ----
      1) 同一担当者・同一対象月の請求書が既に発行済みでないか確認(重複発行防止)
@@ -14230,6 +14257,7 @@ function ContractorInvoicesPage() {
             >
               {calculating ? "集計中..." : "この月を集計する"}
             </button>
+            {autoNote && <p className="text-xs w-full" style={{ color: "var(--mz-gold-soft)" }}>✓ {autoNote}(今月と先月は、開くたびに自動で集計されます。それより前の月だけ、このボタンで集計します)</p>}
             <p className="text-xs w-full" style={{ color: "var(--mz-ink-muted)" }}>
               その月の売上から、仕入れにかかったお金と、その他の経費を引いて利益を出します。同じ月をもう一度集計すると、前の結果は上書きされます。
               <br />
@@ -14497,11 +14525,16 @@ function AppShell({ staffName, onSwitchStaff, onSignOut, canChangePassword }) {
           ) : activeKey === "expenses" ? (
             <ExpensesPage />
           ) : activeKey === "contractor_invoices" ? (
-            isOwner ? <ContractorInvoicesPage /> : <MyInvoicesPage />
+            isOwner ? <ContractorInvoicesPage autoRecalc /> : <MyInvoicesPage />
           ) : (
             <PlaceholderPage item={activeItem} />
           )}
         </main>
+        {/* ★2026-11-08: オーナーは、どの画面を開いていても、月次損益を自動集計する(2.67参照)。
+            画面には出さない(請求書画面を開いているときは、そちらの画面が自動集計を行う) */}
+        {isOwner && activeKey !== "contractor_invoices" && (
+          <div hidden aria-hidden="true"><ContractorInvoicesPage autoRecalc /></div>
+        )}
       </div>
     </div>
   );
