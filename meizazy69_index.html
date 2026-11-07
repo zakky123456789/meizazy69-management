@@ -79,6 +79,12 @@ const { useState, useEffect, useCallback, useMemo, useRef, createContext, useCon
 const AccessContext = createContext({ isOwner: true, hasPrivateDeals: false, staffId: null });
 const useAccess = () => useContext(AccessContext);
 const SATORU_STAFF_ID = "df24e2c3-c67a-48d8-94aa-bf09f7de56fc"; // 悟(「悟専用」に設定したときの private_to_staff_id)
+/* ★2026-11-08実装: 内緒の取引(悟専用クラブ向けの売上)は、通常の月次損益・歩合から完全に分けて集計し、
+   その利益(売上−その商品の原価−内緒の経費)を 公洋50%・悟50% で分ける(2.65参照)。 */
+const SECRET_SHARE_PERCENT = 50; // 悟の取り分(%)
+// 内緒の取引の仕分け(handleCalculateMonthlyProfit と checkStaleMonthlyProfits で必ず共通に使うこと)
+const isSecretSale = (sale) => !!(sale && sale.host_clubs && sale.host_clubs.private_to_staff_id);
+const isSecretRow = (row) => !!(row && row.private_to_staff_id);
 const OWNER_STAFF_ID = "8e90b96d-1be3-42d9-b7a2-d0ff973ae4e3"; // 公洋(staff.is_owner列がまだ無い時のフォールバック)
 
 /* ============================================================
@@ -6853,7 +6859,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-08c";
+const BUILD_VERSION = "2026-11-08e";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -12295,15 +12301,15 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
            当月に売れても、その原価は当月の仕入原価に入らない**。これが見えないと
            「在庫が売れた分の原価はどこへ行ったのか」が分からないため、明示する。 */
         supabase.from("sales")
-          .select("id,transaction_date,total_amount_jpy,host_clubs(name),sale_items(product_id,products(product_code,product_name,purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
+          .select("id,transaction_date,total_amount_jpy,host_clubs(name,private_to_staff_id),sale_items(product_id,products(product_code,product_name,purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
           .gte("transaction_date", monthStart).lt("transaction_date", monthEnd)
           .order("transaction_date"),
         supabase.from("products")
-          .select("id,purchase_date,created_via_sale,product_code,product_name,cost_source,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+          .select("id,purchase_date,created_via_sale,product_code,product_name,cost_source,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,private_to_staff_id")
           .gte("purchase_date", monthStart).lt("purchase_date", monthEnd)
           .order("purchase_date"),
         supabase.from("expenses")
-          .select("id,payment_date,payee,item_name,account_category,payment_method,amount_incl_tax")
+          .select("id,payment_date,payee,item_name,account_category,payment_method,amount_incl_tax,private_to_staff_id")
           .gte("payment_date", monthStart).lt("payment_date", monthEnd)
           .order("payment_date"),
       ]);
@@ -12311,13 +12317,16 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
         setError("内訳の取得に失敗しました");
         return;
       }
-      const all = productRes.data || [];
+      // ★2026-11-08: 内緒の取引(2.65)は通常の内訳から外す。保存値との比較は通常分だけで行う
+      const secretSalesRows = (salesRes.data || []).filter(isSecretSale);
+      const normalSalesRows = (salesRes.data || []).filter((x) => !isSecretSale(x));
+      const all = (productRes.data || []).filter((x) => !isSecretRow(x));
       /* ★2026-08-24: 当月販売分の原価(2.45参照)。
          仕入れ時に費用化していない商品が当月に売れた分を、売れた月の原価として計上する。
          同じ商品が複数の明細に出ることは無い(1商品=1点)が、念のためidで重複排除する。 */
       const soldSeen = {};
       const soldUncounted = [];
-      (salesRes.data || []).forEach((sale) => {
+      normalSalesRows.forEach((sale) => {
         (sale.sale_items || []).forEach((si) => {
           const pr = si.products;
           if (!pr || isPurchaseCostCountable(pr)) return;
@@ -12328,12 +12337,14 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
         });
       });
       setData({
-        sales: salesRes.data || [],
+        sales: normalSalesRows,
+        secretSalesRows,
         counted: all.filter(isPurchaseCostCountable),
         soldUncounted,
         // 当月仕入だが計上対象外、かつ当月に売れてもいない(=まだどの月にも計上されていない)分
         excluded: all.filter((x) => !isPurchaseCostCountable(x) && !soldSeen[x.id]),
-        expenses: expenseRes.data || [],
+        expenses: (expenseRes.data || []).filter((x) => !isSecretRow(x)),
+        secretExpenses: (expenseRes.data || []).filter(isSecretRow),
       });
     })();
   }, [month]);
@@ -12404,6 +12415,24 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
                 ※ 右に「保存値」と出ている行は、集計したあとで元のデータが変わっています。集計し直すと左の数字になります。
               </p>
             </div>
+
+            {(data.secretSalesRows.length > 0 || data.secretExpenses.length > 0) && (() => {
+              const sSales = sum(data.secretSalesRows, (x) => x.total_amount_jpy);
+              const sCost = data.secretSalesRows.reduce((acc, sale) => acc + (sale.sale_items || []).reduce((a2, si) => a2 + (si.products ? productCostJpy(si.products) : 0), 0), 0);
+              const sExp = sum(data.secretExpenses, (x) => x.amount_incl_tax);
+              const sProfit = sSales - sCost - sExp;
+              return (
+                <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: "#2a2419", color: "#e3c489" }}>
+                  <p className="font-medium">内緒の取引(上の利益・歩合には含みません。売上{data.secretSalesRows.length}件・経費{data.secretExpenses.length}件)</p>
+                  <div className="flex justify-between"><span>売上</span><span>{fmtJPY(sSales)} <Diff live={sSales} savedValue={Number((saved || {}).secret_sales_jpy) || 0} /></span></div>
+                  <div className="flex justify-between"><span>− 売れた商品の原価</span><span>{fmtJPY(sCost)} <Diff live={sCost} savedValue={Number((saved || {}).secret_cost_jpy) || 0} /></span></div>
+                  <div className="flex justify-between"><span>− 内緒の経費</span><span>{fmtJPY(sExp)} <Diff live={sExp} savedValue={Number((saved || {}).secret_expenses_jpy) || 0} /></span></div>
+                  <div className="flex justify-between font-medium pt-1" style={{ borderTop: "1px solid var(--mz-border)" }}>
+                    <span>= 内緒の利益(公洋{100 - SECRET_SHARE_PERCENT}%・悟{SECRET_SHARE_PERCENT}%)</span><span>{fmtJPY(sProfit)}</span>
+                  </div>
+                </div>
+              );
+            })()}
 
             <div>
               <p className="text-sm mb-1.5">売上({data.sales.length}件) {fmtJPY(liveSales)}</p>
@@ -12598,6 +12627,16 @@ function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, rec
                     )}
                     <Row label="その他の経費" value={p.total_general_expenses_jpy} sign="−" />
                     <Row label="利益" value={gross} sign="=" total />
+                    {((Number(p.secret_sales_jpy) || 0) !== 0 || (Number(p.secret_cost_jpy) || 0) !== 0 || (Number(p.secret_expenses_jpy) || 0) !== 0) && (
+                      <div className="mt-2 rounded-lg px-2.5 py-2 space-y-0.5" style={{ background: "#2a2419", color: "#e3c489" }}>
+                        <p className="font-medium">内緒の取引(上の利益・歩合には含みません)</p>
+                        <Row label="売上" value={p.secret_sales_jpy} />
+                        <Row label="売れた商品の原価" value={p.secret_cost_jpy} sign="−" />
+                        <Row label="内緒の経費" value={p.secret_expenses_jpy} sign="−" />
+                        <Row label="内緒の利益" value={p.secret_profit_jpy} sign="=" total />
+                        <Row label={`悟の取り分(${SECRET_SHARE_PERCENT}%)`} value={Math.max(0, Math.round((Number(p.secret_profit_jpy) || 0) * SECRET_SHARE_PERCENT / 100))} />
+                      </div>
+                    )}
                     {carriedLoss < 0 && (
                       <>
                         <Row label="前の月までの赤字" value={-carriedLoss} sign="−" />
@@ -12712,7 +12751,7 @@ function contractorInvoiceTaxRate(invoice) {
 /* 全ての請求書列を漏れなく含んだ、担当者情報の取得用SELECT。
    請求書PDFに刷る項目を増やしたら、必ずこの定数と保存時のpatchの両方に追加すること
    (片方だけだと値が保存されない/消える。商品編集のPRODUCT_EDIT_SELECTと同じ考え方。5章38番参照) */
-const STAFF_PROFILE_SELECT = "id,name,is_active,expense_payment_method,postal_code,prefecture,city,address_line,building,phone,bank_name,bank_branch,bank_account_type,bank_account_number,bank_account_holder";
+const STAFF_PROFILE_SELECT = "id,name,is_active,has_private_deals,expense_payment_method,postal_code,prefecture,city,address_line,building,phone,bank_name,bank_branch,bank_account_type,bank_account_number,bank_account_holder";
 
 const STAFF_BANK_ACCOUNT_TYPE_OPTIONS = ["普通", "当座"];
 
@@ -12735,7 +12774,8 @@ function staffBankLine(staff) {
 }
 
 function contractorInvoiceTotal(invoice) {
-  return (Number(invoice.amount_jpy) || 0) + (Number(invoice.reimbursement_jpy) || 0);
+  // ★2026-11-08: 内緒の取引の利益分配(2.65)も合計に含める(列が無い古い行は0扱い)
+  return (Number(invoice.amount_jpy) || 0) + (Number(invoice.reimbursement_jpy) || 0) + (Number(invoice.secret_share_jpy) || 0);
 }
 
 /* 電子帳簿保存法の検索要件(取引年月日・取引金額・取引先)に合わせ、領収書(3.7)と同じ並びにする。
@@ -12756,6 +12796,15 @@ function contractorInvoiceRows(invoice, expenses) {
     ? `報酬基準額 ${base != null ? fmtJPY(base) : "-"} × ${invoice.rate_percent}%`
     : "対象月の報酬基準額が0以下、または歩合率が未設定のため0円";
   rows.push({ key: "commission", label: `歩合報酬(${formatMonthLabel(invoice.target_month)}分)〔税込〕`, note: rateLabel, amount: commission });
+  // ★2026-11-08: 非公開取引の利益分配(2.65)。歩合報酬とは別行にする
+  if ((Number(invoice.secret_share_jpy) || 0) > 0) {
+    rows.push({
+      key: "secret",
+      label: `非公開取引の利益分配(${formatMonthLabel(invoice.target_month)}分)`,
+      note: `対象利益 ${fmtJPY(invoice.secret_base_jpy)} × ${invoice.secret_share_percent}%`,
+      amount: Number(invoice.secret_share_jpy) || 0,
+    });
+  }
   (expenses || []).forEach((e) => {
     rows.push({
       key: `exp-${e.id}`,
@@ -12829,6 +12878,9 @@ function ContractorInvoiceDocument({ invoice, staff, expenses }) {
         <div className="flex justify-between" style={{ color: "#888" }}>
           <span className="pl-3">うち消費税({taxRate}%)</span><span>{fmtJPY(taxSplit.tax)}</span>
         </div>
+        {(Number(invoice.secret_share_jpy) || 0) > 0 && (
+          <div className="flex justify-between"><span>非公開取引の利益分配</span><span>{fmtJPY(invoice.secret_share_jpy)}</span></div>
+        )}
         <div className="flex justify-between"><span>立替経費精算({(expenses || []).length}件・消費税対象外)</span><span>{fmtJPY(invoice.reimbursement_jpy)}</span></div>
         <div className="flex justify-between font-medium" style={{ borderTop: "1px solid #ccc", paddingTop: "4px" }}>
           <span>合計金額</span><span>{fmtJPY(contractorInvoiceTotal(invoice))}</span>
@@ -12917,6 +12969,7 @@ function buildContractorInvoicePrintHtml(invoice, staff, expenses) {
     <div style="display:flex; justify-content:space-between;"><span>歩合報酬(税込)</span><span>${escapeHtml(fmtJPY(invoice.amount_jpy))}</span></div>
     <div style="display:flex; justify-content:space-between; color:#888;"><span style="padding-left:12px;">うち税抜金額</span><span>${escapeHtml(fmtJPY(taxSplit.excluded))}</span></div>
     <div style="display:flex; justify-content:space-between; color:#888;"><span style="padding-left:12px;">うち消費税(${escapeHtml(taxRate)}%)</span><span>${escapeHtml(fmtJPY(taxSplit.tax))}</span></div>
+    ${(Number(invoice.secret_share_jpy) || 0) > 0 ? `<div style="display:flex; justify-content:space-between;"><span>非公開取引の利益分配</span><span>${escapeHtml(fmtJPY(invoice.secret_share_jpy))}</span></div>` : ""}
     <div style="display:flex; justify-content:space-between;"><span>立替経費精算(${(expenses || []).length}件・消費税対象外)</span><span>${escapeHtml(fmtJPY(invoice.reimbursement_jpy))}</span></div>
     <div style="display:flex; justify-content:space-between; border-top:1px solid #ccc; margin-top:4px; padding-top:4px; font-weight:600;">
       <span>合計金額</span><span>${escapeHtml(fmtJPY(contractorInvoiceTotal(invoice)))}</span>
@@ -13127,7 +13180,8 @@ function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete, onViewInvoi
         //   内訳が見えないと立替分まで二重に経費計上してしまう。
         const commission = Number(inv.amount_jpy) || 0;
         const reimbursement = Number(inv.reimbursement_jpy) || 0;
-        const totalAmount = commission + reimbursement;
+        const secretShare = Number(inv.secret_share_jpy) || 0;
+        const totalAmount = commission + reimbursement + secretShare;
         // 消費税は歩合報酬のみが対象(2.42参照)。発行時に保存した税額があればそれを正とする
         const invoiceTax = inv.commission_tax_jpy != null
           ? Number(inv.commission_tax_jpy)
@@ -13157,9 +13211,11 @@ function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete, onViewInvoi
                 <span>適用歩合率: {inv.rate_percent}%</span>
                 <span>発行日: {inv.issue_date}</span>
               </div>
-              {reimbursement > 0 && (
+              {(reimbursement > 0 || secretShare > 0) && (
                 <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>
-                  内訳: 歩合報酬 {fmtJPY(commission)}(うち消費税 {fmtJPY(invoiceTax)}) ＋ 立替精算 {fmtJPY(reimbursement)}
+                  内訳: 歩合報酬 {fmtJPY(commission)}(うち消費税 {fmtJPY(invoiceTax)})
+                  {secretShare > 0 ? ` ＋ 非公開取引の利益分配 ${fmtJPY(secretShare)}` : ""}
+                  {reimbursement > 0 ? ` ＋ 立替精算 ${fmtJPY(reimbursement)}` : ""}
                 </p>
               )}
             </div>
@@ -13306,7 +13362,7 @@ function MyInvoicesPage() {
   useEffect(() => {
     (async () => {
       let q = supabase.from("contractor_invoices")
-        .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,tax_rate_percent,commission_tax_jpy,issue_date,status,staff(name)")
+        .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,tax_rate_percent,commission_tax_jpy,secret_base_jpy,secret_share_percent,secret_share_jpy,issue_date,status,staff(name)")
         .order("target_month", { ascending: false });
       if (staffId) q = q.eq("staff_id", staffId);
       const { data, error } = await q;
@@ -13392,7 +13448,7 @@ function ContractorInvoicesPage() {
     setProfitError(null);
     const { data, error } = await supabase
       .from("monthly_profits")
-      .select("id,target_month,total_sales_jpy,total_purchase_cost_jpy,cost_order_jpy,cost_sample_jpy,cost_sold_jpy,total_general_expenses_jpy,gross_profit_jpy,carried_loss_in_jpy,calculated_at")
+      .select("id,target_month,total_sales_jpy,total_purchase_cost_jpy,cost_order_jpy,cost_sample_jpy,cost_sold_jpy,total_general_expenses_jpy,gross_profit_jpy,carried_loss_in_jpy,calculated_at,secret_sales_jpy,secret_cost_jpy,secret_expenses_jpy,secret_profit_jpy")
       .order("target_month", { ascending: false });
     if (error) {
       setProfitError(
@@ -13443,13 +13499,13 @@ function ContractorInvoicesPage() {
     const [salesRes, expenseRes, productRes] = await Promise.all([
       supabase.from("sales")
         // ★2026-08-24: 当月販売分の原価も計上するため、明細と商品まで取得する(2.45参照)
-        .select("transaction_date,total_amount_jpy,sale_items(product_id,products(purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
+        .select("transaction_date,total_amount_jpy,host_clubs(private_to_staff_id),sale_items(product_id,products(purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .gte("transaction_date", rangeStart).lt("transaction_date", rangeEnd),
       supabase.from("expenses")
-        .select("amount_incl_tax,payment_date")
+        .select("amount_incl_tax,payment_date,private_to_staff_id")
         .gte("payment_date", rangeStart).lt("payment_date", rangeEnd),
       supabase.from("products")
-        .select("purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+        .select("purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,private_to_staff_id")
         // 計上開始日より前は集計側でも対象外。handleCalculateMonthlyProfitと必ず同じ条件・同じ判定にすること
         .gte("purchase_date", rangeStart > PURCHASE_COST_BASIS_FROM_MIN ? rangeStart : PURCHASE_COST_BASIS_FROM_MIN)
         .lt("purchase_date", rangeEnd),
@@ -13469,9 +13525,14 @@ function ContractorInvoicesPage() {
     }
 
     const byMonth = {};
-    const bucket = (m) => (byMonth[m] = byMonth[m] || { sales: 0, cost: 0, expenses: 0 });
+    const bucket = (m) => (byMonth[m] = byMonth[m] || { sales: 0, cost: 0, expenses: 0, sSales: 0, sCost: 0, sExp: 0 });
     (salesRes.data || []).forEach((sale) => {
       const b = bucket(String(sale.transaction_date).slice(0, 7));
+      if (isSecretSale(sale)) { // 内緒の取引は別枠(handleCalculateMonthlyProfitと同じ仕分け)
+        b.sSales += Number(sale.total_amount_jpy) || 0;
+        (sale.sale_items || []).forEach((si) => { if (si.products) b.sCost += productCostJpy(si.products); });
+        return;
+      }
       b.sales += Number(sale.total_amount_jpy) || 0;
       // 仕入れ時に費用化していない商品が売れた分は、売れた月の原価として計上する
       (sale.sale_items || []).forEach((si) => {
@@ -13479,11 +13540,12 @@ function ContractorInvoicesPage() {
         if (pr && !isPurchaseCostCountable(pr)) b.cost += productCostJpy(pr);
       });
     });
-    (productRes.data || []).filter(isPurchaseCostCountable).forEach((pr) => {
+    (productRes.data || []).filter((pr) => !isSecretRow(pr)).filter(isPurchaseCostCountable).forEach((pr) => {
       bucket(String(pr.purchase_date).slice(0, 7)).cost += productCostJpy(pr);
     });
     (expenseRes.data || []).forEach((e) => {
-      bucket(String(e.payment_date).slice(0, 7)).expenses += Number(e.amount_incl_tax) || 0;
+      const b = bucket(String(e.payment_date).slice(0, 7));
+      if (isSecretRow(e)) b.sExp += Number(e.amount_incl_tax) || 0; else b.expenses += Number(e.amount_incl_tax) || 0;
     });
 
     /* 注意: 前月の参照はこの配列(profits)の中から引いている。loadMonthlyProfitsが
@@ -13496,7 +13558,7 @@ function ContractorInvoicesPage() {
     // 月の若い順に「いまの実データで集計し直した場合の値」を連鎖計算する(繰越損失の連鎖を再現するため)
     const liveByMonth = {};
     monthsAsc.forEach((m) => {
-      const cur = byMonth[m] || { sales: 0, cost: 0, expenses: 0 };
+      const cur = byMonth[m] || { sales: 0, cost: 0, expenses: 0, sSales: 0, sCost: 0, sExp: 0 };
       const gross = cur.sales - cur.cost - cur.expenses;
       const prevM = String(prevMonthFirstDay(m)).slice(0, 7);
       const prevLive = liveByMonth[prevM];
@@ -13508,7 +13570,7 @@ function ContractorInvoicesPage() {
     const result = {};
     profits.forEach((x) => {
       const m = String(x.target_month).slice(0, 7);
-      const cur = byMonth[m] || { sales: 0, cost: 0, expenses: 0 };
+      const cur = byMonth[m] || { sales: 0, cost: 0, expenses: 0, sSales: 0, sCost: 0, sExp: 0 };
       const live = liveByMonth[m] || { gross: 0, carried: 0 };
       const savedGross = Math.round(Number(x.gross_profit_jpy) || 0);
       const savedCarried = Math.round(Number(x.carried_loss_in_jpy) || 0);
@@ -13523,6 +13585,10 @@ function ContractorInvoicesPage() {
       if (Math.round(cur.cost) !== Math.round(Number(x.total_purchase_cost_jpy) || 0)) diffs.push("仕入原価");
       if (Math.round(cur.expenses) !== Math.round(Number(x.total_general_expenses_jpy) || 0)) diffs.push("経費");
       if (expectedCarried !== savedCarried) diffs.push("繰越損失");
+      // 内緒の取引(2.65): 売上・原価・経費のどれかが保存値とズレていれば1項目として警告
+      if (Math.round(cur.sSales) !== Math.round(Number(x.secret_sales_jpy) || 0)
+        || Math.round(cur.sCost) !== Math.round(Number(x.secret_cost_jpy) || 0)
+        || Math.round(cur.sExp) !== Math.round(Number(x.secret_expenses_jpy) || 0)) diffs.push("内緒の取引");
 
       // ② 前の月が古いせいで連鎖しているズレ(この月だけ再集計しても直らない)
       const cascade = Math.round(live.carried) !== savedCarried && expectedCarried === savedCarried;
@@ -13547,7 +13613,7 @@ function ContractorInvoicesPage() {
     setInvoiceError(null);
     const { data, error } = await supabase
       .from("contractor_invoices")
-      .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,tax_rate_percent,commission_tax_jpy,issue_date,status,staff(name)")
+      .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,tax_rate_percent,commission_tax_jpy,secret_base_jpy,secret_share_percent,secret_share_jpy,issue_date,status,staff(name)")
       .order("target_month", { ascending: false })
       .order("created_at", { ascending: false });
     /* ★2026-08-22: 列不足(42703)は「マイグレーション未実行」が原因と断定できるため、
@@ -13624,15 +13690,23 @@ function ContractorInvoicesPage() {
          ①で費用化済みの商品は②では数えないため、どの商品も必ず1回だけ経費になる(二重計上しない)。 */
       const { data: salesData, error: salesError } = await supabase
         .from("sales")
-        .select("id,transaction_date,total_amount_jpy,sale_items(product_id,products(purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
+        .select("id,transaction_date,total_amount_jpy,host_clubs(private_to_staff_id),sale_items(product_id,products(purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .gte("transaction_date", monthStart)
         .lt("transaction_date", monthEndExclusive);
       if (salesError) { setProfitError("売上データの取得に失敗しました"); setCalculating(false); return; }
 
-      const totalSales = (salesData || []).reduce((sum, x) => sum + (Number(x.total_amount_jpy) || 0), 0);
+      /* ★2026-11-08: 内緒の取引(悟専用クラブ向けの販売)は通常の集計から外し、別枠で集計する(2.65参照)。 */
+      const normalSales = (salesData || []).filter((x) => !isSecretSale(x));
+      const secretSalesRows = (salesData || []).filter(isSecretSale);
+      const totalSales = normalSales.reduce((sum, x) => sum + (Number(x.total_amount_jpy) || 0), 0);
+      const secretSales = secretSalesRows.reduce((sum, x) => sum + (Number(x.total_amount_jpy) || 0), 0);
+      // 内緒の原価: 内緒のクラブに売れた商品の原価(売れた月に計上。商品は仕入れ時の通常集計から外れているため)
+      const secretCost = secretSalesRows.reduce((sum, sale) => (
+        sum + (sale.sale_items || []).reduce((a, si) => a + (si.products ? productCostJpy(si.products) : 0), 0)
+      ), 0);
 
       // ②当月販売分: 仕入れ時に費用化していない(=isPurchaseCostCountableがfalseの)商品だけ
-      const soldUncountedCost = (salesData || []).reduce((sum, sale) => (
+      const soldUncountedCost = normalSales.reduce((sum, sale) => (
         sum + (sale.sale_items || []).reduce((a, si) => {
           const pr = si.products;
           if (!pr || isPurchaseCostCountable(pr)) return a; // 仕入れ時に計上済みならここでは数えない
@@ -13654,11 +13728,11 @@ function ContractorInvoicesPage() {
       if (costStart < monthEndExclusive) {
         const { data: purchasedData, error: purchasedError } = await supabase
           .from("products")
-          .select("id,purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy")
+          .select("id,purchase_date,created_via_sale,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy,private_to_staff_id")
           .gte("purchase_date", costStart)
           .lt("purchase_date", monthEndExclusive);
         if (purchasedError) { setProfitError("仕入れ商品の取得に失敗しました"); setCalculating(false); return; }
-        const countable = (purchasedData || []).filter(isPurchaseCostCountable);
+        const countable = (purchasedData || []).filter((x) => !isSecretRow(x)).filter(isPurchaseCostCountable); // 内緒の商品は通常の仕入れから除く
         // ★2026-08-24: 内訳を保存するため、受注とサンプル・在庫を分けて集計する(2.45参照)
         costOrder = countable.filter((p) => p.created_via_sale).reduce((sum, p) => sum + productCostJpy(p), 0);
         costSample = countable.filter((p) => !p.created_via_sale).reduce((sum, p) => sum + productCostJpy(p), 0);
@@ -13669,12 +13743,14 @@ function ContractorInvoicesPage() {
       // 一般経費合計
       const { data: expenseData, error: expenseError } = await supabase
         .from("expenses")
-        .select("amount_incl_tax,payment_date")
+        .select("amount_incl_tax,payment_date,private_to_staff_id")
         .gte("payment_date", monthStart)
         .lt("payment_date", monthEndExclusive);
       if (expenseError) { setProfitError("経費データの取得に失敗しました"); setCalculating(false); return; }
 
-      const totalExpenses = (expenseData || []).reduce((sum, e) => sum + (Number(e.amount_incl_tax) || 0), 0);
+      const totalExpenses = (expenseData || []).filter((e) => !isSecretRow(e)).reduce((sum, e) => sum + (Number(e.amount_incl_tax) || 0), 0);
+      const secretExpenses = (expenseData || []).filter(isSecretRow).reduce((sum, e) => sum + (Number(e.amount_incl_tax) || 0), 0);
+      const secretProfit = secretSales - secretCost - secretExpenses;
       const grossProfit = totalSales - totalPurchaseCost - totalExpenses;
 
       // ★2026-08-06実装: 前月の「粗利益+繰越損失」がマイナスなら、その分を今月への繰越損失として引き継ぐ。
@@ -13701,6 +13777,11 @@ function ContractorInvoicesPage() {
         total_general_expenses_jpy: totalExpenses,
         gross_profit_jpy: grossProfit,
         carried_loss_in_jpy: carriedLossIn,
+        // 内緒の取引(2.65)。繰越損失は持ち越さず、月ごとに利益がプラスの分だけを分配の対象にする
+        secret_sales_jpy: secretSales,
+        secret_cost_jpy: secretCost,
+        secret_expenses_jpy: secretExpenses,
+        secret_profit_jpy: secretProfit,
         calculated_at: new Date().toISOString(),
       };
 
@@ -13756,7 +13837,7 @@ function ContractorInvoicesPage() {
 
       const { data: mp, error: mpError } = await supabase
         .from("monthly_profits")
-        .select("id,target_month,gross_profit_jpy,carried_loss_in_jpy")
+        .select("id,target_month,gross_profit_jpy,carried_loss_in_jpy,secret_profit_jpy")
         .eq("target_month", issueTargetMonthDate)
         .maybeSingle();
       if (mpError) { setInvoicePreview({ error: "月次損益データの取得に失敗しました" }); return; }
@@ -13800,7 +13881,19 @@ function ContractorInvoicesPage() {
         notes.push("この担当者には立替区分(「立替(◯)」との対応)が設定されていないため、立替精算は含まれていません。「歩合率設定」タブの「立替区分の対応」で設定できます。");
       }
 
-      const total = amount + reimbursementTotal;
+      /* ★2026-11-08: 内緒の取引の利益分配(2.65)。「非公開の取引を持つ担当者(悟)」の請求書にだけ載せる。
+         内緒の利益(売上−売れた商品の原価−内緒の経費)がプラスの月だけ、その50%を取り分とする(円未満四捨五入)。
+         マイナスの月は0円(繰越はしない)。 */
+      let secretBase = 0;
+      let secretShare = 0;
+      if (staffRow.has_private_deals) {
+        secretBase = Math.max(0, Math.round(Number(mp.secret_profit_jpy) || 0));
+        secretShare = Math.round(secretBase * SECRET_SHARE_PERCENT / 100);
+        if (secretBase > 0) notes.push(`内緒の取引の利益 ${fmtJPY(secretBase)} の${SECRET_SHARE_PERCENT}%(${fmtJPY(secretShare)})を、歩合報酬とは別行で載せます。この金額には消費税を割り戻していません。税務上の扱いは税理士に確認してください。`);
+        else if ((Number(mp.secret_profit_jpy) || 0) < 0) notes.push(`内緒の取引の利益は${fmtJPY(mp.secret_profit_jpy)}(マイナス)のため、取り分は0円です(翌月への繰越はしません)。`);
+      }
+
+      const total = amount + secretShare + reimbursementTotal;
       if (total <= 0) {
         setInvoicePreview({
           error: `歩合報酬・立替精算ともに¥0のため、この月に請求できる金額がありません。\n${notes.join("\n")}`,
@@ -13809,7 +13902,7 @@ function ContractorInvoicesPage() {
       }
 
       setInvoicePreview({
-        monthlyProfit: mp, rate, amount, commissionBase, carriedLoss,
+        monthlyProfit: mp, rate, amount, commissionBase, carriedLoss, secretBase, secretShare,
         advanceMethod, reimbursementRows, reimbursementTotal, total, notes,
       });
     } finally {
@@ -13845,6 +13938,10 @@ function ContractorInvoicesPage() {
         // 発行時点の税率と、そこから割り戻した消費税額を固定して保存する(2.42参照)
         tax_rate_percent: CONSUMPTION_TAX_RATE_PERCENT,
         commission_tax_jpy: splitTaxIncluded(invoicePreview.amount, CONSUMPTION_TAX_RATE_PERCENT).tax,
+        // 内緒の取引の利益分配(2.65)。対象がない請求書は0で保存する
+        secret_base_jpy: invoicePreview.secretBase || 0,
+        secret_share_percent: (invoicePreview.secretShare || 0) > 0 ? SECRET_SHARE_PERCENT : 0,
+        secret_share_jpy: invoicePreview.secretShare || 0,
         issue_date: issueDate,
         status: "未払い",
       }).select("id").single();
@@ -14181,6 +14278,11 @@ function ContractorInvoicesPage() {
 
                   {/* ★2026-08-22: 立替精算の内訳。金額だけ出すと「何が入っているか」が分からず、
                       入れ忘れ・入れ過ぎに気づけないため、対象の経費を必ず明細で出す(2.39参照) */}
+                  {(invoicePreview.secretShare || 0) > 0 && (
+                    <p>非公開取引の利益分配({SECRET_SHARE_PERCENT}%): {fmtJPY(invoicePreview.secretShare)}
+                      <span style={{ color: "#8b8578" }}> (内緒の利益 {fmtJPY(invoicePreview.secretBase)} × {SECRET_SHARE_PERCENT}%)</span>
+                    </p>
+                  )}
                   <p>立替精算: {fmtJPY(invoicePreview.reimbursementTotal || 0)}
                     {invoicePreview.advanceMethod ? `(${invoicePreview.advanceMethod})` : ""}</p>
                   {(invoicePreview.reimbursementRows || []).length > 0 && (
