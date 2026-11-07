@@ -78,6 +78,7 @@ const { useState, useEffect, useCallback, useMemo, useRef, createContext, useCon
    あくまで見た目の整理で、実際の保護はDBのRLSが行う)。 */
 const AccessContext = createContext({ isOwner: true, hasPrivateDeals: false, staffId: null });
 const useAccess = () => useContext(AccessContext);
+const SATORU_STAFF_ID = "df24e2c3-c67a-48d8-94aa-bf09f7de56fc"; // 悟(「悟専用」に設定したときの private_to_staff_id)
 const OWNER_STAFF_ID = "8e90b96d-1be3-42d9-b7a2-d0ff973ae4e3"; // 公洋(staff.is_owner列がまだ無い時のフォールバック)
 
 /* ============================================================
@@ -1566,7 +1567,10 @@ function HostClubCard({ club, hostCount, nextVisitDate, onOpen, onEdit, onDelete
       onClick={() => onOpen(club.id)}
     >
       <div className="flex-1 min-w-0">
-        <p className="font-display text-base truncate">{club.name}</p>
+        <p className="font-display text-base truncate">
+          {club.name}
+          {club.private_to_staff_id && <span className="ml-2 text-[11px] px-2 py-0.5 rounded-full align-middle" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>悟専用</span>}
+        </p>
         <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
           <span>所属ホスト: {hostCount}名</span>
           <span>次回訪問予定: {nextVisitDate || "未定"}</span>
@@ -1593,8 +1597,13 @@ function HostClubCard({ club, hostCount, nextVisitDate, onOpen, onEdit, onDelete
 }
 
 /* ---- ホストクラブ 登録・編集モーダル ---- */
+/* ★2026-11-08実装: 「悟専用(内緒)」の設定(2.64参照)。private_to_staff_id に悟のidが入ると、悟と公洋以外には見えなくなる。
+   オーナー(公洋)は新規・編集のどちらでも設定できる。悟は「新規作成のときだけ」自分専用にできる(後から変えるのはDBが拒否する)。 */
 function HostClubFormModal({ club, onClose, onSave }) {
+  const { isOwner, hasPrivateDeals } = useAccess();
   const isNew = !club.id;
+  const canMarkPrivate = isOwner || (hasPrivateDeals && isNew);
+  const [isPrivate, setIsPrivate] = useState(!!club.private_to_staff_id);
   const [name, setName] = useState(club.name || "");
   const [saving, setSaving] = useState(false);
 
@@ -1602,7 +1611,7 @@ function HostClubFormModal({ club, onClose, onSave }) {
     e.preventDefault();
     if (!name.trim()) return;
     setSaving(true);
-    await onSave({ id: club.id || null, name: name.trim() });
+    await onSave({ id: club.id || null, name: name.trim(), isPrivate, wasPrivate: !!club.private_to_staff_id });
     setSaving(false);
   };
 
@@ -1622,6 +1631,16 @@ function HostClubFormModal({ club, onClose, onSave }) {
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           />
         </div>
+        {canMarkPrivate && (
+          <label className="flex items-start gap-2.5 cursor-pointer">
+            <input type="checkbox" checked={isPrivate} onChange={(e) => setIsPrivate(e.target.checked)} className="mt-0.5 w-4 h-4 shrink-0" />
+            <span className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
+              <span style={{ color: "var(--mz-ink)" }}>悟専用(内緒の取引先)</span><br />
+              オンにすると、このクラブのホスト・訪問・販売・領収書・そこで売れた商品が、悟と公洋以外には見えなくなります
+              {!isNew && !isOwner ? "(登録後の変更は公洋のみ)" : ""}
+            </span>
+          </label>
+        )}
         <div className="flex gap-2 pt-1">
           <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>
             キャンセル
@@ -1637,6 +1656,7 @@ function HostClubFormModal({ club, onClose, onSave }) {
 
 /* ---- ホストクラブ一覧ページ本体 ---- */
 function HostClubsPage() {
+  const { isOwner, staffId } = useAccess();
   const [clubs, setClubs] = useState(null); // null = 読み込み中
   const [hosts, setHosts] = useState([]);
   const [visits, setVisits] = useState([]);
@@ -1646,7 +1666,11 @@ function HostClubsPage() {
   const loadAll = useCallback(async () => {
     setError(null);
     const [clubsRes, hostsRes, visitsRes] = await Promise.all([
-      supabase.from("host_clubs").select("id,name").order("name"),
+      (async () => {
+        const r = await supabase.from("host_clubs").select("id,name,private_to_staff_id").order("name");
+        if (r.error && r.error.code === "42703") return supabase.from("host_clubs").select("id,name").order("name"); // SQL適用前
+        return r;
+      })(),
       supabase.from("hosts").select("id,host_club_id"),
       supabase.from("visits").select("id,host_club_id,next_visit_date"),
     ]);
@@ -1691,11 +1715,16 @@ function HostClubsPage() {
   }, [visits]);
 
   const handleSave = async (form) => {
+    // 「悟専用」は、チェックされている/元々設定されていたときだけ送る(列がまだ無い間の保存を壊さないため)
+    const privPatch = (form.isPrivate || form.wasPrivate)
+      ? { private_to_staff_id: form.isPrivate ? (isOwner ? SATORU_STAFF_ID : staffId) : null } : {};
     if (form.id) {
-      const { error } = await supabase.from("host_clubs").update({ name: form.name }).eq("id", form.id);
+      const upd = { name: form.name };
+      if (isOwner) Object.assign(upd, privPatch); // 変更はオーナーのみ(悟の変更はDBも拒否する)
+      const { error } = await supabase.from("host_clubs").update(upd).eq("id", form.id);
       if (error) { alert("更新に失敗しました"); return; }
     } else {
-      const { error } = await supabase.from("host_clubs").insert({ name: form.name });
+      const { error } = await supabase.from("host_clubs").insert({ name: form.name, ...privPatch });
       if (error) { alert("登録に失敗しました"); return; }
     }
     setModalClub(null);
@@ -6817,7 +6846,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-08a";
+const BUILD_VERSION = "2026-11-08b";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -10656,7 +10685,10 @@ function CatalogCard({ catalog, itemCount, onEdit, onDuplicate, onDelete, onShar
       style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
     >
       <div className="flex-1 min-w-0">
-        <p className="font-display text-base truncate">{catalog.name}</p>
+        <p className="font-display text-base truncate">
+          {catalog.name}
+          {catalog.private_to_staff_id && <span className="ml-2 text-[11px] px-2 py-0.5 rounded-full align-middle" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>悟専用</span>}
+        </p>
         <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
           <span>掲載商品: {itemCount}点</span>
           <span>作成日: {(catalog.created_at || "").slice(0, 10)}</span>
@@ -10697,8 +10729,13 @@ function CatalogCard({ catalog, itemCount, onEdit, onDuplicate, onDelete, onShar
 }
 
 /* ---- カタログ 登録・編集モーダル(商品はステータス・種別を問わず検索して個別選択) ---- */
+/* ★2026-11-08実装: 「悟専用(内緒)」の設定(2.64参照)。private_to_staff_id に悟のidが入ると、悟と公洋以外には見えなくなる。
+   オーナー(公洋)は新規・編集のどちらでも設定できる。悟は「新規作成のときだけ」自分専用にできる(後から変えるのはDBが拒否する)。 */
 function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
+  const { isOwner, hasPrivateDeals } = useAccess();
   const isNew = !catalog.id;
+  const canMarkPrivate = isOwner || (hasPrivateDeals && isNew);
+  const [isPrivate, setIsPrivate] = useState(!!catalog.private_to_staff_id);
   const [name, setName] = useState(catalog.name || "");
   /* ★2026-10-23実装: このカタログで「サンプル品なし(お取り寄せ)」の表示を出さない(2.62参照)。
      既定は出す(false)。複製した場合も引き継ぐ。 */
@@ -10794,7 +10831,7 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
     if (!name.trim()) return;
     if (selectedProducts.length === 0) { alert("商品を1点以上選択してください"); return; }
     setSaving(true);
-    await onSave({ id: catalog.id || null, name: name.trim(), hideOrderOnlyBadge, productIds: selectedProducts.map((p) => p.id) });
+    await onSave({ id: catalog.id || null, name: name.trim(), hideOrderOnlyBadge, isPrivate, wasPrivate: !!catalog.private_to_staff_id, productIds: selectedProducts.map((p) => p.id) });
     setSaving(false);
   };
 
@@ -10816,6 +10853,17 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
             style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
           />
         </div>
+
+        {canMarkPrivate && (
+          <label className="flex items-start gap-2.5 cursor-pointer">
+            <input type="checkbox" checked={isPrivate} onChange={(e) => setIsPrivate(e.target.checked)} className="mt-0.5 w-4 h-4 shrink-0" />
+            <span className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
+              <span style={{ color: "var(--mz-ink)" }}>悟専用(内緒のカタログ)</span><br />
+              オンにすると、このカタログが悟と公洋以外の管理画面には出なくなります(共有リンクを知っている相手は従来どおり見られます)
+              {!isNew && !isOwner ? "(登録後の変更は公洋のみ)" : ""}
+            </span>
+          </label>
+        )}
 
         {/* ★2026-10-23: 「サンプル品なし(お取り寄せ)」表示の出し分け(カタログごと。2.62参照) */}
         <label className="flex items-start gap-2.5 cursor-pointer">
@@ -11022,6 +11070,7 @@ function ShareCatalogModal({ catalog, onClose }) {
 
 /* ---- カタログ一覧ページ本体 ---- */
 function CatalogsPage() {
+  const { isOwner, staffId } = useAccess();
   const [catalogs, setCatalogs] = useState(null); // null = 読み込み中
   const [error, setError] = useState(null);
   const [modalCatalog, setModalCatalog] = useState(null); // null=閉じる, {}=新規, obj=編集
@@ -11030,10 +11079,16 @@ function CatalogsPage() {
 
   const loadAll = useCallback(async () => {
     setError(null);
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from("catalogs")
-      .select("id,name,share_token,created_at,hide_order_only_badge,catalog_items(count)")
+      .select("id,name,share_token,created_at,hide_order_only_badge,private_to_staff_id,catalog_items(count)")
       .order("created_at", { ascending: false });
+    if (error && error.code === "42703") { // 「悟専用」の列がまだ無い(SQL適用前)
+      ({ data, error } = await supabase
+        .from("catalogs")
+        .select("id,name,share_token,created_at,hide_order_only_badge,catalog_items(count)")
+        .order("created_at", { ascending: false }));
+    }
     if (error) { setError("カタログの取得に失敗しました"); setCatalogs([]); return; }
     setCatalogs(data || []);
   }, []);
@@ -11054,8 +11109,10 @@ function CatalogsPage() {
   };
 
   const handleSave = async (form) => {
+    const privPatch = (form.isPrivate || form.wasPrivate)
+      ? { private_to_staff_id: form.isPrivate ? (isOwner ? SATORU_STAFF_ID : staffId) : null } : {};
     if (form.id) {
-      const { error: updErr } = await supabase.from("catalogs").update({ name: form.name, hide_order_only_badge: form.hideOrderOnlyBadge === true }).eq("id", form.id);
+      const { error: updErr } = await supabase.from("catalogs").update({ name: form.name, hide_order_only_badge: form.hideOrderOnlyBadge === true, ...(isOwner ? privPatch : {}) }).eq("id", form.id);
       if (updErr) { alert("更新に失敗しました"); return; }
       const { error: delErr } = await supabase.from("catalog_items").delete().eq("catalog_id", form.id);
       if (delErr) { alert("掲載商品の更新に失敗しました(カタログ名は更新済みです)"); return; }
@@ -11065,7 +11122,7 @@ function CatalogsPage() {
     } else {
       const { data: inserted, error: insErr } = await supabase
         .from("catalogs")
-        .insert({ name: form.name, share_token: generateShareToken(), hide_order_only_badge: form.hideOrderOnlyBadge === true })
+        .insert({ name: form.name, share_token: generateShareToken(), hide_order_only_badge: form.hideOrderOnlyBadge === true, ...privPatch })
         .select("id")
         .single();
       if (insErr) { alert("登録に失敗しました"); return; }
@@ -11099,7 +11156,7 @@ function CatalogsPage() {
 
     const { data: inserted, error: insErr } = await supabase
       .from("catalogs")
-      .insert({ name, share_token: generateShareToken(), hide_order_only_badge: catalog.hide_order_only_badge === true })
+      .insert({ name, share_token: generateShareToken(), hide_order_only_badge: catalog.hide_order_only_badge === true, ...(catalog.private_to_staff_id ? { private_to_staff_id: catalog.private_to_staff_id } : {}) })
       .select("id")
       .single();
     if (insErr || !inserted) { alert("カタログの複製に失敗しました"); return; }
@@ -11287,6 +11344,7 @@ function ExpenseList({ expenses, editingId, onEdit, onCancelEdit, onSave, onDele
             )}
             <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
               <span>{e.payment_method}</span>
+              {e.private_to_staff_id && <span className="px-1.5 py-0.5 rounded-full" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>内緒の取引分</span>}
               {e.tax_amount_jpy != null && <span>消費税: {fmtJPY(e.tax_amount_jpy)}</span>}
               {e.invoice_number && <span>請求書番号: {e.invoice_number}</span>}
               {e.invoice_registration_number && <span>登録番号: {e.invoice_registration_number}</span>}
@@ -11426,6 +11484,8 @@ function AiReceiptReaderCard({ onExtracted }) {
    ・expense.idがあれば編集モード、なければ新規モード(AIレシート読み込みからの下書き反映時もid=nullの新規モード扱い)
    ・呼び出し側(ExpensesPage)が`key`propを変えることで、編集開始/AI反映/保存完了のたびに内部stateを再初期化する */
 function ExpenseInlineForm({ expense, onSave, onCancel }) {
+  const { isOwner, hasPrivateDeals } = useAccess();
+  const canMarkPrivate = isOwner || hasPrivateDeals; // 「内緒の取引分」の経費(2.64参照)
   const isNew = !expense.id;
   const [form, setForm] = useState({
     id: expense.id || null,
@@ -11447,6 +11507,8 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
     amount_incl_tax: expense.amount_incl_tax != null ? String(expense.amount_incl_tax) : "",
     memo: expense.memo || "",
     receipt_file_url: expense.receipt_file_url || "",
+    is_private: !!expense.private_to_staff_id,
+    was_private: !!expense.private_to_staff_id,
     _aiOrigin: !!expense._aiOrigin, // AIレシート読み込みからの下書きをそのまま登録した場合はtrue(entry_method判定用)
   });
   const [saving, setSaving] = useState(false);
@@ -11695,6 +11757,16 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
         </div>
       </div>
 
+      {canMarkPrivate && (
+        <label className="flex items-start gap-2.5 cursor-pointer">
+          <input type="checkbox" checked={!!form.is_private} onChange={(e) => setForm((f) => ({ ...f, is_private: e.target.checked }))} className="mt-0.5 w-4 h-4 shrink-0" />
+          <span className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
+            <span style={{ color: "var(--mz-ink)" }}>内緒の取引分の経費</span><br />
+            悟の内緒の取引にかかった経費です。オンにすると悟と公洋以外には見えなくなり、通常の月次損益・歩合の計算には入れず、内緒の取引の利益分配で扱います
+          </span>
+        </label>
+      )}
+
       <div>
         <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>メモ(任意)</label>
         <textarea
@@ -11732,6 +11804,7 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
    ・AIレシート読み込みカード → 常設入力フォーム(新規/編集兼用) → フィルタ・合計 → 一覧、の縦並び構成
    ・モーダルは使用しない(2026-07-09改修: 常設フォーム方式に変更) */
 function ExpensesPage() {
+  const { isOwner, hasPrivateDeals, staffId } = useAccess();
   const [expenses, setExpenses] = useState(null); // null = 読み込み中
   const [error, setError] = useState(null);
   /* ★2026-08-24r: 対象月の既定を「当月」にする(2.52参照)。
@@ -11750,10 +11823,13 @@ function ExpensesPage() {
 
   const loadExpenses = useCallback(async () => {
     setError(null);
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from("expenses")
-      .select("id,payment_date,payee,payment_method,reimbursement_status,invoice_number,invoice_registration_number,item_name,account_category,tax_category,amount_incl_tax,tax_amount_jpy,memo,receipt_file_url,entry_method,created_at")
+      .select("id,payment_date,payee,payment_method,reimbursement_status,invoice_number,invoice_registration_number,item_name,account_category,tax_category,amount_incl_tax,tax_amount_jpy,memo,receipt_file_url,entry_method,created_at,private_to_staff_id")
       .order("payment_date", { ascending: false });
+    if (error && error.code === "42703") { // 「内緒」の列がまだ無い(SQL適用前)ならそれ抜きで取り直す
+      ({ data, error } = await supabase.from("expenses").select("id,payment_date,payee,payment_method,reimbursement_status,invoice_number,invoice_registration_number,item_name,account_category,tax_category,amount_incl_tax,tax_amount_jpy,memo,receipt_file_url,entry_method,created_at").order("payment_date", { ascending: false }));
+    }
     /* 列不足(42703)は「マイグレーション未実行」と断定できるため、実行すべきSQLを名指しで出す(5章42番参照) */
     if (error) {
       setError(
@@ -11836,6 +11912,10 @@ function ExpensesPage() {
       memo: form.memo.trim() || null,
       receipt_file_url: form.receipt_file_url.trim() || null,
     };
+    // 「内緒の取引分」は、チェックされている/元々付いていたときだけ送る(列がまだ無い間の保存を壊さないため)
+    if ((isOwner || hasPrivateDeals) && (form.is_private || form.was_private)) {
+      patch.private_to_staff_id = form.is_private ? (isOwner ? SATORU_STAFF_ID : staffId) : null;
+    }
 
     if (form.id) {
       const { error } = await supabase.from("expenses").update(patch).eq("id", form.id);
