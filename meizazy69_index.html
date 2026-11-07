@@ -213,18 +213,26 @@ function useAuth() {
     return { ok: true };
   }, []);
 
+  /* ★2026-11-03実装: 個人ログイン(メールアドレス+パスワード。2.63参照)。
+     担当者はログインしたユーザーに紐づく(staff.auth_user_id)ため、担当者選択は不要になる。 */
+  const signInWithEmail = useCallback(async (email, password) => {
+    const { error } = await supabase.auth.signInWithPassword({ email: String(email || "").trim(), password });
+    if (error) return { ok: false, message: "メールアドレスまたはパスワードが違います" };
+    return { ok: true };
+  }, []);
+
   const signOut = useCallback(async () => {
     localStorage.removeItem(STAFF_STORAGE_KEY);
     await supabase.auth.signOut();
   }, []);
 
-  return { session, submitPasscode, signOut };
+  return { session, submitPasscode, signInWithEmail, signOut };
 }
 
 /* ============================================================
    画面1: 合言葉入力
    ============================================================ */
-function PasscodeScreen({ onSubmit }) {
+function PasscodeScreen({ onSubmit, onBack }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -285,6 +293,76 @@ function PasscodeScreen({ onSubmit }) {
 
         <p className="text-center text-xs mt-6" style={{ color: "var(--mz-ink-muted)" }}>
           合言葉が分からない場合は管理者にご確認ください
+        </p>
+        {onBack && (
+          <p className="text-center text-xs mt-3">
+            <button type="button" onClick={onBack} className="underline" style={{ color: "var(--mz-ink-muted)" }}>メールアドレスでログインする</button>
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   画面1(個人ログイン) ★2026-11-03実装。2.63参照
+   ・メールアドレス+パスワードでログインする。担当者はログインしたユーザーから自動で決まる。
+   ・移行期間のあいだだけ「合言葉でログイン」の入口を残す(個人アカウントを作る前に全員が締め出されないため)。
+     データへのアクセス制限(2.64以降)を入れる段階で、この入口と合言葉は廃止する。
+   ============================================================ */
+function LoginScreen({ onSignIn, onSubmitPasscode }) {
+  const [usePasscode, setUsePasscode] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  if (usePasscode) return <PasscodeScreen onSubmit={onSubmitPasscode} onBack={() => setUsePasscode(false)} />;
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    const result = await onSignIn(email, password);
+    if (!result.ok) { setError(result.message); setSubmitting(false); }
+    // 成功時は onAuthStateChange 経由で自動的に次の画面へ遷移する
+  };
+
+  const inputStyle = { border: "1px solid var(--mz-border)", color: "var(--mz-ink)" };
+  return (
+    <div className="min-h-screen flex items-center justify-center px-4"
+         style={{ background: "radial-gradient(circle at 50% 20%, #201c15 0%, #14120F 60%)" }}>
+      <div className="w-full max-w-sm">
+        <div className="flex flex-col items-center mb-8">
+          <div className="w-14 h-14 rounded-full border border-[color:var(--mz-gold)] flex items-center justify-center mb-4">
+            <span className="font-display text-lg" style={{ color: "var(--mz-gold)" }}>IMP</span>
+          </div>
+          <h1 className="font-display text-2xl tracking-wide">Meizazy69</h1>
+          <p className="text-sm mt-1" style={{ color: "var(--mz-ink-muted)" }}>IMPORT PRIME合同会社 管理システム</p>
+        </div>
+        <form onSubmit={handleSubmit} className="rounded-2xl p-6 space-y-4"
+              style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>メールアドレス</label>
+            <input type="email" autoComplete="username" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)}
+                   className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={inputStyle} />
+          </div>
+          <div>
+            <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>パスワード</label>
+            <input type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)}
+                   className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={inputStyle} />
+          </div>
+          {error && (
+            <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>
+          )}
+          <button type="submit" disabled={submitting}
+                  className="w-full rounded-lg py-2.5 text-sm font-medium tracking-wide transition-colors disabled:opacity-60"
+                  style={{ background: "var(--mz-gold)", color: "#1a1710" }}>
+            {submitting ? "確認中..." : "ログイン"}
+          </button>
+        </form>
+        <p className="text-center text-xs mt-6" style={{ color: "var(--mz-ink-muted)" }}>
+          <button type="button" onClick={() => setUsePasscode(true)} className="underline">合言葉でログインする(移行期間用)</button>
         </p>
       </div>
     </div>
@@ -461,8 +539,68 @@ function MobileDrawer({ open, onClose, activeKey, onNavigate }) {
 /* ============================================================
    トップバー
    ============================================================ */
-function TopBar({ title, onMenuClick, staffName, onSwitchStaff, onSignOut }) {
+/* ★2026-11-07実装: 自分のパスワードを変更する(個人ログイン用。2.63参照)。
+   公洋が仮パスワードでアカウントを作り、各自が最初のログイン後にここで自分のパスワードへ変更する。 */
+function ChangePasswordModal({ onClose }) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [error, setError] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    if (pw.length < 8) { setError("パスワードは8文字以上にしてください"); return; }
+    if (pw !== pw2) { setError("2つのパスワードが一致しません"); return; }
+    setSaving(true);
+    const { error: err } = await supabase.auth.updateUser({ password: pw });
+    setSaving(false);
+    if (err) { setError(`変更に失敗しました(${err.message || "原因不明"})`); return; }
+    setDone(true);
+  };
+
+  const inputStyle = { border: "1px solid var(--mz-border)", color: "var(--mz-ink)" };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <form onSubmit={handleSubmit} className="w-full max-w-sm rounded-2xl p-5 space-y-4"
+            style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+        <h2 className="font-display text-lg">パスワードを変更</h2>
+        {done ? (
+          <>
+            <p className="text-sm">パスワードを変更しました。次回からは新しいパスワードでログインしてください。</p>
+            <button type="button" onClick={onClose} className="w-full rounded-lg py-2.5 text-sm font-medium"
+                    style={{ background: "var(--mz-gold)", color: "#1a1710" }}>閉じる</button>
+          </>
+        ) : (
+          <>
+            <div>
+              <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>新しいパスワード(8文字以上)</label>
+              <input type="password" autoComplete="new-password" required autoFocus value={pw} onChange={(e) => setPw(e.target.value)}
+                     className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={inputStyle} />
+            </div>
+            <div>
+              <label className="block text-xs mb-1.5" style={{ color: "var(--mz-ink-muted)" }}>新しいパスワード(もう一度)</label>
+              <input type="password" autoComplete="new-password" required value={pw2} onChange={(e) => setPw2(e.target.value)}
+                     className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={inputStyle} />
+            </div>
+            {error && <p className="text-sm rounded-lg px-3 py-2" style={{ background: "#3a1f22", color: "#f2b8bd" }}>{error}</p>}
+            <div className="flex gap-2">
+              <button type="button" onClick={onClose} className="flex-1 rounded-lg py-2.5 text-sm"
+                      style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>キャンセル</button>
+              <button type="submit" disabled={saving} className="flex-1 rounded-lg py-2.5 text-sm font-medium disabled:opacity-60"
+                      style={{ background: "var(--mz-gold)", color: "#1a1710" }}>{saving ? "変更中..." : "変更する"}</button>
+            </div>
+          </>
+        )}
+      </form>
+    </div>
+  );
+}
+
+function TopBar({ title, onMenuClick, staffName, onSwitchStaff, onSignOut, canChangePassword }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [pwOpen, setPwOpen] = useState(false);
   return (
     <header
       className="sticky top-0 z-30 flex items-center justify-between gap-3 px-4 md:px-6 py-3.5"
@@ -501,14 +639,27 @@ function TopBar({ title, onMenuClick, staffName, onSwitchStaff, onSignOut }) {
             className="absolute right-0 mt-2 w-48 rounded-xl overflow-hidden py-1 text-sm"
             style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
           >
-            <button
-              onClick={() => { setMenuOpen(false); onSwitchStaff(); }}
-              className="w-full flex items-center gap-2 px-3.5 py-2.5 text-left hover:bg-white/5"
-            >
-              <span className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] shrink-0"
-                    style={{ background: "var(--mz-plum)" }}>⇄</span>
-              担当者を変更
-            </button>
+            {canChangePassword && (
+              <button
+                onClick={() => { setMenuOpen(false); setPwOpen(true); }}
+                className="w-full flex items-center gap-2 px-3.5 py-2.5 text-left hover:bg-white/5"
+              >
+                <span className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] shrink-0"
+                      style={{ background: "var(--mz-plum)" }}>*</span>
+                パスワードを変更
+              </button>
+            )}
+            {/* ★2026-11-03: 個人ログインでは担当者はログインしたユーザーで決まるため、変更ボタンは出さない */}
+            {onSwitchStaff && (
+              <button
+                onClick={() => { setMenuOpen(false); onSwitchStaff(); }}
+                className="w-full flex items-center gap-2 px-3.5 py-2.5 text-left hover:bg-white/5"
+              >
+                <span className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] shrink-0"
+                      style={{ background: "var(--mz-plum)" }}>⇄</span>
+                担当者を変更
+              </button>
+            )}
             <button
               onClick={() => { setMenuOpen(false); onSignOut(); }}
               className="w-full flex items-center gap-2 px-3.5 py-2.5 text-left hover:bg-white/5"
@@ -519,6 +670,7 @@ function TopBar({ title, onMenuClick, staffName, onSwitchStaff, onSignOut }) {
           </div>
         )}
       </div>
+      {pwOpen && <ChangePasswordModal onClose={() => setPwOpen(false)} />}
     </header>
   );
 }
@@ -6634,7 +6786,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-10-23a";
+const BUILD_VERSION = "2026-11-07a";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -13957,7 +14109,7 @@ const ROUTE_MAP = {
 /* ============================================================
    アプリ本体シェル(認証後の画面)
    ============================================================ */
-function AppShell({ staffName, onSwitchStaff, onSignOut }) {
+function AppShell({ staffName, onSwitchStaff, onSignOut, canChangePassword }) {
   const hash = useHashRoute();
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -13996,6 +14148,7 @@ function AppShell({ staffName, onSwitchStaff, onSignOut }) {
           staffName={staffName}
           onSwitchStaff={onSwitchStaff}
           onSignOut={onSignOut}
+          canChangePassword={canChangePassword}
         />
         <main className="flex-1">
           {activeKey === "tasks" ? (
@@ -14328,13 +14481,33 @@ function App() {
     return <PublicCatalogPage token={token} />;
   }
 
-  const { session, submitPasscode, signOut } = useAuth();
+  const { session, submitPasscode, signInWithEmail, signOut } = useAuth();
   const [staff, setStaff] = useState(undefined); // undefined = 未確認, null = 未選択
+  const [personalLogin, setPersonalLogin] = useState(false); // 個人ログイン(staff.auth_user_idで特定できた)か
 
   // セッションが確定したら、ブラウザ保存済みの担当者選択を読み込む
   // (これにより2回目以降のアクセスでは合言葉・名前選択が自動スキップされる)
   useEffect(() => {
     if (session) {
+      let cancelled = false;
+      (async () => {
+        /* ★2026-11-03実装: 個人ログイン(2.63参照)。ログインしたユーザーに紐づく担当者(staff.auth_user_id)が
+           あれば、それを使う(ブラウザに残っている前の人の担当者選択は必ず上書きする)。
+           列がまだ無い・紐づく行が無い(=共通の合言葉ユーザー)ときは、従来の担当者選択へ進む。 */
+        const { data: own, error: ownErr } = await supabase
+          .from("staff").select("id,name,is_active").eq("auth_user_id", session.user.id).maybeSingle();
+        if (cancelled) return;
+        if (!ownErr && own) {
+          if (own.is_active === false) { await signOut(); return; }
+          localStorage.setItem(STAFF_STORAGE_KEY, JSON.stringify(own));
+          setPersonalLogin(true);
+          setStaff(own);
+          return;
+        }
+        setPersonalLogin(false);
+        loadLegacyStaff();
+      })();
+      const loadLegacyStaff = () => {
       let stored = null;
       try {
         const raw = localStorage.getItem(STAFF_STORAGE_KEY);
@@ -14365,8 +14538,11 @@ function App() {
           }
         })();
       }
+      };
+      return () => { cancelled = true; };
     } else if (session === null) {
       setStaff(null);
+      setPersonalLogin(false);
     }
   }, [session]);
 
@@ -14381,7 +14557,7 @@ function App() {
 
   // 1. 合言葉が未入力(セッションなし)
   if (!session) {
-    return <PasscodeScreen onSubmit={submitPasscode} />;
+    return <LoginScreen onSignIn={signInWithEmail} onSubmitPasscode={submitPasscode} />;
   }
 
   // 2. セッションはあるが担当者未選択(初回、または「担当者を変更」直後)
@@ -14393,11 +14569,12 @@ function App() {
   return (
     <AppShell
       staffName={staff.name}
-      onSwitchStaff={() => {
+      onSwitchStaff={personalLogin ? null : () => {
         localStorage.removeItem(STAFF_STORAGE_KEY);
         setStaff(null);
       }}
       onSignOut={signOut}
+      canChangePassword={personalLogin}
     />
   );
 }
