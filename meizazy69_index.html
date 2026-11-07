@@ -125,6 +125,7 @@ const NAV_SECTIONS = [
       { key: "wallet_charges", path: "#/wallet", label: "ウォレット", icon: "coins", ownerOnly: true },
       { key: "expenses", path: "#/expenses", label: "経費", icon: "wallet" },
       { key: "contractor_invoices", path: "#/contractor-invoices", label: "外注費請求書", icon: "file" },
+      { key: "login_logs", path: "#/login-logs", label: "ログイン履歴", icon: "check", ownerOnly: true },
     ],
   },
 ];
@@ -6857,7 +6858,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-08l";
+const BUILD_VERSION = "2026-11-08m";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -14471,6 +14472,97 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
 /* ============================================================
    ルート → ページ の対応
    ============================================================ */
+/* ============================================================
+   ★2026-11-08実装: ログイン履歴(誰がいつ使い始めたか。公洋だけが見られる)
+   ・記録: アプリを開いた(ログイン済みで画面が出た)ときに login_logs へ1行追加。
+     同じブラウザでは30分以内の再記録はしない(画面の再読み込みで増えすぎないように)。
+   ・DB側のRLS: 記録は自分自身の分だけ、閲覧はオーナーのみ、更新・削除は誰もできない。
+   ============================================================ */
+const LOGIN_LOG_THROTTLE_MS = 30 * 60 * 1000;
+const LOGIN_LOG_STORAGE_KEY = "meizazy69_last_login_log";
+
+function useLoginLogger(staffId) {
+  useEffect(() => {
+    if (!staffId) return;
+    let last = 0;
+    try { last = Number(localStorage.getItem(LOGIN_LOG_STORAGE_KEY + ":" + staffId)) || 0; } catch (e) { /* 保存不可の環境では毎回記録 */ }
+    if (Date.now() - last < LOGIN_LOG_THROTTLE_MS) return;
+    supabase.from("login_logs").insert({ staff_id: staffId, user_agent: (navigator.userAgent || "").slice(0, 300) }).then(({ error }) => {
+      if (error) return; // 記録に失敗しても業務は止めない(テーブル未作成のときなど)
+      try { localStorage.setItem(LOGIN_LOG_STORAGE_KEY + ":" + staffId, String(Date.now())); } catch (e) { /* 無視 */ }
+    });
+  }, [staffId]);
+}
+
+function describeDevice(ua) {
+  const u = ua || "";
+  const os = /iPhone/.test(u) ? "iPhone" : /iPad/.test(u) ? "iPad" : /Android/.test(u) ? "Android" : /Windows/.test(u) ? "Windows" : /Mac OS X/.test(u) ? "Mac" : /Linux/.test(u) ? "Linux" : "不明";
+  const br = /Edg\//.test(u) ? "Edge" : /CriOS|Chrome\//.test(u) ? "Chrome" : /FxiOS|Firefox\//.test(u) ? "Firefox" : /Safari\//.test(u) ? "Safari" : "";
+  return br ? `${os} / ${br}` : os;
+}
+
+function LoginLogsPage() {
+  const [rows, setRows] = useState(null);
+  const [names, setNames] = useState({});
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    const [logsRes, staffRes] = await Promise.all([
+      supabase.from("login_logs").select("id,staff_id,logged_in_at,user_agent").order("logged_in_at", { ascending: false }).limit(300),
+      supabase.from("staff").select("id,name"),
+    ]);
+    if (logsRes.error) { setError("ログイン履歴を取得できませんでした(SQL未適用の可能性があります)"); setRows([]); return; }
+    const map = {};
+    (staffRes.data || []).forEach((s) => { map[s.id] = s.name; });
+    setNames(map);
+    setRows(logsRes.data || []);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  // 担当者ごとの最終アクセス
+  const latest = {};
+  (rows || []).forEach((r) => { if (!latest[r.staff_id]) latest[r.staff_id] = r; });
+  const fmt = (iso) => new Date(iso).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+  return (
+    <div className="p-4 md:p-8 max-w-3xl">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="font-display text-xl">ログイン履歴</h2>
+        <button onClick={load} className="text-xs px-3 py-1.5 rounded-md" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>更新</button>
+      </div>
+      <p className="text-xs mb-4" style={{ color: "var(--mz-ink-muted)" }}>アプリを開いた時刻の記録です(日本時間)。同じ端末では30分以内の再記録はしません。この画面は公洋だけが見られます。</p>
+      {error && <p className="text-sm mb-3" style={{ color: "#f2b8bd" }}>{error}</p>}
+      {rows === null ? (
+        <p className="text-sm" style={{ color: "var(--mz-ink-muted)" }}>読み込み中…</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-5">
+            {Object.keys(latest).map((sid) => (
+              <div key={sid} className="rounded-lg p-3" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}>
+                <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>最終アクセス</p>
+                <p className="font-medium">{names[sid] || "(不明)"}</p>
+                <p className="text-sm">{fmt(latest[sid].logged_in_at)}</p>
+              </div>
+            ))}
+          </div>
+          <div className="rounded-lg overflow-hidden" style={{ border: "1px solid var(--mz-border)" }}>
+            {rows.length === 0 ? (
+              <p className="text-sm p-4" style={{ color: "var(--mz-ink-muted)" }}>まだ記録がありません</p>
+            ) : rows.map((r) => (
+              <div key={r.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm" style={{ borderBottom: "1px solid var(--mz-border)" }}>
+                <span className="font-medium w-20 shrink-0">{names[r.staff_id] || "(不明)"}</span>
+                <span className="flex-1">{fmt(r.logged_in_at)}</span>
+                <span className="text-xs text-right" style={{ color: "var(--mz-ink-muted)" }}>{describeDevice(r.user_agent)}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function OwnerOnlyNotice() {
   return <p className="text-sm text-center py-16" style={{ color: "var(--mz-ink-muted)" }}>この画面は管理者のみ利用できます</p>;
 }
@@ -14485,13 +14577,15 @@ const ROUTE_MAP = {
   "#/wallet": "wallet_charges",
   "#/expenses": "expenses",
   "#/contractor-invoices": "contractor_invoices",
+  "#/login-logs": "login_logs",
 };
 
 /* ============================================================
    アプリ本体シェル(認証後の画面)
    ============================================================ */
 function AppShell({ staffName, onSwitchStaff, onSignOut, canChangePassword }) {
-  const { isOwner } = useAccess();
+  const { isOwner, staffId } = useAccess();
+  useLoginLogger(staffId);
   const hash = useHashRoute();
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -14549,6 +14643,8 @@ function AppShell({ staffName, onSwitchStaff, onSignOut, canChangePassword }) {
             <DashboardPage />
           ) : activeKey === "expenses" ? (
             <ExpensesPage />
+          ) : activeKey === "login_logs" ? (
+            isOwner ? <LoginLogsPage /> : <OwnerOnlyNotice />
           ) : activeKey === "contractor_invoices" ? (
             isOwner ? <ContractorInvoicesPage autoRecalc /> : <MyInvoicesPage />
           ) : (
