@@ -6859,7 +6859,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-08h";
+const BUILD_VERSION = "2026-11-08i";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -13400,6 +13400,36 @@ function MyPayoutEstimateCard() {
             {Number(est.secret_share_jpy) > 0 && <Row label="非公開取引の利益分配" value={est.secret_share_jpy} />}
             <Row label="立替の精算(未精算分)" value={est.reimbursement_jpy} />
           </div>
+          {est.calculated && (
+            <div className="text-xs space-y-0.5 rounded-lg px-2.5 py-2" style={{ background: "var(--mz-surface-hover)", color: "var(--mz-ink-muted)" }}>
+              <p className="mb-0.5" style={{ color: "var(--mz-ink)" }}>この月の会社の数字</p>
+              <Row label="売上" value={est.total_sales_jpy} />
+              <Row label="− 仕入れ(原価の合計)" value={est.total_purchase_cost_jpy} />
+              <Row label="− その他の経費" value={est.total_expenses_jpy} />
+              <div className="flex justify-between gap-3 pt-0.5" style={{ borderTop: "1px solid var(--mz-border)", color: Number(est.gross_profit_jpy) < 0 ? "#f2b8bd" : "var(--mz-ink)" }}>
+                <span>= 利益</span><span>{fmtJPY(est.gross_profit_jpy)}</span>
+              </div>
+              {Number(est.carried_loss_in_jpy) < 0 && <Row label="− 前の月までの赤字" value={-Number(est.carried_loss_in_jpy)} />}
+              <div className="flex justify-between gap-3" style={{ color: Number(est.commission_base_jpy) < 0 ? "#f2b8bd" : "var(--mz-ink)" }}>
+                <span>= 報酬の計算に使う金額</span><span>{fmtJPY(est.commission_base_jpy)}</span>
+              </div>
+              {Number(est.commission_base_jpy) <= 0 && (
+                <p className="pt-1" style={{ color: "#d6a98f" }}>この金額が0円以下のため、歩合報酬は0円です。マイナス分は翌月へ繰り越されます。</p>
+              )}
+            </div>
+          )}
+          {est.calculated && est.has_private_deals && (
+            <div className="text-xs space-y-0.5 rounded-lg px-2.5 py-2" style={{ background: "#2a2419", color: "#e3c489" }}>
+              <p className="mb-0.5 font-medium">内緒の取引の数字</p>
+              <Row label="売上" value={est.secret_sales_jpy} />
+              <Row label="− 売れた商品の原価" value={est.secret_cost_jpy} />
+              <Row label="− 内緒の経費" value={est.secret_expenses_jpy} />
+              <div className="flex justify-between gap-3 pt-0.5" style={{ borderTop: "1px solid var(--mz-border)", color: Number(est.secret_profit_jpy) < 0 ? "#f2b8bd" : "inherit" }}>
+                <span>= 内緒の利益</span><span>{fmtJPY(est.secret_profit_jpy)}</span>
+              </div>
+              {Number(est.secret_profit_jpy) <= 0 && <p className="pt-1">内緒の利益が0円以下のため、取り分は0円です(翌月への繰越はしません)。</p>}
+            </div>
+          )}
           {!est.calculated && (
             <p className="text-xs rounded-lg px-2.5 py-2" style={{ background: "#3a2a1f", color: "#d6a98f" }}>この月はまだ集計されていないため、歩合報酬は0円と表示しています(集計されると反映されます)。</p>
           )}
