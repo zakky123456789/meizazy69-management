@@ -78,11 +78,11 @@ const { useState, useEffect, useCallback, useMemo, useRef, createContext, useCon
    あくまで見た目の整理で、実際の保護はDBのRLSが行う)。 */
 const AccessContext = createContext({ isOwner: true, hasPrivateDeals: false, staffId: null, expenseMethod: null });
 const useAccess = () => useContext(AccessContext);
-const SATORU_STAFF_ID = "df24e2c3-c67a-48d8-94aa-bf09f7de56fc"; // 悟(「悟専用」に設定したときの private_to_staff_id)
-/* ★2026-11-08実装: 内緒の取引(悟専用クラブ向けの売上)は、通常の月次損益・歩合から完全に分けて集計し、
-   その利益(売上−その商品の原価−内緒の経費)を 公洋50%・悟50% で分ける(2.65参照)。 */
-const SECRET_SHARE_PERCENT = 50; // 悟の取り分(%)
-// 内緒の取引の仕分け(handleCalculateMonthlyProfit と checkStaleMonthlyProfits で必ず共通に使うこと)
+const SATORU_STAFF_ID = "df24e2c3-c67a-48d8-94aa-bf09f7de56fc"; // 悟(「Sライン専用」に設定したときの private_to_staff_id)
+/* ★2026-11-08実装: Sラインの取引(Sライン専用クラブ向けの売上)は、通常の月次損益・歩合から完全に分けて集計し、
+   その利益(売上−その商品の原価−Sラインの経費)を 公洋50%・悟50% で分ける(2.65参照)。 */
+const SECRET_SHARE_PERCENT = 50; // Sラインの取り分(%)
+// Sラインの取引の仕分け(handleCalculateMonthlyProfit と checkStaleMonthlyProfits で必ず共通に使うこと)
 const isSecretSale = (sale) => !!(sale && sale.host_clubs && sale.host_clubs.private_to_staff_id);
 const isSecretRow = (row) => !!(row && row.private_to_staff_id);
 const OWNER_STAFF_ID = "8e90b96d-1be3-42d9-b7a2-d0ff973ae4e3"; // 公洋(staff.is_owner列がまだ無い時のフォールバック)
@@ -1582,7 +1582,7 @@ function HostClubCard({ club, hostCount, nextVisitDate, onOpen, onEdit, onDelete
       <div className="flex-1 min-w-0">
         <p className="font-display text-base truncate">
           {club.name}
-          {club.private_to_staff_id && <span className="ml-2 text-[11px] px-2 py-0.5 rounded-full align-middle" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>悟専用</span>}
+          {club.private_to_staff_id && <span className="ml-2 text-[11px] px-2 py-0.5 rounded-full align-middle" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>Sライン専用</span>}
         </p>
         <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
           <span>所属ホスト: {hostCount}名</span>
@@ -1610,7 +1610,7 @@ function HostClubCard({ club, hostCount, nextVisitDate, onOpen, onEdit, onDelete
 }
 
 /* ---- ホストクラブ 登録・編集モーダル ---- */
-/* ★2026-11-08実装: 「悟専用(内緒)」の設定(2.64参照)。private_to_staff_id に悟のidが入ると、悟と公洋以外には見えなくなる。
+/* ★2026-11-08実装: 「Sライン専用(内緒)」の設定(2.64参照)。private_to_staff_id に悟のidが入ると、悟と公洋以外には見えなくなる。
    オーナー(公洋)は新規・編集のどちらでも設定できる。悟は「新規作成のときだけ」自分専用にできる(後から変えるのはDBが拒否する)。 */
 function HostClubFormModal({ club, onClose, onSave }) {
   const { isOwner, hasPrivateDeals } = useAccess();
@@ -1648,7 +1648,7 @@ function HostClubFormModal({ club, onClose, onSave }) {
           <label className="flex items-start gap-2.5 cursor-pointer">
             <input type="checkbox" checked={isPrivate} onChange={(e) => setIsPrivate(e.target.checked)} className="mt-0.5 w-4 h-4 shrink-0" />
             <span className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
-              <span style={{ color: "var(--mz-ink)" }}>悟専用(内緒の取引先)</span><br />
+              <span style={{ color: "var(--mz-ink)" }}>Sライン専用(Sラインの取引先)</span><br />
               オンにすると、このクラブのホスト・訪問・販売・領収書・そこで売れた商品が、悟と公洋以外には見えなくなります
               {!isNew && !isOwner ? "(登録後の変更は公洋のみ)" : ""}
             </span>
@@ -1728,7 +1728,7 @@ function HostClubsPage() {
   }, [visits]);
 
   const handleSave = async (form) => {
-    // 「悟専用」は、チェックされている/元々設定されていたときだけ送る(列がまだ無い間の保存を壊さないため)
+    // 「Sライン専用」は、チェックされている/元々設定されていたときだけ送る(列がまだ無い間の保存を壊さないため)
     const privPatch = (form.isPrivate || form.wasPrivate)
       ? { private_to_staff_id: form.isPrivate ? (isOwner ? SATORU_STAFF_ID : staffId) : null } : {};
     if (form.id) {
@@ -6859,7 +6859,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-08i";
+const BUILD_VERSION = "2026-11-08k";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -10700,7 +10700,7 @@ function CatalogCard({ catalog, itemCount, onEdit, onDuplicate, onDelete, onShar
       <div className="flex-1 min-w-0">
         <p className="font-display text-base truncate">
           {catalog.name}
-          {catalog.private_to_staff_id && <span className="ml-2 text-[11px] px-2 py-0.5 rounded-full align-middle" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>悟専用</span>}
+          {catalog.private_to_staff_id && <span className="ml-2 text-[11px] px-2 py-0.5 rounded-full align-middle" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>Sライン専用</span>}
         </p>
         <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
           <span>掲載商品: {itemCount}点</span>
@@ -10742,7 +10742,7 @@ function CatalogCard({ catalog, itemCount, onEdit, onDuplicate, onDelete, onShar
 }
 
 /* ---- カタログ 登録・編集モーダル(商品はステータス・種別を問わず検索して個別選択) ---- */
-/* ★2026-11-08実装: 「悟専用(内緒)」の設定(2.64参照)。private_to_staff_id に悟のidが入ると、悟と公洋以外には見えなくなる。
+/* ★2026-11-08実装: 「Sライン専用(内緒)」の設定(2.64参照)。private_to_staff_id に悟のidが入ると、悟と公洋以外には見えなくなる。
    オーナー(公洋)は新規・編集のどちらでも設定できる。悟は「新規作成のときだけ」自分専用にできる(後から変えるのはDBが拒否する)。 */
 function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
   const { isOwner, hasPrivateDeals } = useAccess();
@@ -10871,7 +10871,7 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
           <label className="flex items-start gap-2.5 cursor-pointer">
             <input type="checkbox" checked={isPrivate} onChange={(e) => setIsPrivate(e.target.checked)} className="mt-0.5 w-4 h-4 shrink-0" />
             <span className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
-              <span style={{ color: "var(--mz-ink)" }}>悟専用(内緒のカタログ)</span><br />
+              <span style={{ color: "var(--mz-ink)" }}>Sライン専用(Sラインのカタログ)</span><br />
               オンにすると、このカタログが悟と公洋以外の管理画面には出なくなります(共有リンクを知っている相手は従来どおり見られます)
               {!isNew && !isOwner ? "(登録後の変更は公洋のみ)" : ""}
             </span>
@@ -11096,7 +11096,7 @@ function CatalogsPage() {
       .from("catalogs")
       .select("id,name,share_token,created_at,hide_order_only_badge,private_to_staff_id,catalog_items(count)")
       .order("created_at", { ascending: false });
-    if (error && error.code === "42703") { // 「悟専用」の列がまだ無い(SQL適用前)
+    if (error && error.code === "42703") { // 「Sライン専用」の列がまだ無い(SQL適用前)
       ({ data, error } = await supabase
         .from("catalogs")
         .select("id,name,share_token,created_at,hide_order_only_badge,catalog_items(count)")
@@ -11302,7 +11302,7 @@ function ExpenseReimbursementBadge({ status }) {
    一覧が長いと、上部のフォームに飛ばされても「どの経費を編集しているのか」が分からなくなるため。 */
 function ExpenseList({ expenses, editingId, onEdit, onCancelEdit, onSave, onDelete }) {
   /* ★2026-11-08: 経費は全員が(内緒を除き)すべて見られるが、編集・削除できるのは
-     オーナー、または「自分の立替」「自分の内緒の経費」だけ(DBのRLSもそう制限している。2.64参照)。
+     オーナー、または「自分の立替」「自分のSラインの経費」だけ(DBのRLSもそう制限している。2.64参照)。
      できない行に押せるボタンを出すと、保存したつもりで何も変わらない状態になるため隠す。 */
   const { isOwner, staffId, expenseMethod } = useAccess();
   const canEditExpense = (e) => isOwner
@@ -11363,7 +11363,7 @@ function ExpenseList({ expenses, editingId, onEdit, onCancelEdit, onSave, onDele
             )}
             <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
               <span>{e.payment_method}</span>
-              {e.private_to_staff_id && <span className="px-1.5 py-0.5 rounded-full" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>内緒の取引分</span>}
+              {e.private_to_staff_id && <span className="px-1.5 py-0.5 rounded-full" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>Sライン</span>}
               {e.tax_amount_jpy != null && <span>消費税: {fmtJPY(e.tax_amount_jpy)}</span>}
               {e.invoice_number && <span>請求書番号: {e.invoice_number}</span>}
               {e.invoice_registration_number && <span>登録番号: {e.invoice_registration_number}</span>}
@@ -11506,7 +11506,7 @@ function AiReceiptReaderCard({ onExtracted }) {
    ・呼び出し側(ExpensesPage)が`key`propを変えることで、編集開始/AI反映/保存完了のたびに内部stateを再初期化する */
 function ExpenseInlineForm({ expense, onSave, onCancel }) {
   const { isOwner, hasPrivateDeals } = useAccess();
-  const canMarkPrivate = isOwner || hasPrivateDeals; // 「内緒の取引分」の経費(2.64参照)
+  const canMarkPrivate = isOwner || hasPrivateDeals; // 「Sライン」の経費(2.64参照)
   const isNew = !expense.id;
   const [form, setForm] = useState({
     id: expense.id || null,
@@ -11782,8 +11782,8 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
         <label className="flex items-start gap-2.5 cursor-pointer">
           <input type="checkbox" checked={!!form.is_private} onChange={(e) => setForm((f) => ({ ...f, is_private: e.target.checked }))} className="mt-0.5 w-4 h-4 shrink-0" />
           <span className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
-            <span style={{ color: "var(--mz-ink)" }}>内緒の取引分の経費</span><br />
-            悟の内緒の取引にかかった経費です。オンにすると悟と公洋以外には見えなくなり、通常の月次損益・歩合の計算には入れず、内緒の取引の利益分配で扱います
+            <span style={{ color: "var(--mz-ink)" }}>Sラインの経費</span><br />
+            Sラインの取引にかかった経費です。オンにすると悟と公洋以外には見えなくなり、通常の月次損益・歩合の計算には入れず、Sラインの取引の利益分配で扱います
           </span>
         </label>
       )}
@@ -11933,7 +11933,7 @@ function ExpensesPage() {
       memo: form.memo.trim() || null,
       receipt_file_url: form.receipt_file_url.trim() || null,
     };
-    // 「内緒の取引分」は、チェックされている/元々付いていたときだけ送る(列がまだ無い間の保存を壊さないため)
+    // 「Sライン」は、チェックされている/元々付いていたときだけ送る(列がまだ無い間の保存を壊さないため)
     if ((isOwner || hasPrivateDeals) && (form.is_private || form.was_private)) {
       patch.private_to_staff_id = form.is_private ? (isOwner ? SATORU_STAFF_ID : staffId) : null;
     }
@@ -12325,7 +12325,7 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
         setError("内訳の取得に失敗しました");
         return;
       }
-      // ★2026-11-08: 内緒の取引(2.65)は通常の内訳から外す。保存値との比較は通常分だけで行う
+      // ★2026-11-08: Sラインの取引(2.65)は通常の内訳から外す。保存値との比較は通常分だけで行う
       const secretSalesRows = (salesRes.data || []).filter(isSecretSale);
       const normalSalesRows = (salesRes.data || []).filter((x) => !isSecretSale(x));
       const all = (productRes.data || []).filter((x) => !isSecretRow(x));
@@ -12431,12 +12431,12 @@ function MonthlyProfitDetailModal({ month, saved, onClose }) {
               const sProfit = sSales - sCost - sExp;
               return (
                 <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: "#2a2419", color: "#e3c489" }}>
-                  <p className="font-medium">内緒の取引(上の利益・歩合には含みません。売上{data.secretSalesRows.length}件・経費{data.secretExpenses.length}件)</p>
+                  <p className="font-medium">Sラインの取引(上の利益・歩合には含みません。売上{data.secretSalesRows.length}件・経費{data.secretExpenses.length}件)</p>
                   <div className="flex justify-between"><span>売上</span><span>{fmtJPY(sSales)} <Diff live={sSales} savedValue={Number((saved || {}).secret_sales_jpy) || 0} /></span></div>
                   <div className="flex justify-between"><span>− 売れた商品の原価</span><span>{fmtJPY(sCost)} <Diff live={sCost} savedValue={Number((saved || {}).secret_cost_jpy) || 0} /></span></div>
-                  <div className="flex justify-between"><span>− 内緒の経費</span><span>{fmtJPY(sExp)} <Diff live={sExp} savedValue={Number((saved || {}).secret_expenses_jpy) || 0} /></span></div>
+                  <div className="flex justify-between"><span>− Sラインの経費</span><span>{fmtJPY(sExp)} <Diff live={sExp} savedValue={Number((saved || {}).secret_expenses_jpy) || 0} /></span></div>
                   <div className="flex justify-between font-medium pt-1" style={{ borderTop: "1px solid var(--mz-border)" }}>
-                    <span>= 内緒の利益(公洋{100 - SECRET_SHARE_PERCENT}%・悟{SECRET_SHARE_PERCENT}%)</span><span>{fmtJPY(sProfit)}</span>
+                    <span>= Sラインの利益(公洋{100 - SECRET_SHARE_PERCENT}%・悟{SECRET_SHARE_PERCENT}%)</span><span>{fmtJPY(sProfit)}</span>
                   </div>
                 </div>
               );
@@ -12637,12 +12637,12 @@ function MonthlyProfitList({ profits, onDelete, staleProfits, onRecalculate, rec
                     <Row label="利益" value={gross} sign="=" total />
                     {((Number(p.secret_sales_jpy) || 0) !== 0 || (Number(p.secret_cost_jpy) || 0) !== 0 || (Number(p.secret_expenses_jpy) || 0) !== 0) && (
                       <div className="mt-2 rounded-lg px-2.5 py-2 space-y-0.5" style={{ background: "#2a2419", color: "#e3c489" }}>
-                        <p className="font-medium">内緒の取引(上の利益・歩合には含みません)</p>
+                        <p className="font-medium">Sラインの取引(上の利益・歩合には含みません)</p>
                         <Row label="売上" value={p.secret_sales_jpy} />
                         <Row label="売れた商品の原価" value={p.secret_cost_jpy} sign="−" />
-                        <Row label="内緒の経費" value={p.secret_expenses_jpy} sign="−" />
-                        <Row label="内緒の利益" value={p.secret_profit_jpy} sign="=" total />
-                        <Row label={`悟の取り分(${SECRET_SHARE_PERCENT}%)`} value={Math.max(0, Math.round((Number(p.secret_profit_jpy) || 0) * SECRET_SHARE_PERCENT / 100))} />
+                        <Row label="Sラインの経費" value={p.secret_expenses_jpy} sign="−" />
+                        <Row label="Sラインの利益" value={p.secret_profit_jpy} sign="=" total />
+                        <Row label={`Sラインの取り分(${SECRET_SHARE_PERCENT}%)`} value={Math.max(0, Math.round((Number(p.secret_profit_jpy) || 0) * SECRET_SHARE_PERCENT / 100))} />
                       </div>
                     )}
                     {carriedLoss < 0 && (
@@ -12782,7 +12782,7 @@ function staffBankLine(staff) {
 }
 
 function contractorInvoiceTotal(invoice) {
-  // ★2026-11-08: 内緒の取引の利益分配(2.65)も合計に含める(列が無い古い行は0扱い)
+  // ★2026-11-08: Sラインの取引の利益分配(2.65)も合計に含める(列が無い古い行は0扱い)
   return (Number(invoice.amount_jpy) || 0) + (Number(invoice.reimbursement_jpy) || 0) + (Number(invoice.secret_share_jpy) || 0);
 }
 
@@ -13420,14 +13420,14 @@ function MyPayoutEstimateCard() {
           )}
           {est.calculated && est.has_private_deals && (
             <div className="text-xs space-y-0.5 rounded-lg px-2.5 py-2" style={{ background: "#2a2419", color: "#e3c489" }}>
-              <p className="mb-0.5 font-medium">内緒の取引の数字</p>
+              <p className="mb-0.5 font-medium">Sラインの取引の数字</p>
               <Row label="売上" value={est.secret_sales_jpy} />
               <Row label="− 売れた商品の原価" value={est.secret_cost_jpy} />
-              <Row label="− 内緒の経費" value={est.secret_expenses_jpy} />
+              <Row label="− Sラインの経費" value={est.secret_expenses_jpy} />
               <div className="flex justify-between gap-3 pt-0.5" style={{ borderTop: "1px solid var(--mz-border)", color: Number(est.secret_profit_jpy) < 0 ? "#f2b8bd" : "inherit" }}>
-                <span>= 内緒の利益</span><span>{fmtJPY(est.secret_profit_jpy)}</span>
+                <span>= Sラインの利益</span><span>{fmtJPY(est.secret_profit_jpy)}</span>
               </div>
-              {Number(est.secret_profit_jpy) <= 0 && <p className="pt-1">内緒の利益が0円以下のため、取り分は0円です(翌月への繰越はしません)。</p>}
+              {Number(est.secret_profit_jpy) <= 0 && <p className="pt-1">Sラインの利益が0円以下のため、取り分は0円です(翌月への繰越はしません)。</p>}
             </div>
           )}
           {!est.calculated && (
@@ -13621,7 +13621,7 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
     const bucket = (m) => (byMonth[m] = byMonth[m] || { sales: 0, cost: 0, expenses: 0, sSales: 0, sCost: 0, sExp: 0 });
     (salesRes.data || []).forEach((sale) => {
       const b = bucket(String(sale.transaction_date).slice(0, 7));
-      if (isSecretSale(sale)) { // 内緒の取引は別枠(handleCalculateMonthlyProfitと同じ仕分け)
+      if (isSecretSale(sale)) { // Sラインの取引は別枠(handleCalculateMonthlyProfitと同じ仕分け)
         b.sSales += Number(sale.total_amount_jpy) || 0;
         (sale.sale_items || []).forEach((si) => { if (si.products) b.sCost += productCostJpy(si.products); });
         return;
@@ -13678,10 +13678,10 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
       if (Math.round(cur.cost) !== Math.round(Number(x.total_purchase_cost_jpy) || 0)) diffs.push("仕入原価");
       if (Math.round(cur.expenses) !== Math.round(Number(x.total_general_expenses_jpy) || 0)) diffs.push("経費");
       if (expectedCarried !== savedCarried) diffs.push("繰越損失");
-      // 内緒の取引(2.65): 売上・原価・経費のどれかが保存値とズレていれば1項目として警告
+      // Sラインの取引(2.65): 売上・原価・経費のどれかが保存値とズレていれば1項目として警告
       if (Math.round(cur.sSales) !== Math.round(Number(x.secret_sales_jpy) || 0)
         || Math.round(cur.sCost) !== Math.round(Number(x.secret_cost_jpy) || 0)
-        || Math.round(cur.sExp) !== Math.round(Number(x.secret_expenses_jpy) || 0)) diffs.push("内緒の取引");
+        || Math.round(cur.sExp) !== Math.round(Number(x.secret_expenses_jpy) || 0)) diffs.push("Sラインの取引");
 
       // ② 前の月が古いせいで連鎖しているズレ(この月だけ再集計しても直らない)
       const cascade = Math.round(live.carried) !== savedCarried && expectedCarried === savedCarried;
@@ -13788,12 +13788,12 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
         .lt("transaction_date", monthEndExclusive);
       if (salesError) { setProfitError("売上データの取得に失敗しました"); setCalculating(false); return; }
 
-      /* ★2026-11-08: 内緒の取引(悟専用クラブ向けの販売)は通常の集計から外し、別枠で集計する(2.65参照)。 */
+      /* ★2026-11-08: Sラインの取引(Sライン専用クラブ向けの販売)は通常の集計から外し、別枠で集計する(2.65参照)。 */
       const normalSales = (salesData || []).filter((x) => !isSecretSale(x));
       const secretSalesRows = (salesData || []).filter(isSecretSale);
       const totalSales = normalSales.reduce((sum, x) => sum + (Number(x.total_amount_jpy) || 0), 0);
       const secretSales = secretSalesRows.reduce((sum, x) => sum + (Number(x.total_amount_jpy) || 0), 0);
-      // 内緒の原価: 内緒のクラブに売れた商品の原価(売れた月に計上。商品は仕入れ時の通常集計から外れているため)
+      // 悟の原価: 悟のクラブに売れた商品の原価(売れた月に計上。商品は仕入れ時の通常集計から外れているため)
       const secretCost = secretSalesRows.reduce((sum, sale) => (
         sum + (sale.sale_items || []).reduce((a, si) => a + (si.products ? productCostJpy(si.products) : 0), 0)
       ), 0);
@@ -13825,7 +13825,7 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
           .gte("purchase_date", costStart)
           .lt("purchase_date", monthEndExclusive);
         if (purchasedError) { setProfitError("仕入れ商品の取得に失敗しました"); setCalculating(false); return; }
-        const countable = (purchasedData || []).filter((x) => !isSecretRow(x)).filter(isPurchaseCostCountable); // 内緒の商品は通常の仕入れから除く
+        const countable = (purchasedData || []).filter((x) => !isSecretRow(x)).filter(isPurchaseCostCountable); // Sラインの商品は通常の仕入れから除く
         // ★2026-08-24: 内訳を保存するため、受注とサンプル・在庫を分けて集計する(2.45参照)
         costOrder = countable.filter((p) => p.created_via_sale).reduce((sum, p) => sum + productCostJpy(p), 0);
         costSample = countable.filter((p) => !p.created_via_sale).reduce((sum, p) => sum + productCostJpy(p), 0);
@@ -13870,7 +13870,7 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
         total_general_expenses_jpy: totalExpenses,
         gross_profit_jpy: grossProfit,
         carried_loss_in_jpy: carriedLossIn,
-        // 内緒の取引(2.65)。繰越損失は持ち越さず、月ごとに利益がプラスの分だけを分配の対象にする
+        // Sラインの取引(2.65)。繰越損失は持ち越さず、月ごとに利益がプラスの分だけを分配の対象にする
         secret_sales_jpy: secretSales,
         secret_cost_jpy: secretCost,
         secret_expenses_jpy: secretExpenses,
@@ -13998,16 +13998,16 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
         notes.push("この担当者には立替区分(「立替(◯)」との対応)が設定されていないため、立替精算は含まれていません。「歩合率設定」タブの「立替区分の対応」で設定できます。");
       }
 
-      /* ★2026-11-08: 内緒の取引の利益分配(2.65)。「非公開の取引を持つ担当者(悟)」の請求書にだけ載せる。
-         内緒の利益(売上−売れた商品の原価−内緒の経費)がプラスの月だけ、その50%を取り分とする(円未満四捨五入)。
+      /* ★2026-11-08: Sラインの取引の利益分配(2.65)。「非公開の取引を持つ担当者(悟)」の請求書にだけ載せる。
+         Sラインの利益(売上−売れた商品の原価−Sラインの経費)がプラスの月だけ、その50%を取り分とする(円未満四捨五入)。
          マイナスの月は0円(繰越はしない)。 */
       let secretBase = 0;
       let secretShare = 0;
       if (staffRow.has_private_deals) {
         secretBase = Math.max(0, Math.round(Number(mp.secret_profit_jpy) || 0));
         secretShare = Math.round(secretBase * SECRET_SHARE_PERCENT / 100);
-        if (secretBase > 0) notes.push(`内緒の取引の利益 ${fmtJPY(secretBase)} の${SECRET_SHARE_PERCENT}%(${fmtJPY(secretShare)})を、歩合報酬とは別行で載せます。この金額には消費税を割り戻していません。税務上の扱いは税理士に確認してください。`);
-        else if ((Number(mp.secret_profit_jpy) || 0) < 0) notes.push(`内緒の取引の利益は${fmtJPY(mp.secret_profit_jpy)}(マイナス)のため、取り分は0円です(翌月への繰越はしません)。`);
+        if (secretBase > 0) notes.push(`Sラインの取引の利益 ${fmtJPY(secretBase)} の${SECRET_SHARE_PERCENT}%(${fmtJPY(secretShare)})を、歩合報酬とは別行で載せます。この金額には消費税を割り戻していません。税務上の扱いは税理士に確認してください。`);
+        else if ((Number(mp.secret_profit_jpy) || 0) < 0) notes.push(`Sラインの取引の利益は${fmtJPY(mp.secret_profit_jpy)}(マイナス)のため、取り分は0円です(翌月への繰越はしません)。`);
       }
 
       const total = amount + secretShare + reimbursementTotal;
@@ -14055,7 +14055,7 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
         // 発行時点の税率と、そこから割り戻した消費税額を固定して保存する(2.42参照)
         tax_rate_percent: CONSUMPTION_TAX_RATE_PERCENT,
         commission_tax_jpy: splitTaxIncluded(invoicePreview.amount, CONSUMPTION_TAX_RATE_PERCENT).tax,
-        // 内緒の取引の利益分配(2.65)。対象がない請求書は0で保存する
+        // Sラインの取引の利益分配(2.65)。対象がない請求書は0で保存する
         secret_base_jpy: invoicePreview.secretBase || 0,
         secret_share_percent: (invoicePreview.secretShare || 0) > 0 ? SECRET_SHARE_PERCENT : 0,
         secret_share_jpy: invoicePreview.secretShare || 0,
@@ -14398,7 +14398,7 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
                       入れ忘れ・入れ過ぎに気づけないため、対象の経費を必ず明細で出す(2.39参照) */}
                   {(invoicePreview.secretShare || 0) > 0 && (
                     <p>非公開取引の利益分配({SECRET_SHARE_PERCENT}%): {fmtJPY(invoicePreview.secretShare)}
-                      <span style={{ color: "#8b8578" }}> (内緒の利益 {fmtJPY(invoicePreview.secretBase)} × {SECRET_SHARE_PERCENT}%)</span>
+                      <span style={{ color: "#8b8578" }}> (Sラインの利益 {fmtJPY(invoicePreview.secretBase)} × {SECRET_SHARE_PERCENT}%)</span>
                     </p>
                   )}
                   <p>立替精算: {fmtJPY(invoicePreview.reimbursementTotal || 0)}
