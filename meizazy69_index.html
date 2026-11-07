@@ -1648,9 +1648,7 @@ function HostClubFormModal({ club, onClose, onSave }) {
           <label className="flex items-start gap-2.5 cursor-pointer">
             <input type="checkbox" checked={isPrivate} onChange={(e) => setIsPrivate(e.target.checked)} className="mt-0.5 w-4 h-4 shrink-0" />
             <span className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
-              <span style={{ color: "var(--mz-ink)" }}>Sライン専用(Sラインの取引先)</span><br />
-              オンにすると、このクラブのホスト・訪問・販売・領収書・そこで売れた商品が、悟と公洋以外には見えなくなります
-              {!isNew && !isOwner ? "(登録後の変更は公洋のみ)" : ""}
+              <span style={{ color: "var(--mz-ink)" }}>Sライン専用(Sラインの取引先)</span>
             </span>
           </label>
         )}
@@ -6859,7 +6857,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-08k";
+const BUILD_VERSION = "2026-11-08l";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -10871,9 +10869,7 @@ function CatalogFormModal({ catalog, initialItems, onClose, onSave }) {
           <label className="flex items-start gap-2.5 cursor-pointer">
             <input type="checkbox" checked={isPrivate} onChange={(e) => setIsPrivate(e.target.checked)} className="mt-0.5 w-4 h-4 shrink-0" />
             <span className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
-              <span style={{ color: "var(--mz-ink)" }}>Sライン専用(Sラインのカタログ)</span><br />
-              オンにすると、このカタログが悟と公洋以外の管理画面には出なくなります(共有リンクを知っている相手は従来どおり見られます)
-              {!isNew && !isOwner ? "(登録後の変更は公洋のみ)" : ""}
+              <span style={{ color: "var(--mz-ink)" }}>Sライン専用(Sラインのカタログ)</span>
             </span>
           </label>
         )}
@@ -11782,8 +11778,7 @@ function ExpenseInlineForm({ expense, onSave, onCancel }) {
         <label className="flex items-start gap-2.5 cursor-pointer">
           <input type="checkbox" checked={!!form.is_private} onChange={(e) => setForm((f) => ({ ...f, is_private: e.target.checked }))} className="mt-0.5 w-4 h-4 shrink-0" />
           <span className="text-xs leading-relaxed" style={{ color: "var(--mz-ink-muted)" }}>
-            <span style={{ color: "var(--mz-ink)" }}>Sラインの経費</span><br />
-            Sラインの取引にかかった経費です。オンにすると悟と公洋以外には見えなくなり、通常の月次損益・歩合の計算には入れず、Sラインの取引の利益分配で扱います
+            <span style={{ color: "var(--mz-ink)" }}>Sラインの経費</span>
           </span>
         </label>
       )}
