@@ -76,7 +76,7 @@ const { useState, useEffect, useCallback, useMemo, useRef, createContext, useCon
 /* ★2026-11-07実装: 担当者ごとの権限(2.64参照)。公洋さん(is_owner)だけがウォレット・原価・月次損益・請求書発行を扱える。
    Provider の外(公開カタログ等)で使われても壊れないよう、既定値は「オーナー扱い」にしている(画面側の出し分けは
    あくまで見た目の整理で、実際の保護はDBのRLSが行う)。 */
-const AccessContext = createContext({ isOwner: true, hasPrivateDeals: false, staffId: null });
+const AccessContext = createContext({ isOwner: true, hasPrivateDeals: false, staffId: null, expenseMethod: null });
 const useAccess = () => useContext(AccessContext);
 const SATORU_STAFF_ID = "df24e2c3-c67a-48d8-94aa-bf09f7de56fc"; // 悟(「悟専用」に設定したときの private_to_staff_id)
 /* ★2026-11-08実装: 内緒の取引(悟専用クラブ向けの売上)は、通常の月次損益・歩合から完全に分けて集計し、
@@ -6859,7 +6859,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-08e";
+const BUILD_VERSION = "2026-11-08g";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -11301,6 +11301,12 @@ function ExpenseReimbursementBadge({ status }) {
 /* ★2026-08-24変更: 編集は画面上部のフォームではなく、**その行の中**で開く(2.51参照)。
    一覧が長いと、上部のフォームに飛ばされても「どの経費を編集しているのか」が分からなくなるため。 */
 function ExpenseList({ expenses, editingId, onEdit, onCancelEdit, onSave, onDelete }) {
+  /* ★2026-11-08: 経費は全員が(内緒を除き)すべて見られるが、編集・削除できるのは
+     オーナー、または「自分の立替」「自分の内緒の経費」だけ(DBのRLSもそう制限している。2.64参照)。
+     できない行に押せるボタンを出すと、保存したつもりで何も変わらない状態になるため隠す。 */
+  const { isOwner, staffId, expenseMethod } = useAccess();
+  const canEditExpense = (e) => isOwner
+    || (e.private_to_staff_id ? e.private_to_staff_id === staffId : (!!expenseMethod && e.payment_method === expenseMethod));
   if (expenses.length === 0) {
     return (
       <p className="text-sm text-center py-10" style={{ color: "var(--mz-ink-muted)" }}>
@@ -11372,6 +11378,7 @@ function ExpenseList({ expenses, editingId, onEdit, onCancelEdit, onSave, onDele
             <p className="font-display text-base whitespace-nowrap" style={{ color: "var(--mz-gold-soft)" }}>
               {fmtJPY(e.amount_incl_tax)}
             </p>
+            {canEditExpense(e) && (
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => onEdit(e)}
@@ -11388,6 +11395,7 @@ function ExpenseList({ expenses, editingId, onEdit, onCancelEdit, onSave, onDele
                 削除
               </button>
             </div>
+            )}
           </div>
         </div>
         )
@@ -13354,6 +13362,57 @@ function StaffProfileFormModal({ staff, onClose, onSave }) {
 /* ---- 外注費請求書ページ本体(タブ構成) ---- */
 /* ★2026-11-07実装: オーナー以外(悟さん・裕之さん)用の請求書画面。自分宛の請求書の閲覧・PDF共有だけができる(2.64参照)。
    発行・削除・歩合率・月次損益はオーナー専用のため表示しない(DBのRLSでも自分の行以外は返らない)。 */
+/* ★2026-11-08実装: 「今月いくらもらえるか」の見込み(オーナー以外用)。
+   月次損益(会社の利益)そのものは見せず、DB関数 my_payout_estimate が本人の金額だけを返す(2.66参照)。
+   見込みは公洋が月次損益を集計した時点の数字で、実際の請求書の金額と変わることがある。 */
+function MyPayoutEstimateCard() {
+  const [month, setMonth] = useState(todayISO().slice(0, 7));
+  const [est, setEst] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    setEst(null); setErr(null);
+    (async () => {
+      const { data, error } = await supabase.rpc("my_payout_estimate", { p_month: `${month}-01` });
+      if (cancelled) return;
+      if (error) { setErr("見込み額を取得できませんでした"); return; }
+      setEst(data);
+    })();
+    return () => { cancelled = true; };
+  }, [month]);
+  const Row = ({ label, value }) => (
+    <div className="flex justify-between gap-3"><span>{label}</span><span>{fmtJPY(value)}</span></div>
+  );
+  return (
+    <div className="rounded-xl p-4 mb-5 space-y-2" style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-gold)" }}>
+      <div className="flex items-center justify-between gap-3">
+        <p className="font-display text-base">いま、もらえる見込み</p>
+        <input type="month" value={month} onChange={(e) => e.target.value && setMonth(e.target.value)}
+          className="rounded-lg px-2 py-1 text-xs bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }} />
+      </div>
+      {err && <p className="text-xs" style={{ color: "#f2b8bd" }}>{err}</p>}
+      {!err && !est && <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>読み込み中...</p>}
+      {est && (
+        <>
+          <p className="font-display text-2xl" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(est.total_jpy)}</p>
+          <div className="text-xs space-y-0.5" style={{ color: "var(--mz-ink-muted)" }}>
+            <Row label={`歩合報酬${est.rate_percent != null ? `(${est.rate_percent}%)` : "(歩合率が未設定)"}`} value={est.commission_jpy} />
+            {Number(est.secret_share_jpy) > 0 && <Row label="非公開取引の利益分配" value={est.secret_share_jpy} />}
+            <Row label="立替の精算(未精算分)" value={est.reimbursement_jpy} />
+          </div>
+          {!est.calculated && (
+            <p className="text-xs rounded-lg px-2.5 py-2" style={{ background: "#3a2a1f", color: "#d6a98f" }}>この月はまだ集計されていないため、歩合報酬は0円と表示しています(集計されると反映されます)。</p>
+          )}
+          {est.invoice_issued && (
+            <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>この月の請求書は発行済みです。確定額は下の請求書を見てください(発行済みの立替は、上の見込みには入りません)。</p>
+          )}
+          <p className="text-[11px]" style={{ color: "var(--mz-ink-muted)" }}>※ 見込みです。月次損益の集計時点の数字で、請求書の確定額と変わることがあります。</p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function MyInvoicesPage() {
   const { staffId } = useAccess();
   const [invoices, setInvoices] = useState(null);
@@ -13372,6 +13431,7 @@ function MyInvoicesPage() {
   }, [staffId]);
   return (
     <div className="p-4 md:p-8 max-w-4xl mx-auto">
+      <MyPayoutEstimateCard />
       <p className="text-xs mb-4" style={{ color: "var(--mz-ink-muted)" }}>あなた宛てに発行された請求書の一覧です。</p>
       {error && <p className="text-sm mb-3" style={{ color: "#f2b8bd" }}>{error}</p>}
       {invoices === null
@@ -14753,7 +14813,7 @@ function App() {
   const { session, submitPasscode, signInWithEmail, signOut } = useAuth();
   const [staff, setStaff] = useState(undefined); // undefined = 未確認, null = 未選択
   const [personalLogin, setPersonalLogin] = useState(false); // 個人ログイン(staff.auth_user_idで特定できた)か
-  const [access, setAccess] = useState({ isOwner: false, hasPrivateDeals: false, staffId: null });
+  const [access, setAccess] = useState({ isOwner: false, hasPrivateDeals: false, staffId: null, expenseMethod: null });
 
   // セッションが確定したら、ブラウザ保存済みの担当者選択を読み込む
   // (これにより2回目以降のアクセスでは合言葉・名前選択が自動スキップされる)
@@ -14772,11 +14832,11 @@ function App() {
           localStorage.setItem(STAFF_STORAGE_KEY, JSON.stringify(own));
           /* 権限フラグ(2.64)。列がまだ無い(SQL適用前)ときは、公洋さんのidだけオーナー扱いにする */
           const { data: flags, error: flagErr } = await supabase
-            .from("staff").select("is_owner,has_private_deals").eq("id", own.id).maybeSingle();
+            .from("staff").select("is_owner,has_private_deals,expense_payment_method").eq("id", own.id).maybeSingle();
           if (cancelled) return;
           setAccess(flagErr || !flags
-            ? { isOwner: own.id === OWNER_STAFF_ID, hasPrivateDeals: false, staffId: own.id }
-            : { isOwner: !!flags.is_owner, hasPrivateDeals: !!flags.has_private_deals, staffId: own.id });
+            ? { isOwner: own.id === OWNER_STAFF_ID, hasPrivateDeals: false, staffId: own.id, expenseMethod: null }
+            : { isOwner: !!flags.is_owner, hasPrivateDeals: !!flags.has_private_deals, staffId: own.id, expenseMethod: flags.expense_payment_method || null });
           setPersonalLogin(true);
           setStaff(own);
           return;
