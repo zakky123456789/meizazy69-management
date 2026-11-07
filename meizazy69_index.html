@@ -670,7 +670,9 @@ function TopBar({ title, onMenuClick, staffName, onSwitchStaff, onSignOut, canCh
           </div>
         )}
       </div>
-      {pwOpen && <ChangePasswordModal onClose={() => setPwOpen(false)} />}
+      {/* ヘッダーはbackdrop-filterを使っており、その中のposition:fixedはヘッダー内に閉じ込められるため、
+          モーダルはbody直下へ描画する(2026-11-07)。 */}
+      {pwOpen && ReactDOM.createPortal(<ChangePasswordModal onClose={() => setPwOpen(false)} />, document.body)}
     </header>
   );
 }
@@ -6786,7 +6788,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-07a";
+const BUILD_VERSION = "2026-11-07b";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
