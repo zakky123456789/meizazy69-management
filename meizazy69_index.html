@@ -84,6 +84,13 @@ const SATORU_STAFF_ID = "df24e2c3-c67a-48d8-94aa-bf09f7de56fc"; // 悟(「Sラ�
 const SECRET_SHARE_PERCENT = 50; // Sラインの取り分(%)
 // Sラインの取引の仕分け(handleCalculateMonthlyProfit と checkStaleMonthlyProfits で必ず共通に使うこと)
 const isSecretSale = (sale) => !!(sale && sale.host_clubs && sale.host_clubs.private_to_staff_id);
+/* ★2026-11-10: Sラインのホストクラブ・ホスト・販売には「S」マークを付ける(通常のものと見分けるため)。
+   SMark=画面用のバッジ、sPrefix=<option>など文字しか使えない場所用 */
+function SMark({ show }) {
+  if (!show) return null;
+  return <span className="inline-block text-[10px] font-bold leading-none px-1.5 py-1 rounded mr-1.5 align-middle" style={{ background: "rgba(242,184,189,0.18)", color: "#f2b8bd", border: "1px solid rgba(242,184,189,0.45)" }}>S</span>;
+}
+const sPrefix = (club) => (club && club.private_to_staff_id ? "【S】" : "");
 const isSecretRow = (row) => !!(row && row.private_to_staff_id);
 const OWNER_STAFF_ID = "8e90b96d-1be3-42d9-b7a2-d0ff973ae4e3"; // 公洋(staff.is_owner列がまだ無い時のフォールバック)
 
@@ -727,7 +734,7 @@ function NextVisitsCard() {
     (async () => {
       const { data, error } = await supabase
         .from("visits")
-        .select("id,host_club_id,next_visit_date,host_clubs(name)")
+        .select("id,host_club_id,next_visit_date,host_clubs(name,private_to_staff_id)")
         .gte("next_visit_date", todayISO())
         .order("next_visit_date", { ascending: true });
       if (error) { setError("次回訪問予定の取得に失敗しました"); setRows([]); return; }
@@ -778,7 +785,7 @@ function NextVisitsCard() {
                 style={{ color: "var(--mz-ink)" }}
               >
                 <div className="min-w-0">
-                  <p className="text-sm truncate">{(v.host_clubs || {}).name || "(不明なクラブ)"}</p>
+                  <p className="text-sm truncate"><SMark show={!!(v.host_clubs || {}).private_to_staff_id} />{(v.host_clubs || {}).name || "(不明なクラブ)"}</p>
                   <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>
                     {v.next_visit_date}({weekdayOf(v.next_visit_date)})
                   </p>
@@ -1582,7 +1589,7 @@ function HostClubCard({ club, hostCount, nextVisitDate, onOpen, onEdit, onDelete
     >
       <div className="flex-1 min-w-0">
         <p className="font-display text-base truncate">
-          {club.name}
+          <SMark show={!!club.private_to_staff_id} />{club.name}
           {club.private_to_staff_id && <span className="ml-2 text-[11px] px-2 py-0.5 rounded-full align-middle" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>Sライン専用</span>}
         </p>
         <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
@@ -2335,7 +2342,7 @@ function HostClubDetailPage({ clubId }) {
   const loadAll = useCallback(async () => {
     setError(null);
     const [clubRes, hostsRes, visitsRes, visitSamplesRes, salesRes] = await Promise.all([
-      supabase.from("host_clubs").select("id,name").eq("id", clubId).maybeSingle(),
+      supabase.from("host_clubs").select("id,name,private_to_staff_id").eq("id", clubId).maybeSingle(),
       supabase.from("hosts").select("id,host_club_id,name").eq("host_club_id", clubId).order("name"),
       supabase.from("visits").select("id,host_club_id,visit_date,next_visit_date").eq("host_club_id", clubId).order("visit_date", { ascending: false }),
       supabase
@@ -2489,7 +2496,7 @@ function HostClubDetailPage({ clubId }) {
     <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-6">
       <div>
         <a href="#/host-clubs" className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>← ホストクラブ一覧</a>
-        <h2 className="font-display text-xl mt-1">{club.name}</h2>
+        <h2 className="font-display text-xl mt-1"><SMark show={!!club.private_to_staff_id} />{club.name}</h2>
       </div>
 
       {/* 次回訪問予定ハイライト */}
@@ -2520,7 +2527,7 @@ function HostClubDetailPage({ clubId }) {
                 className="rounded-xl p-3 flex items-center justify-between gap-3"
                 style={{ background: "var(--mz-surface)", border: "1px solid var(--mz-border)" }}
               >
-                <span className="text-sm truncate">{h.name}</span>
+                <span className="text-sm truncate"><SMark show={!!club.private_to_staff_id} />{h.name}</span>
                 <div className="flex items-center gap-2 shrink-0">
                   <button onClick={() => setShippingAddressHost(h)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>配送先</button>
                   <button onClick={() => setModalHost(h)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink-muted)" }}>編集</button>
@@ -6858,7 +6865,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-10b";
+const BUILD_VERSION = "2026-11-10c";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -7967,7 +7974,7 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
             <select value={hostClubId} onChange={(e) => setHostClubId(e.target.value)} required
               className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
               <option value="">選択してください</option>
-              {clubOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {clubOptions.map((c) => <option key={c.id} value={c.id}>{sPrefix(c)}{c.name}</option>)}
             </select>
           </div>
         </div>
@@ -7980,7 +7987,7 @@ function SaleFormModal({ clubs, batches, sale, initialProduct, onClose, onSave }
           <select value={hostId} onChange={(e) => setHostId(e.target.value)} disabled={!hostClubId}
             className="w-full rounded-lg px-3 py-2.5 text-sm bg-transparent disabled:opacity-50" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}>
             <option value="">指定なし(クラブ宛)</option>
-            {hosts.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+            {hosts.map((h) => <option key={h.id} value={h.id}>{sPrefix(clubOptions.find((c) => c.id === hostClubId))}{h.name}</option>)}
           </select>
         </div>
 
@@ -8608,7 +8615,7 @@ function SaleCard({ sale, onDelete, onEdit, onViewReceipt, onConfirmOrder }) {
               </button>
             )}
           </div>
-          <p className="text-sm font-medium truncate">{clubName}{hostName ? ` / ${hostName}` : ""}</p>
+          <p className="text-sm font-medium truncate"><SMark show={isSecretSale(sale)} />{clubName}{hostName ? ` / ${hostName}` : ""}</p>
         </div>
         <div className="flex items-center gap-3 shrink-0">
           <div className="text-right">
@@ -8862,6 +8869,7 @@ function UnorderedListTab({ sales, onConfirmOrder }) {
             saleId: s.id,
             transactionDate: s.transaction_date,
             clubName: s.host_clubs ? s.host_clubs.name : "-",
+            clubSecret: isSecretSale(s),
             hostName: s.hosts ? s.hosts.name : null,
             hostId: s.host_id || null,   // ★2026-09-16: 配送先の取得に使う(2.56参照)
             product: it.products || {},
@@ -8942,7 +8950,7 @@ function UnorderedListTab({ sales, onConfirmOrder }) {
                   {[row.product.category, row.product.size, row.product.product_code ? `No.${row.product.product_code}` : ""].filter(Boolean).join(" / ")}
                 </p>
                 <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
-                  {row.transactionDate} ・ {row.clubName}{row.hostName ? ` / ${row.hostName}` : ""}
+                  {row.transactionDate} ・ <SMark show={row.clubSecret} />{row.clubName}{row.hostName ? ` / ${row.hostName}` : ""}
                 </p>
               </div>
               <div className="flex flex-col items-end gap-1.5 shrink-0">
@@ -9049,6 +9057,7 @@ function ReorderReviewTab({ sales, onDecide }) {
             saleId: s.id,
             transactionDate: s.transaction_date,
             clubName: s.host_clubs ? s.host_clubs.name : "-",
+            clubSecret: isSecretSale(s),
             hostName: s.hosts ? s.hosts.name : null,
             unitPriceJpy: it.unit_price_jpy != null ? Number(it.unit_price_jpy) : null, // 前回の実売価格
             product: it.products || {},
@@ -9108,7 +9117,7 @@ function ReorderReviewTab({ sales, onDecide }) {
                   {[row.product.category, row.product.size, row.product.product_code ? `No.${row.product.product_code}` : ""].filter(Boolean).join(" / ")}
                 </p>
                 <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
-                  {row.transactionDate} ・ {row.clubName}{row.hostName ? ` / ${row.hostName}` : ""}
+                  {row.transactionDate} ・ <SMark show={row.clubSecret} />{row.clubName}{row.hostName ? ` / ${row.hostName}` : ""}
                 </p>
                 {/* ★2026-08-24: 前回いくらで売れたか・サイズ展開を一覧に出す。
                     これを確認するためだけに登録画面を開かなくて済むようにする(2.31参照) */}
@@ -9280,7 +9289,7 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
         className="rounded-lg px-3 py-2 text-sm bg-transparent" style={{ border: "1px solid var(--mz-border)", color: "var(--mz-ink)" }}
       >
         <option value="">すべてのホストクラブ</option>
-        {clubs.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        {clubs.map((c) => <option key={c.id} value={c.id}>{sPrefix(c)}{c.name}</option>)}
       </select>
 
       {filteredSales.length === 0 ? (
@@ -9295,7 +9304,7 @@ function MergeReceiptTab({ sales, clubs, onIssued }) {
               <label key={s.id} className="flex items-center gap-3 px-3 py-2.5 cursor-pointer" style={checked ? { background: "var(--mz-surface-hover)" } : {}}>
                 <input type="checkbox" checked={checked} onChange={() => toggleSelect(s.id)} className="shrink-0" />
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm truncate">{clubName}{hostName ? ` / ${hostName}` : ""}</p>
+                  <p className="text-sm truncate"><SMark show={isSecretSale(s)} />{clubName}{hostName ? ` / ${hostName}` : ""}</p>
                   <p className="text-xs" style={{ color: "var(--mz-ink-muted)" }}>{s.transaction_date} ・ {(s.sale_items || []).length}点</p>
                 </div>
                 <span className="text-sm shrink-0" style={{ color: "var(--mz-gold-soft)" }}>{fmtJPY(s.total_amount_jpy)}</span>
@@ -9719,7 +9728,7 @@ function BatchLinkTab({ batches, onCreateBatch }) {
         const saleIds = [...new Set(linkRows.map((r) => r.sale_id))];
         const { data: salesData } = await supabase
           .from("sales")
-          .select("id,transaction_date,host_clubs(name),hosts(name)")
+          .select("id,transaction_date,host_clubs(name,private_to_staff_id),hosts(name)")
           .in("id", saleIds);
         const saleById = {};
         (salesData || []).forEach((s) => { saleById[s.id] = s; });
@@ -9919,7 +9928,7 @@ function BatchLinkTab({ batches, onCreateBatch }) {
                   </p>
                   {p.linkedSale ? (
                     <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
-                      販売: {p.linkedSale.transaction_date} ・ {p.linkedSale.host_clubs ? p.linkedSale.host_clubs.name : "-"}
+                      販売: {p.linkedSale.transaction_date} ・ {sPrefix(p.linkedSale.host_clubs)}{p.linkedSale.host_clubs ? p.linkedSale.host_clubs.name : "-"}
                       {p.linkedSale.hosts ? ` / ${p.linkedSale.hosts.name}` : ""}
                     </p>
                   ) : null}
@@ -10148,7 +10157,7 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
         const saleIds = [...new Set(linkRows.map((r) => r.sale_id))];
         const { data: salesData } = await supabase
           .from("sales")
-          .select("id,transaction_date,host_clubs(name),hosts(name)")
+          .select("id,transaction_date,host_clubs(name,private_to_staff_id),hosts(name)")
           .in("id", saleIds);
         const saleById = {};
         (salesData || []).forEach((s) => { saleById[s.id] = s; });
@@ -10250,7 +10259,7 @@ function PendingPurchasesTab({ batches, clubs, onCreateBatch, onSaveSale }) {
                 </p>
                 {p.linkedSale ? (
                   <p className="text-xs mt-0.5" style={{ color: "var(--mz-ink-muted)" }}>
-                    紐付け先: {p.linkedSale.transaction_date} ・ {p.linkedSale.host_clubs ? p.linkedSale.host_clubs.name : "-"}
+                    紐付け先: {p.linkedSale.transaction_date} ・ {sPrefix(p.linkedSale.host_clubs)}{p.linkedSale.host_clubs ? p.linkedSale.host_clubs.name : "-"}
                     {p.linkedSale.hosts ? ` / ${p.linkedSale.hosts.name}` : ""}
                   </p>
                 ) : (
@@ -10310,9 +10319,9 @@ function SalesPage() {
     const [salesRes, clubsRes, batchesRes] = await Promise.all([
       supabase
         .from("sales")
-        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name),hosts(name),receipts!fk_sales_receipt_id(receipt_number,recipient_name,honorific,memo),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,selling_price_jpy,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
+        .select("id,transaction_date,host_club_id,host_id,receipt_id,total_amount_jpy,host_clubs(name,private_to_staff_id),hosts(name),receipts!fk_sales_receipt_id(receipt_number,recipient_name,honorific,memo),sale_items(id,product_id,unit_price_jpy,subtotal_jpy,profit_jpy,is_new_purchase,order_confirmed,reorder_candidate,reorder_decided,products(product_name,size,product_code,type,sample_purpose,category,product_image_url,product_url,size_options,selling_price_jpy,purchase_amount_cny,shipping_cny,fee_cny,domestic_shipping_cny,purchase_amount_jpy,shipping_jpy,fee_jpy,domestic_shipping_jpy))")
         .order("transaction_date", { ascending: false }),
-      supabase.from("host_clubs").select("id,name").order("name"),
+      supabase.from("host_clubs").select("id,name,private_to_staff_id").order("name"),
       supabase.from("purchase_batches").select("id,purchase_date,name,total_items,total_shipping_cny,total_fee_cny,per_item_shipping_cny,per_item_fee_cny,bd_order_no,cost_source,total_shipping_jpy,total_fee_jpy,per_item_shipping_jpy,per_item_fee_jpy").order("purchase_date", { ascending: false }),
     ]);
     // sales取得が失敗しても、同時に取得できたクラブ・ロットは反映する(販売登録モーダルを使えなくしないため)
