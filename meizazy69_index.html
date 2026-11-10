@@ -6858,7 +6858,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-08m";
+const BUILD_VERSION = "2026-11-10b";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -12779,7 +12779,8 @@ function staffBankLine(staff) {
 
 function contractorInvoiceTotal(invoice) {
   // ★2026-11-08: Sラインの取引の利益分配(2.65)も合計に含める(列が無い古い行は0扱い)
-  return (Number(invoice.amount_jpy) || 0) + (Number(invoice.reimbursement_jpy) || 0) + (Number(invoice.secret_share_jpy) || 0);
+  return (Number(invoice.amount_jpy) || 0) + (Number(invoice.reimbursement_jpy) || 0) + (Number(invoice.secret_share_jpy) || 0)
+    + (Number(invoice.cost_adjustment_jpy) || 0); // ★2026-11-10: 仕入れ原価の調整(2.72)
 }
 
 /* 電子帳簿保存法の検索要件(取引年月日・取引金額・取引先)に合わせ、領収書(3.7)と同じ並びにする。
@@ -12809,6 +12810,15 @@ function contractorInvoiceRows(invoice, expenses) {
       amount: Number(invoice.secret_share_jpy) || 0,
     });
   }
+  // ★2026-11-10: 仕入れ原価の調整(2.72)。歩合報酬と同じく課税対象。マイナスの月もある
+  if ((Number(invoice.cost_adjustment_jpy) || 0) !== 0) {
+    rows.push({
+      key: "costadj",
+      label: "仕入れ原価の調整〔税込〕",
+      note: "過去の月の仕入れ原価の計上を修正した差額",
+      amount: Number(invoice.cost_adjustment_jpy) || 0,
+    });
+  }
   (expenses || []).forEach((e) => {
     rows.push({
       key: `exp-${e.id}`,
@@ -12824,7 +12834,7 @@ function ContractorInvoiceDocument({ invoice, staff, expenses }) {
   const rows = contractorInvoiceRows(invoice, expenses);
   const taxRate = contractorInvoiceTaxRate(invoice);
   // 課税対象は歩合報酬のみ(立替経費は対象外)。2.42参照
-  const taxSplit = splitTaxIncluded(invoice.amount_jpy, taxRate);
+  const taxSplit = splitTaxIncluded((Number(invoice.amount_jpy) || 0) + (Number(invoice.cost_adjustment_jpy) || 0), taxRate);
   const addressLines = staffAddressLines(staff);
   const bankLine = staffBankLine(staff);
   return (
@@ -12882,6 +12892,9 @@ function ContractorInvoiceDocument({ invoice, staff, expenses }) {
         <div className="flex justify-between" style={{ color: "#888" }}>
           <span className="pl-3">うち消費税({taxRate}%)</span><span>{fmtJPY(taxSplit.tax)}</span>
         </div>
+        {(Number(invoice.cost_adjustment_jpy) || 0) !== 0 && (
+          <div className="flex justify-between"><span>仕入れ原価の調整〔税込〕</span><span>{fmtJPY(invoice.cost_adjustment_jpy)}</span></div>
+        )}
         {(Number(invoice.secret_share_jpy) || 0) > 0 && (
           <div className="flex justify-between"><span>非公開取引の利益分配</span><span>{fmtJPY(invoice.secret_share_jpy)}</span></div>
         )}
@@ -12908,7 +12921,7 @@ function ContractorInvoiceDocument({ invoice, staff, expenses }) {
 /* 印刷用の完全に独立した静的HTML(アプリ本体を一切含まない)。buildReceiptPrintHtmlと同じ方針。 */
 function buildContractorInvoicePrintHtml(invoice, staff, expenses) {
   const taxRate = contractorInvoiceTaxRate(invoice);
-  const taxSplit = splitTaxIncluded(invoice.amount_jpy, taxRate);
+  const taxSplit = splitTaxIncluded((Number(invoice.amount_jpy) || 0) + (Number(invoice.cost_adjustment_jpy) || 0), taxRate);
   const rows = contractorInvoiceRows(invoice, expenses).map((r) => `
     <tr style="border-bottom:1px solid #eee;">
       <td style="padding:4px 0;">${escapeHtml(r.label)}${r.note ? `<span style="color:#888;"> … ${escapeHtml(r.note)}</span>` : ""}</td>
@@ -12973,6 +12986,7 @@ function buildContractorInvoicePrintHtml(invoice, staff, expenses) {
     <div style="display:flex; justify-content:space-between;"><span>歩合報酬(税込)</span><span>${escapeHtml(fmtJPY(invoice.amount_jpy))}</span></div>
     <div style="display:flex; justify-content:space-between; color:#888;"><span style="padding-left:12px;">うち税抜金額</span><span>${escapeHtml(fmtJPY(taxSplit.excluded))}</span></div>
     <div style="display:flex; justify-content:space-between; color:#888;"><span style="padding-left:12px;">うち消費税(${escapeHtml(taxRate)}%)</span><span>${escapeHtml(fmtJPY(taxSplit.tax))}</span></div>
+    ${(Number(invoice.cost_adjustment_jpy) || 0) !== 0 ? `<div style="display:flex; justify-content:space-between;"><span>仕入れ原価の調整〔税込〕</span><span>${escapeHtml(fmtJPY(invoice.cost_adjustment_jpy))}</span></div>` : ""}
     ${(Number(invoice.secret_share_jpy) || 0) > 0 ? `<div style="display:flex; justify-content:space-between;"><span>非公開取引の利益分配</span><span>${escapeHtml(fmtJPY(invoice.secret_share_jpy))}</span></div>` : ""}
     <div style="display:flex; justify-content:space-between;"><span>立替経費精算(${(expenses || []).length}件・消費税対象外)</span><span>${escapeHtml(fmtJPY(invoice.reimbursement_jpy))}</span></div>
     <div style="display:flex; justify-content:space-between; border-top:1px solid #ccc; margin-top:4px; padding-top:4px; font-weight:600;">
@@ -13185,11 +13199,12 @@ function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete, onViewInvoi
         const commission = Number(inv.amount_jpy) || 0;
         const reimbursement = Number(inv.reimbursement_jpy) || 0;
         const secretShare = Number(inv.secret_share_jpy) || 0;
-        const totalAmount = commission + reimbursement + secretShare;
+        const costAdj = Number(inv.cost_adjustment_jpy) || 0;
+        const totalAmount = commission + reimbursement + secretShare + costAdj;
         // 消費税は歩合報酬のみが対象(2.42参照)。発行時に保存した税額があればそれを正とする
         const invoiceTax = inv.commission_tax_jpy != null
           ? Number(inv.commission_tax_jpy)
-          : splitTaxIncluded(commission, contractorInvoiceTaxRate(inv)).tax;
+          : splitTaxIncluded(commission + costAdj, contractorInvoiceTaxRate(inv)).tax;
         return (
           <div
             key={inv.id}
@@ -13215,9 +13230,10 @@ function ContractorInvoiceList({ invoices, onUpdateStatus, onDelete, onViewInvoi
                 <span>適用歩合率: {inv.rate_percent}%</span>
                 <span>発行日: {inv.issue_date}</span>
               </div>
-              {(reimbursement > 0 || secretShare > 0) && (
+              {(reimbursement > 0 || secretShare > 0 || costAdj !== 0) && (
                 <p className="text-xs mt-1.5" style={{ color: "var(--mz-ink-muted)" }}>
                   内訳: 歩合報酬 {fmtJPY(commission)}(うち消費税 {fmtJPY(invoiceTax)})
+                  {costAdj !== 0 ? ` ${costAdj > 0 ? "＋" : "−"} 仕入れ原価の調整 ${fmtJPY(Math.abs(costAdj))}` : ""}
                   {secretShare > 0 ? ` ＋ 非公開取引の利益分配 ${fmtJPY(secretShare)}` : ""}
                   {reimbursement > 0 ? ` ＋ 立替精算 ${fmtJPY(reimbursement)}` : ""}
                 </p>
@@ -13447,7 +13463,7 @@ function MyInvoicesPage() {
   useEffect(() => {
     (async () => {
       let q = supabase.from("contractor_invoices")
-        .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,tax_rate_percent,commission_tax_jpy,secret_base_jpy,secret_share_percent,secret_share_jpy,issue_date,status,staff(name)")
+        .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,tax_rate_percent,commission_tax_jpy,secret_base_jpy,secret_share_percent,secret_share_jpy,cost_adjustment_jpy,issue_date,status,staff(name)")
         .order("target_month", { ascending: false });
       if (staffId) q = q.eq("staff_id", staffId);
       const { data, error } = await q;
@@ -13484,6 +13500,14 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
   // ★2026-08-17実装: 保存済みの月次損益が、いまの実データと食い違っている月の一覧
   //   { [monthly_profits.id]: { diffs: ["仕入原価",...], currentGross, savedGross } }(2.36参照)
   const [staleProfits, setStaleProfits] = useState({});
+  /* ★2026-11-10: 請求書発行済みの月に残っている「後からSラインになった商品」の仕入れ代(2.71参照)。公洋への警告用 */
+  const [lockedPrivateCost, setLockedPrivateCost] = useState([]);
+  useEffect(() => {
+    if (!autoRecalc) return; // オーナーの画面のみ(autoRecalcはオーナー画面でだけ付く)
+    supabase.rpc("pending_cost_adjustments").then(({ data, error }) => {
+      if (!error && Array.isArray(data)) setLockedPrivateCost(data);
+    });
+  }, [autoRecalc]);
   // 通信エラー・取得件数上限などで鮮度を判定できなかった場合(警告が無い=最新、と誤解させないため)
   const [staleCheckError, setStaleCheckError] = useState(false);
   // ★2026-08-24: 月次損益の内訳表示(2.50参照)
@@ -13702,7 +13726,7 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
     setInvoiceError(null);
     const { data, error } = await supabase
       .from("contractor_invoices")
-      .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,tax_rate_percent,commission_tax_jpy,secret_base_jpy,secret_share_percent,secret_share_jpy,issue_date,status,staff(name)")
+      .select("id,invoice_number,staff_id,target_month,monthly_profit_id,commission_base_jpy,rate_percent,amount_jpy,reimbursement_jpy,tax_rate_percent,commission_tax_jpy,secret_base_jpy,secret_share_percent,secret_share_jpy,cost_adjustment_jpy,issue_date,status,staff(name)")
       .order("target_month", { ascending: false })
       .order("created_at", { ascending: false });
     /* ★2026-08-22: 列不足(42703)は「マイグレーション未実行」が原因と断定できるため、
@@ -14006,7 +14030,20 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
         else if ((Number(mp.secret_profit_jpy) || 0) < 0) notes.push(`Sラインの取引の利益は${fmtJPY(mp.secret_profit_jpy)}(マイナス)のため、取り分は0円です(翌月への繰越はしません)。`);
       }
 
-      const total = amount + secretShare + reimbursementTotal;
+      /* ★2026-11-10: 仕入れ原価の調整(2.72)。請求書発行済みの月に仕入れた商品が後からSラインで売れた分の、歩合の差額。
+         計算はDB(cost_adjustment_for)。取得できなければ0として進める(発行は止めない) */
+      let costAdj = { amount_jpy: 0, ids: [], months: [] };
+      {
+        const { data: adjData, error: adjErr } = await supabase.rpc("cost_adjustment_for", { p_staff: issueStaffId, p_month: `${issueTargetMonth}-01` });
+        if (!adjErr && adjData) costAdj = adjData;
+        else if (adjErr && adjErr.code !== "PGRST202") notes.push("⚠️ 仕入れ原価の調整を取得できませんでした。調整なしで計算しています。");
+      }
+      const costAdjAmount = Number(costAdj.amount_jpy) || 0;
+      if (costAdjAmount !== 0) {
+        notes.push(`仕入れ原価の調整 ${costAdjAmount > 0 ? "＋" : "−"}${fmtJPY(Math.abs(costAdjAmount))} を載せます(${(costAdj.months || []).map((x) => `${String(x.month).slice(0, 7)}分`).join("・")})。`);
+      }
+
+      const total = amount + costAdjAmount + secretShare + reimbursementTotal;
       if (total <= 0) {
         setInvoicePreview({
           error: `歩合報酬・立替精算ともに¥0のため、この月に請求できる金額がありません。\n${notes.join("\n")}`,
@@ -14015,7 +14052,7 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
       }
 
       setInvoicePreview({
-        monthlyProfit: mp, rate, amount, commissionBase, carriedLoss, secretBase, secretShare,
+        monthlyProfit: mp, rate, amount, commissionBase, carriedLoss, secretBase, secretShare, costAdjAmount, costAdjIds: costAdj.ids || [],
         advanceMethod, reimbursementRows, reimbursementTotal, total, notes,
       });
     } finally {
@@ -14050,7 +14087,9 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
         reimbursement_jpy: invoicePreview.reimbursementTotal || 0,
         // 発行時点の税率と、そこから割り戻した消費税額を固定して保存する(2.42参照)
         tax_rate_percent: CONSUMPTION_TAX_RATE_PERCENT,
-        commission_tax_jpy: splitTaxIncluded(invoicePreview.amount, CONSUMPTION_TAX_RATE_PERCENT).tax,
+        commission_tax_jpy: splitTaxIncluded(invoicePreview.amount + (invoicePreview.costAdjAmount || 0), CONSUMPTION_TAX_RATE_PERCENT).tax,
+        cost_adjustment_jpy: invoicePreview.costAdjAmount || 0,
+        cost_adjustment_ids: invoicePreview.costAdjIds || [],
         // Sラインの取引の利益分配(2.65)。対象がない請求書は0で保存する
         secret_base_jpy: invoicePreview.secretBase || 0,
         secret_share_percent: (invoicePreview.secretShare || 0) > 0 ? SECRET_SHARE_PERCENT : 0,
@@ -14169,6 +14208,14 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
 
   return (
     <div className="px-4 md:px-6 py-6 md:py-8 max-w-5xl mx-auto w-full space-y-5">
+      {lockedPrivateCost.length > 0 && (
+        <div className="rounded-lg p-3 text-xs leading-relaxed" style={{ background: "rgba(242,184,189,0.10)", border: "1px solid rgba(242,184,189,0.35)", color: "var(--mz-ink)" }}>
+          <p className="font-medium mb-1">請求書を発行済みの月の仕入れ原価の調整が、まだ請求書に反映されていません</p>
+          {lockedPrivateCost.map((x) => (
+            <p key={x.target_month}>{String(x.target_month).slice(0, 7)}:{x.items}点・{fmtJPY(x.cost_jpy)}(次に発行する請求書に「仕入れ原価の調整」として自動で載ります)</p>
+          ))}
+        </div>
+      )}
       <div className="flex gap-2 flex-wrap">
         {CONTRACTOR_TABS.map((t) => (
           <button
@@ -14392,6 +14439,9 @@ function ContractorInvoicesPage({ autoRecalc = false }) {
 
                   {/* ★2026-08-22: 立替精算の内訳。金額だけ出すと「何が入っているか」が分からず、
                       入れ忘れ・入れ過ぎに気づけないため、対象の経費を必ず明細で出す(2.39参照) */}
+                  {(invoicePreview.costAdjAmount || 0) !== 0 && (
+                    <p>仕入れ原価の調整(税込): {fmtJPY(invoicePreview.costAdjAmount)}</p>
+                  )}
                   {(invoicePreview.secretShare || 0) > 0 && (
                     <p>非公開取引の利益分配({SECRET_SHARE_PERCENT}%): {fmtJPY(invoicePreview.secretShare)}
                       <span style={{ color: "#8b8578" }}> (Sラインの利益 {fmtJPY(invoicePreview.secretBase)} × {SECRET_SHARE_PERCENT}%)</span>
