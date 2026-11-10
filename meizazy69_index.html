@@ -1590,7 +1590,6 @@ function HostClubCard({ club, hostCount, nextVisitDate, onOpen, onEdit, onDelete
       <div className="flex-1 min-w-0">
         <p className="font-display text-base truncate">
           <SMark show={!!club.private_to_staff_id} />{club.name}
-          {club.private_to_staff_id && <span className="ml-2 text-[11px] px-2 py-0.5 rounded-full align-middle" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>Sライン専用</span>}
         </p>
         <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
           <span>所属ホスト: {hostCount}名</span>
@@ -6865,7 +6864,7 @@ function ProductsPage() {
 /* ★2026-08-22追加: 配信中のHTMLがどのビルドかを画面左下に表示するための版数(2.41参照)。
    GitHub Pagesのキャッシュ等で「差し替えたつもりのファイルがまだ古い」ケースを、
    画面を見るだけで切り分けられるようにする。**コードを変更したら必ずこの値も更新すること。** */
-const BUILD_VERSION = "2026-11-10c";
+const BUILD_VERSION = "2026-11-10d";
 
 /* ★2026-09-15追加: 直接支払いのJPY欄に添える注記。
    従来は常に「仕入れ日の月の経費として計上されます」と書いていたが、
@@ -10707,8 +10706,7 @@ function CatalogCard({ catalog, itemCount, onEdit, onDuplicate, onDelete, onShar
     >
       <div className="flex-1 min-w-0">
         <p className="font-display text-base truncate">
-          {catalog.name}
-          {catalog.private_to_staff_id && <span className="ml-2 text-[11px] px-2 py-0.5 rounded-full align-middle" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>Sライン専用</span>}
+          <SMark show={!!catalog.private_to_staff_id} />{catalog.name}
         </p>
         <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
           <span>掲載商品: {itemCount}点</span>
@@ -11369,7 +11367,7 @@ function ExpenseList({ expenses, editingId, onEdit, onCancelEdit, onSave, onDele
             )}
             <div className="flex items-center gap-3 mt-1 flex-wrap text-xs" style={{ color: "var(--mz-ink-muted)" }}>
               <span>{e.payment_method}</span>
-              {e.private_to_staff_id && <span className="px-1.5 py-0.5 rounded-full" style={{ background: "rgba(242,184,189,0.15)", color: "#f2b8bd" }}>Sライン</span>}
+              <SMark show={!!e.private_to_staff_id} />
               {e.tax_amount_jpy != null && <span>消費税: {fmtJPY(e.tax_amount_jpy)}</span>}
               {e.invoice_number && <span>請求書番号: {e.invoice_number}</span>}
               {e.invoice_registration_number && <span>登録番号: {e.invoice_registration_number}</span>}
